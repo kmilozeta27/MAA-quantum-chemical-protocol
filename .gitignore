@@ -1,0 +1,25 @@
+# === runs/: ignorar todo por defecto, permitir solo lo esencial ===
+runs/**/*
+
+# permitir navegar los directorios
+!runs/**/
+
+# permitir archivos de texto que SON el registro científico
+!runs/**/*.inp
+!runs/**/*.out
+!runs/**/*.xyz
+!runs/**/*.csv
+!runs/**/*.json
+!runs/**/*.toml
+!runs/**/*.energies
+
+# === ruido general de Python / entorno ===
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+*.egg-info/
+
+# === sistema ===
+.DS_Store
+*.log
