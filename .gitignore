@@ -1,9 +1,7 @@
 # === runs/: ignorar todo por defecto, permitir solo lo esencial ===
 runs/**/*
-
 # permitir navegar los directorios
 !runs/**/
-
 # permitir archivos de texto que SON el registro científico
 !runs/**/*.inp
 !runs/**/*.out
@@ -12,14 +10,18 @@ runs/**/*
 !runs/**/*.json
 !runs/**/*.toml
 !runs/**/*.energies
-
+# excluir archivos ORCA temporales (re-ignorar después del wildcard)
+runs/**/*_trj.xyz
+runs/**/*.scfgrad.inp
+# === Obsidian ===
+.obsidian/
+**/.obsidian/
 # === ruido general de Python / entorno ===
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
 .venv/
 *.egg-info/
-
 # === sistema ===
 .DS_Store
 *.log

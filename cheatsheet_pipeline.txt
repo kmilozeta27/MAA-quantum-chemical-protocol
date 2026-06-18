@@ -1,0 +1,110 @@
+# Pipeline completo desde cero (carga -1, 3 confs por defecto)
+python pipeline.py --mol molecules/mglyval.xyz --charge -1
+
+# Especificar número de confórmeros
+python pipeline.py --mol molecules/mglyval.xyz --charge -1 --nconf 5
+
+# Molécula neutra
+python pipeline.py --mol molecules/mol_A.xyz --charge 0
+
+# Retomar desde OPT (CREST ya hecho)
+python pipeline.py --mol molecules/mglyval.xyz --charge -1 --start opt
+
+# Retomar desde NumFreq (detecta restart automáticamente si hay freq_D*.res.Gradients)
+python pipeline.py --mol molecules/mglyval.xyz --charge -1 --start numfreq
+
+# Retomar desde SP
+python pipeline.py --mol molecules/mglyval.xyz --charge -1 --start sp
+
+# Retomar desde TDDFT
+python pipeline.py --mol molecules/mglyval.xyz --charge -1 --start tddft --nconf 3
+
+# Modo simple: declarar cores totales disponibles
+# (OPT/SP/TDDFT usan todos; NumFreq usa min(--cores, 6))
+python pipeline.py --mol molecules/mglyval.xyz --charge -1 --cores 8
+
+# Correr dos pipelines en paralelo sin que compitan (7+7 = 14 cores)
+python pipeline.py --mol molecules/mol_A.xyz --charge -1 --cores 7 &
+python pipeline.py --mol molecules/mol_B.xyz --charge -1 --cores 7 &
+
+# Control fino por etapa
+python pipeline.py --mol molecules/mglyval.xyz --charge -1 \
+    --nprocs 4 --maxcore 3500 \
+    --nprocs-numfreq 6 --maxcore-numfreq 2300
+
+# Solo cambiar memoria (útil si hay presión de RAM)
+python pipeline.py --mol molecules/mglyval.xyz --charge -1 \
+    --maxcore 2500 --maxcore-numfreq 1800
+
+    # Expand con defaults (skip=3, window=17, threshold=3.0 kcal/mol, 3 OPTs en paralelo)
+python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest
+
+# Expand personalizado: saltar los 5 primeros confs, explorar 20 más
+python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest \
+    --crest-skip 5 --crest-window 20
+
+# Cambiar umbral de filtro ΔE
+python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest \
+    --dft-threshold 2.0
+
+# Controlar paralelismo del expand: 3 OPTs × 4 cores = 12 cores totales
+python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest \
+    --cores 12 --opt-parallel 3
+
+# Retomar expand desde NumFreq (OPTs del expand ya hechos)
+python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest \
+    --start numfreq
+
+# Expand completo con todos los parámetros explícitos
+python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest \
+    --crest-skip 3 --crest-window 17 \
+    --dft-threshold 3.0 \
+    --opt-parallel 3 \
+    --cores 12
+
+# Ver estado de todos los runs
+python pipeline.py --status
+
+# Seguir el log en tiempo real de un run específico
+tail -f runs/mglyval/pipeline.log
+
+# Monitorear uso de cores
+htop
+
+# Ver todos los procesos ORCA activos
+ps aux | grep orca
+
+# Ver cuántos confórmeros generó CREST
+python3 -c "from ase.io import read; print(len(read('runs/mglyval/01_crest/crest_conformers.xyz', index=':')))"
+
+# M-Gly:Val, carga -1, flujo completo estándar
+python pipeline.py --mol molecules/mglyval.xyz --charge -1 --nconf 3
+
+# Dos moléculas en paralelo con 7 cores cada una
+nohup python pipeline.py --mol molecules/mglyval.xyz --charge -1 --cores 7 \
+    > mglyval.log 2>&1 &
+nohup python pipeline.py --mol molecules/mol_B.xyz --charge -1 --cores 7 \
+    > mol_B.log 2>&1 &
+
+# Expand para explorar la inversión energética GFN2→DFT
+python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest \
+    --crest-skip 3 --crest-window 17 --dft-threshold 3.0 \
+    --opt-parallel 3 --cores 12 --start opt
+
+    # Un estado, análisis completo
+python results_collector.py --mol mglyval
+
+# Exportar con las 4 hojas Excel
+python results_collector.py --mol mglyval --export xlsx
+
+# Espectro multi-temperatura
+python results_collector.py --mol mglyval --plot
+
+# Comparar todos los estados de protonación
+python results_collector.py --compare
+
+# Con referencia energética y exportación
+python results_collector.py --compare --ref mglyval_neutral --export xlsx --plot
+
+# Zoom en rango UV-A/UVB relevante para MAAs
+python results_collector.py --mol mglyval --plot --xmin 280 --xmax 420
