@@ -1,0 +1,1 @@
+The pipeline scripts presents several modes for CREST, depending on the conformational space diversity and energy landscape. It also presents several functions to recover unfinished calculations and edit the number of parallel runs, cores and maxcore. Results_collector summarizes the data produced by the pipeline script into several formats, depending on the need. 
