@@ -1327,6 +1327,12 @@ Ejemplos (modo expansión conformacional):
             nprocs_per_expand_job = max(1, c // p)
             total_parallel_cores = p * nprocs_per_expand_job
 
+            # FIX: propagar nprocs_per_expand_job al global nprocs para que los
+            # stages secuenciales (TDDFT, NUMFREQ) usen el mismo valor por job
+            # que los stages paralelos (expand-OPT, SP). Sin esta línea, NPROCS
+            # quedaba en el default del módulo (4) aunque se pasara --cores 12.
+            nprocs = nprocs_per_expand_job
+
             # maxcore se calcula para no saturar la RAM total dividiendo por los cores totales activos
             maxcore = max(500, (MAX_RAM_MB * 85 // 100) // max(total_parallel_cores, 1))
 
