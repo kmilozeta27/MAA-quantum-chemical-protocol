@@ -17,7 +17,7 @@ Uso (modo expansión conformacional, --expand-crest):
 
     python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest
     python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest \\
-        --crest-skip 3 --crest-window 17 --dft-threshold 3.0 --opt-parallel 3
+        --crest-skip 3 --crest-window 17 --dft-threshold 3.0 --parallel 3
     python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest \\
         --start numfreq   # salta expand-OPT, retoma desde NUMFREQ
 """
@@ -623,45 +623,97 @@ def stage_numfreq(opt_dirs: list[Path], mol_dir: Path,
 
 
 def stage_sp(freq_dirs: list[Path], mol_dir: Path,
-             charge: int, log: logging.Logger) -> list[Path]:
+             charge: int, log: logging.Logger,
+             batch_size: int = 1,
+             nprocs_per_job: Optional[int] = None,
+             maxcore_per_job: Optional[int] = None) -> list[Path]:
     """
     Etapa 04_sp: single point de alta precisión.
     Devuelve directorios sp exitosos.
+
+    batch_size=1  → modo secuencial (pipeline normal, usa todos los cores del job).
+    batch_size>1  → modo paralelo por lotes (--expand-crest), análogo al
+                    ThreadPoolExecutor de stage_expand_opt.
+    nprocs_per_job / maxcore_per_job sobreescriben los globals NPROCS / MAXCORE
+    para cada worker paralelo; si son None se usan los globals vigentes.
     """
-    log.info(f"[SP] single point para {len(freq_dirs)} confórmeros")
+    _nprocs  = nprocs_per_job  if nprocs_per_job  is not None else NPROCS
+    _maxcore = maxcore_per_job if maxcore_per_job is not None else MAXCORE
+
+    log.info(f"[SP] single point para {len(freq_dirs)} confórmeros "
+             f"(batch={batch_size}, {_nprocs} cores/job)")
     template   = get_template("sp")
     successful = []
 
-    for freq_dir in freq_dirs:
-        conf_id  = freq_dir.name
-        opt_xyz  = resolve_opt_xyz(freq_dir)
+    if batch_size <= 1:
+        # ── Modo secuencial (pipeline normal) ────────────────────────
+        for freq_dir in freq_dirs:
+            conf_id  = freq_dir.name
+            opt_xyz  = resolve_opt_xyz(freq_dir)
 
-        if opt_xyz is None:
-            log.warning(f"[SP] {conf_id}: no se encontró opt_opt.xyz ni opt.xyz — saltando")
-            continue
-
-        sp_dir = mol_dir / "04_sp" / conf_id
-        sp_dir.mkdir(parents=True, exist_ok=True)
-
-        out_file = sp_dir / "sp.out"
-        inp_file = sp_dir / "sp.inp"
-
-        # Solo copiar geometría si el cálculo no está ya completo
-        if not check_success(out_file):
-            if not safe_copy(opt_xyz, sp_dir / "opt_opt.xyz"):
-                log.warning(f"[SP] {conf_id}: error copiando opt_opt.xyz — saltando")
+            if opt_xyz is None:
+                log.warning(f"[SP] {conf_id}: no se encontró opt_opt.xyz ni opt.xyz — saltando")
                 continue
-            inp_text = template.format(
-                CHARGE=charge, MULT=MULT,
-                NPROCS=NPROCS, MAXCORE=MAXCORE,
-            )
-            inp_file.write_text(inp_text)
 
-        ok = run_orca(inp_file, out_file, log)
-        if ok:
-            successful.append(sp_dir)
-        else:
-            log.warning(f"[SP] {conf_id} falló — excluido")
+            sp_dir = mol_dir / "04_sp" / conf_id
+            sp_dir.mkdir(parents=True, exist_ok=True)
+
+            out_file = sp_dir / "sp.out"
+            inp_file = sp_dir / "sp.inp"
+
+            # Solo copiar geometría si el cálculo no está ya completo
+            if not check_success(out_file):
+                if not safe_copy(opt_xyz, sp_dir / "opt_opt.xyz"):
+                    log.warning(f"[SP] {conf_id}: error copiando opt_opt.xyz — saltando")
+                    continue
+                inp_text = template.format(
+                    CHARGE=charge, MULT=MULT,
+                    NPROCS=_nprocs, MAXCORE=_maxcore,
+                )
+                inp_file.write_text(inp_text)
+
+            ok = run_orca(inp_file, out_file, log)
+            if ok:
+                successful.append(sp_dir)
+            else:
+                log.warning(f"[SP] {conf_id} falló — excluido")
+
+    else:
+        # ── Modo paralelo por lotes (--expand-crest) ─────────────────
+        n_lotes = -(-len(freq_dirs) // batch_size)   # ceiling division
+        log.info(f"[SP] {len(freq_dirs)} SPs en {n_lotes} lote(s) de ≤{batch_size} "
+                 f"(CPUs activos/lote: {batch_size * _nprocs})")
+
+        tasks_all = [
+            {
+                "conf_id":  d.name,
+                "freq_dir": d,
+                "charge":   charge,
+                "template": template,
+                "nprocs":   _nprocs,
+                "maxcore":  _maxcore,
+                "mol_dir":  mol_dir,
+                "log":      log,
+            }
+            for d in freq_dirs
+        ]
+
+        for b_start in range(0, len(tasks_all), batch_size):
+            batch    = tasks_all[b_start : b_start + batch_size]
+            lote_num = b_start // batch_size + 1
+            ids      = [t["conf_id"] for t in batch]
+            log.info(f"[SP] ── Lote {lote_num}/{n_lotes}: {ids}")
+
+            with ThreadPoolExecutor(max_workers=len(batch)) as pool:
+                futures = {pool.submit(_sp_worker, t): t["conf_id"] for t in batch}
+                for fut in as_completed(futures):
+                    res = fut.result()
+                    tag = "✓" if res["success"] else "✗"
+                    log.info(f"[SP]   {tag} {res['conf_id']}  ({res['elapsed']:.1f} min)")
+                    if res["success"] and res["sp_dir"] is not None:
+                        successful.append(res["sp_dir"])
+                    else:
+                        log.warning(f"[SP] {res['conf_id']} falló — excluido")
 
     log.info(f"[SP] {len(successful)}/{len(freq_dirs)} completados")
     return successful
@@ -812,6 +864,61 @@ def _opt_worker(task: dict) -> dict:
         "energy":   energy,
         "success":  success,
         "elapsed":  elapsed,
+    }
+
+
+def _sp_worker(task: dict) -> dict:
+    """
+    Worker para un único SP, diseñado para ejecutarse en un hilo de
+    ThreadPoolExecutor.  ORCA corre como subproceso externo (libera el GIL),
+    por lo que el paralelismo real es efectivo.
+
+    task debe contener:
+        conf_id, freq_dir, charge, template, nprocs, maxcore, mol_dir, log
+
+    Devuelve:
+        dict con conf_id, sp_dir (Path o None), success, elapsed (min)
+    """
+    conf_id  : str            = task["conf_id"]
+    freq_dir : Path           = task["freq_dir"]
+    charge   : int            = task["charge"]
+    template : str            = task["template"]
+    nprocs   : int            = task["nprocs"]
+    maxcore  : int            = task["maxcore"]
+    mol_dir  : Path           = task["mol_dir"]
+    log      : logging.Logger = task["log"]
+
+    opt_xyz = resolve_opt_xyz(freq_dir)
+    if opt_xyz is None:
+        log.warning(f"[SP] {conf_id}: no se encontró opt_opt.xyz ni opt.xyz — saltando")
+        return {"conf_id": conf_id, "sp_dir": None, "success": False, "elapsed": 0.0}
+
+    sp_dir = mol_dir / "04_sp" / conf_id
+    sp_dir.mkdir(parents=True, exist_ok=True)
+
+    out_file = sp_dir / "sp.out"
+    inp_file = sp_dir / "sp.inp"
+
+    if not check_success(out_file):
+        if not safe_copy(opt_xyz, sp_dir / "opt_opt.xyz"):
+            log.warning(f"[SP] {conf_id}: error copiando opt_opt.xyz — saltando")
+            return {"conf_id": conf_id, "sp_dir": None, "success": False, "elapsed": 0.0}
+        inp_text = template.format(
+            CHARGE=charge, MULT=MULT,
+            NPROCS=nprocs, MAXCORE=maxcore,
+        )
+        inp_file.write_text(inp_text)
+
+    t0         = time.time()
+    worker_env = build_omp_env(nprocs)
+    success    = run_orca(inp_file, out_file, log, env=worker_env)
+    elapsed    = (time.time() - t0) / 60
+
+    return {
+        "conf_id": conf_id,
+        "sp_dir":  sp_dir if success else None,
+        "success": success,
+        "elapsed": elapsed,
     }
 
 
@@ -1094,7 +1201,7 @@ Ejemplos (modo expansión conformacional):
 
   # Control explícito: 2 OPTs simultáneos × 6 cores c/u (= 12 cores)
   python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest \\
-      --cores 12 --opt-parallel 2
+      --cores 12 --parallel 2
 
   # Ventana y threshold personalizados
   python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest \\
@@ -1128,12 +1235,12 @@ Ejemplos (modo expansión conformacional):
             "automáticamente:\n"
             "  • Modo normal  → todos los cores van a cada job secuencial\n"
             "                   (OPT / NumFreq / SP / TDDFT)\n"
-            "  • Modo expand  → se reparten entre --opt-parallel jobs en paralelo.\n"
-            "                   Con --opt-parallel P: nprocs_por_job = cores // P\n"
+            "  • Modo expand  → se reparten entre --parallel jobs en paralelo.\n"
+            "                   Con --parallel P: nprocs_por_job = cores // P\n"
             "                   (el resto de cores se ignora para no saturar RAM).\n"
             "  maxcore se recalcula como (RAM_total_MB × 0.85) // cores,\n"
             "  con RAM_total_MB = 28000 por defecto (ajustar en MAX_RAM_MB).\n"
-            "  Ejemplo: --cores 12 --opt-parallel 3  →  4 cores × 3 OPTs paralelos."
+            "  Ejemplo: --cores 12 --parallel 3  →  4 cores × 3 OPTs paralelos."
         ),
     )
     res_group.add_argument(
@@ -1186,12 +1293,13 @@ Ejemplos (modo expansión conformacional):
              f"(default: {EXPAND_DFT_THRESHOLD})",
     )
     parser.add_argument(
-        "--opt-parallel", type=int, default=EXPAND_BATCH_SIZE, metavar="N",
+        "--parallel", type=int, default=EXPAND_BATCH_SIZE, metavar="N",
         help=(
-            f"OPTs simultáneos por lote en modo expand (default: {EXPAND_BATCH_SIZE}). "
-            f"Con --cores C, cada OPT usará C // N cores."
+            f"Número de cálculos simultáneos por lote en modo expand (default: {EXPAND_BATCH_SIZE}). "
+            f"Con --cores C, cada proceso usará C // N cores."
         ),
     )
+
     args = parser.parse_args()
 
     # ── Resolver recursos: --cores (simple) vs flags avanzados ───────────────
@@ -1203,6 +1311,7 @@ Ejemplos (modo expansión conformacional):
     maxcore        = MAXCORE
     nprocs_numfreq = NPROCS_NUMFREQ
     maxcore_nf     = MAXCORE_NUMFREQ
+    nprocs_per_expand_job = nprocs  # para log posterior
 
     if args.cores is not None:
         # Modo simple: distribuir cores automáticamente.
@@ -1212,30 +1321,38 @@ Ejemplos (modo expansión conformacional):
         c = args.cores
 
         if args.expand_crest:
-            # En expand: nprocs_por_job = cores // opt_parallel
-            # maxcore se calcula sobre los cores totales en paralelo para
-            # no saturar RAM.
-            p = args.opt_parallel
-            nprocs = max(1, c // p)
-            total_parallel_cores = p * nprocs   # puede ser < c si c no es divisible
-            maxcore    = max(500, (MAX_RAM_MB * 85 // 100) // max(total_parallel_cores, 1))
-            # NumFreq en expand usa todos los cores disponibles (no se paralelizan
-            # multiples NumFreq simultaneamente en este modo)
+            # 'p' es el número de tareas simultáneas (batch size)
+            p = args.parallel
+            # nprocs define cuántos cores tiene cada tarea individual en el lote
+            nprocs_per_expand_job = max(1, c // p)
+            total_parallel_cores = p * nprocs_per_expand_job
+
+            # maxcore se calcula para no saturar la RAM total dividiendo por los cores totales activos
+            maxcore = max(500, (MAX_RAM_MB * 85 // 100) // max(total_parallel_cores, 1))
+
+            # NumFreq y TD-DFT NO se ven afectados por el paralelismo de lotes 'p'
+            # Se mantienen usando su propia lógica de cores disponibles
             nprocs_numfreq = min(c, nprocs_numfreq)
             maxcore_nf = max(500, (MAX_RAM_MB * 85 // 100) // max(nprocs_numfreq, 1))
         else:
-            nprocs     = c
-            maxcore    = max(500, (MAX_RAM_MB * 85 // 100) // max(nprocs, 1))
-            # NumFreq puede usar hasta nprocs_numfreq (default 6) o los cores
-            # disponibles si --cores es menor que ese valor.
+            # Modo no-expand: Un solo proceso usa los cores disponibles
+            nprocs = c
+            maxcore = max(500, (MAX_RAM_MB * 85 // 100) // max(nprocs, 1))
+
             nprocs_numfreq = min(c, nprocs_numfreq)
             maxcore_nf = max(500, (MAX_RAM_MB * 85 // 100) // max(nprocs_numfreq, 1))
 
-    # Las flags avanzadas sobreescriben --cores si se pasan explícitamente
-    if args.nprocs         is not None: nprocs         = args.nprocs
-    if args.maxcore        is not None: maxcore        = args.maxcore
-    if args.nprocs_numfreq is not None: nprocs_numfreq = args.nprocs_numfreq
-    if args.maxcore_numfreq is not None: maxcore_nf    = args.maxcore_numfreq
+    # Sobreescritura por flags manuales
+    if args.nprocs is not None:
+        nprocs = args.nprocs
+    if args.maxcore is not None:
+        maxcore = args.maxcore
+    if args.nprocs_numfreq is not None:
+        nprocs_numfreq = args.nprocs_numfreq
+    if args.maxcore_numfreq is not None:
+        maxcore_nf = args.maxcore_numfreq
+        log.info("=" * 60)
+
 
     # Validación básica de RAM
     ram_opt = nprocs * maxcore / 1024
@@ -1285,15 +1402,14 @@ Ejemplos (modo expansión conformacional):
     log.info(f"Carga: {args.charge}   Mult: {MULT}   Confs: {args.nconf}")
     log.info(f"Inicio desde etapa: {args.start.upper()}")
     log.info(f"ORCA: {ORCA_BIN}")
-    log.info(f"Recursos OPT/SP/TDDFT : {NPROCS} cores / {MAXCORE} MB per core "
-             f"→ {NPROCS * MAXCORE / 1024:.1f} GB por job")
-    log.info(f"Recursos NumFreq       : {NPROCS_NUMFREQ} cores / {MAXCORE_NUMFREQ} MB per core "
-             f"→ {NPROCS_NUMFREQ * MAXCORE_NUMFREQ / 1024:.1f} GB por job")
+    log.info(f"Recursos OPT/SP/TDDFT : {nprocs} cores / {maxcore} MB per core "
+             f"→ {nprocs * maxcore / 1024:.1f} GB por job")
+    log.info(f"Recursos NumFreq       : {nprocs_numfreq} cores / {maxcore_nf} MB per core "
+             f"→ {nprocs_numfreq * maxcore_nf / 1024:.1f} GB por job")
     if args.expand_crest:
-        nprocs_per_expand = NPROCS
-        total_expand_cores = args.opt_parallel * nprocs_per_expand
-        total_expand_ram   = total_expand_cores * MAXCORE / 1024
-        log.info(f"Expand batch           : {args.opt_parallel} × {nprocs_per_expand} = "
+        total_expand_cores = args.parallel * nprocs_per_expand_job
+        total_expand_ram   = total_expand_cores * maxcore / 1024
+        log.info(f"Expand batch           : {args.parallel} × {nprocs_per_expand_job} = "
                  f"{total_expand_cores} cores en paralelo / RAM estimada ≈ {total_expand_ram:.1f} GB")
     log.info("=" * 60)
 
@@ -1306,7 +1422,7 @@ Ejemplos (modo expansión conformacional):
         log.info("MODO: Expansión conformacional (--expand-crest)")
         log.info(f"skip={args.crest_skip}  window={args.crest_window}  "
                  f"threshold={args.dft_threshold} kcal/mol  "
-                 f"paralelo={args.opt_parallel}")
+                 f"paralelo={args.parallel}")
 
         conformers_xyz = mol_dir / "01_crest" / "crest_conformers.xyz"
         if not conformers_xyz.exists():
@@ -1318,48 +1434,106 @@ Ejemplos (modo expansión conformacional):
 
         # ── expand-OPT: lotes paralelos + filtro ────────────────
         if start_idx <= STEPS.index("opt"):
-            expand_opt_dirs = stage_expand_opt(
-                conformers_xyz=conformers_xyz,
-                mol_dir=mol_dir,
-                charge=args.charge,
-                skip=args.crest_skip,
-                window=args.crest_window,
-                dft_threshold=args.dft_threshold,
-                batch_size=args.opt_parallel,
-                nprocs_per_job=NPROCS,
-                maxcore_per_job=MAXCORE,
-                log=log,
-            )
-            if not expand_opt_dirs:
-                log.error("[EXPAND] Ningún confórmero nuevo pasó el filtro — abortando.")
-                sys.exit(1)
+            # Obtenemos el nombre de la etapa actual para decidir qué función llamar
+            current_stage = STEPS[start_idx]
+
+            # Si estamos en expand-OPT, usamos la lógica de batching
+            if current_stage == "opt":
+                output_dirs = stage_expand_opt(
+                    conformers_xyz=conformers_xyz,
+                    mol_dir=mol_dir,
+                    charge=args.charge,
+                    skip=args.crest_skip,
+                    window=args.crest_window,
+                    dft_threshold=args.dft_threshold,
+                    batch_size=args.parallel,
+                    nprocs_per_job=nprocs_per_expand_job,
+                    maxcore_per_job=maxcore,
+                    log=log,
+                )
+
+                if not output_dirs:
+                    log.error(f"[EXPAND-OPT] Ningún confórmero nuevo pasó el filtro — abortando.")
+                    sys.exit(1)
+                expand_opt_dirs = output_dirs
+
+            else:
+                # Recuperar SOLO los confs que pasaron el filtro ΔE.
+                # Fuente de verdad: expand_filter_result.json, escrito por
+                # stage_expand_opt() en la corrida que hizo el OPT+filtro.
+                # NO se reconstruye por índice de carpeta — eso ignoraría el
+                # filtro ΔE y arrastraría confs ya DESCARTADOs (bug histórico).
+                opt_root = mol_dir / "02_opt"
+                if not opt_root.exists():
+                    sys.exit(
+                        f"ERROR: no existe {opt_root}\n"
+                        f"       Con --start {args.start} se esperan OPTs previos "
+                        f"en 02_opt/."
+                    )
+
+                filter_result_path = mol_dir / "expand_filter_result.json"
+                if not filter_result_path.exists():
+                    sys.exit(
+                        f"ERROR: no existe {filter_result_path}\n"
+                        f"       --expand-crest --start {args.start} necesita el "
+                        f"resultado del filtro ΔE de una corrida previa de "
+                        f"stage_expand_opt (etapa OPT). Sin ese archivo no hay "
+                        f"forma segura de saber qué confórmeros pasaron el "
+                        f"filtro vs. cuáles fueron DESCARTADOs.\n"
+                        f"       Corre primero con --start opt (o sin --start) "
+                        f"para regenerar {filter_result_path.name}, o, si lo "
+                        f"perdiste pero conservas el log, reconstrúyelo a mano "
+                        f"a partir de expand_discarded.log."
+                    )
+
+                with open(filter_result_path) as fjson:
+                    filter_result = json.load(fjson)
+
+                passing_names = filter_result.get("passing", [])
+                if not passing_names:
+                    sys.exit(
+                        f"[EXPAND] {filter_result_path} no registra ningún "
+                        f"confórmero PASA — nada que hacer."
+                    )
+
+                expand_opt_dirs = sorted(
+                    opt_root / name for name in passing_names
+                    if (opt_root / name).is_dir()
+                )
+                missing = [n for n in passing_names if not (opt_root / n).is_dir()]
+                if missing:
+                    log.warning(
+                        f"[EXPAND] {len(missing)} conf(s) marcados PASA en "
+                        f"{filter_result_path.name} pero sin carpeta en 02_opt/: "
+                        f"{'  '.join(missing)}"
+                    )
+                if not expand_opt_dirs:
+                    sys.exit(
+                        f"[EXPAND] Ningún directorio de 02_opt/ coincide con los "
+                        f"confs PASA registrados en {filter_result_path.name}."
+                    )
+
+                log.info(
+                    f"[EXPAND] OPT saltado — {len(expand_opt_dirs)} dir(s) "
+                    f"recuperados de 02_opt/ según filtro ΔE registrado "
+                    f"({filter_result_path.name}): "
+                    f"{'  '.join(d.name for d in expand_opt_dirs)}"
+                )
         else:
-            # Recuperar SOLO los confs que pasaron el filtro ΔE.
-            # Fuente de verdad: expand_filter_result.json, escrito por
-            # stage_expand_opt() en la corrida que hizo el OPT+filtro.
-            # NO se reconstruye por índice de carpeta — eso ignoraría el
-            # filtro ΔE y arrastraría confs ya DESCARTADOs (bug histórico).
+            # Saltamos OPT directamente (start_idx > opt): cargar resultados del filtro
             opt_root = mol_dir / "02_opt"
             if not opt_root.exists():
                 sys.exit(
                     f"ERROR: no existe {opt_root}\n"
-                    f"       Con --start {args.start} se esperan OPTs previos "
-                    f"en 02_opt/."
+                    f"       Con --start {args.start} se esperan OPTs previos en 02_opt/."
                 )
 
             filter_result_path = mol_dir / "expand_filter_result.json"
             if not filter_result_path.exists():
                 sys.exit(
                     f"ERROR: no existe {filter_result_path}\n"
-                    f"       --expand-crest --start {args.start} necesita el "
-                    f"resultado del filtro ΔE de una corrida previa de "
-                    f"stage_expand_opt (etapa OPT). Sin ese archivo no hay "
-                    f"forma segura de saber qué confórmeros pasaron el "
-                    f"filtro vs. cuáles fueron DESCARTADOs.\n"
-                    f"       Corre primero con --start opt (o sin --start) "
-                    f"para regenerar {filter_result_path.name}, o, si lo "
-                    f"perdiste pero conservas el log, reconstrúyelo a mano "
-                    f"a partir de expand_discarded.log."
+                    f"       --expand-crest --start {args.start} necesita el resultado "
+                    f"del filtro ΔE de una corrida previa. Corre primero con --start opt."
                 )
 
             with open(filter_result_path) as fjson:
@@ -1368,32 +1542,21 @@ Ejemplos (modo expansión conformacional):
             passing_names = filter_result.get("passing", [])
             if not passing_names:
                 sys.exit(
-                    f"[EXPAND] {filter_result_path} no registra ningún "
-                    f"confórmero PASA — nada que hacer."
+                    f"[EXPAND] {filter_result_path} no registra ningún confórmero PASA."
                 )
 
             expand_opt_dirs = sorted(
                 opt_root / name for name in passing_names
                 if (opt_root / name).is_dir()
             )
-            missing = [n for n in passing_names if not (opt_root / n).is_dir()]
-            if missing:
-                log.warning(
-                    f"[EXPAND] {len(missing)} conf(s) marcados PASA en "
-                    f"{filter_result_path.name} pero sin carpeta en 02_opt/: "
-                    f"{'  '.join(missing)}"
-                )
             if not expand_opt_dirs:
                 sys.exit(
-                    f"[EXPAND] Ningún directorio de 02_opt/ coincide con los "
-                    f"confs PASA registrados en {filter_result_path.name}."
+                    f"[EXPAND] Ningún directorio de 02_opt/ coincide con los confs PASA."
                 )
 
             log.info(
-                f"[EXPAND] OPT saltado — {len(expand_opt_dirs)} dir(s) "
-                f"recuperados de 02_opt/ según filtro ΔE registrado "
-                f"({filter_result_path.name}): "
-                f"{'  '.join(d.name for d in expand_opt_dirs)}"
+                f"[EXPAND] OPT saltado — {len(expand_opt_dirs)} dir(s) recuperados "
+                f"según filtro ΔE: {'  '.join(d.name for d in expand_opt_dirs)}"
             )
 
         # ── NUMFREQ (solo nuevos confs) ──────────────────────────
@@ -1414,7 +1577,10 @@ Ejemplos (modo expansión conformacional):
 
         # ── SP ───────────────────────────────────────────────────
         if start_idx <= STEPS.index("sp"):
-            sp_dirs = stage_sp(freq_dirs, mol_dir, args.charge, log)
+            sp_dirs = stage_sp(freq_dirs, mol_dir, args.charge, log,
+                               batch_size=args.parallel,
+                               nprocs_per_job=nprocs_per_expand_job,
+                               maxcore_per_job=maxcore)
             if not sp_dirs:
                 log.error("[EXPAND] Ningún SP completado. Abortando.")
                 sys.exit(1)
