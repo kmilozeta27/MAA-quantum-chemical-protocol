@@ -38,7 +38,7 @@ Adicionalmente: ciclos termodinámicos de pKa para asignación de estado de prot
 ├── pipeline.py              # Orquestador principal (CREST → OPT → NumFreq → SP → TDDFT)
 ├── results_collector.py     # Recolección y consolidación de resultados
 ├── MGLYVAL/                 # Directorio de trabajo del compuesto de referencia
-└── ...
+└── runs/                    # Archivos CREST y ORCA (.inp, .out, .xyz)
 ```
 
 ## Estado del proyecto
