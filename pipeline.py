@@ -44,6 +44,7 @@ from ase.io import read, write
 
 ORCA_BIN   = Path("/home/kmilozeta/orca_6_1_1_avx2/orca")
 CREST_BIN  = Path("crest")          # asumido en PATH; ajusta si hace falta
+CENSO_BIN  = Path("censo")          # asumido en PATH (env sciencebitch); ajusta si hace falta
 WORK_ROOT  = Path("runs")           # directorio de salida
 TMPL_DIR   = Path("templates")
 MULT       = 1                      # multiplicidad siempre 1
@@ -53,6 +54,7 @@ NPROCS_NUMFREQ  = 6      # NumFreq usa más cores: cada desplazamiento es un SCF
 MAXCORE         = 3500
 MAXCORE_NUMFREQ = 2300   # memoria por core para NumFreq (6 cores × 2300 MB ≈ 13.8 GB)
 CREST_TIMEOUT_HOURS = 16.0          # timeout CREST (horas)
+CENSO_TIMEOUT_HOURS = 4.0           # timeout CENSO pre-screening (horas) — barato, no debería tardar
 
 # OMP_ENV se construye bajo demanda en build_omp_env() para que siempre
 # refleje el valor actualizado de NPROCS (nunca queda obsoleto si el
@@ -494,6 +496,99 @@ def stage_crest(mol_xyz: Path, mol_dir: Path, charge: int,
         log.error(f"[CREST] no se encontró conformers.xyz "
                   f"(returncode={returncode}) — revisa {crest_dir / 'crest.log'}")
         return None
+
+
+def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
+                           charge: int, log: logging.Logger) -> Path:
+    """
+    Etapa 01b_censo: pre-screening DFT liviano con CENSO antes del OPT
+    costoso (ωB97X-D3/def2-SVP). Descarta confórmeros de alta energía con
+    un nivel barato (funcional/base/threshold definidos en ~/.censo2rc,
+    no por CLI en CENSO 3.x).
+
+    Fail-open: si CENSO no está, falla, o no produce un ensemble
+    reconocible, se devuelve conformers_xyz sin tocar y el pipeline
+    sigue exactamente como antes (no bloquea nada).
+
+    Devuelve la ruta al ensemble filtrado (multi-XYZ), o conformers_xyz
+    original si el pre-screening no se pudo aplicar.
+    """
+    censo_dir = mol_dir / "01b_censo_prescreen"
+    censo_dir.mkdir(parents=True, exist_ok=True)
+
+    output_xyz = censo_dir / "censo_ensemble_sorted.xyz"
+
+    # Skip si ya existe y no está vacío
+    if output_xyz.exists() and output_xyz.stat().st_size > 0:
+        log.info(f"[CENSO]  ↩  pre-screening ya completado — saltando ({output_xyz.name})")
+        return output_xyz
+
+    # CENSO escribe en cwd; copiar el ensemble de entrada ahí y referenciarlo
+    # por nombre relativo evita ambigüedad sobre rutas absolutas en -i.
+    local_input = censo_dir / conformers_xyz.name
+    if not safe_copy(conformers_xyz, local_input):
+        log.warning(f"[CENSO] no se pudo copiar {conformers_xyz.name} a {censo_dir} "
+                    f"— usando ensemble CREST sin filtrar")
+        return conformers_xyz
+
+    cmd = [
+        str(CENSO_BIN),
+        "--prescreening",
+        "-i", local_input.name,
+        "-c", str(charge),
+        "-u", "0",                  # MULT global siempre 1 → singlete, capa cerrada
+        "--solvent", "water",
+        "--maxcores", str(NPROCS),
+        "-T", "274.15",             # temperatura Antártica (1°C)
+    ]
+
+    log.info(f"[CENSO]  ▶  lanzando pre-screening sobre {conformers_xyz.name} (carga={charge})")
+    t0 = time.time()
+    try:
+        with open(censo_dir / "censo.log", "w") as flog:
+            proc = subprocess.run(
+                cmd, stdout=flog, stderr=subprocess.STDOUT,
+                cwd=censo_dir, env=build_omp_env(NPROCS),
+                timeout=CENSO_TIMEOUT_HOURS * 3600,
+            )
+        returncode = proc.returncode
+    except subprocess.TimeoutExpired:
+        log.error(f"[CENSO]  ✗  TIMEOUT ({CENSO_TIMEOUT_HOURS} h) — "
+                  f"usando ensemble CREST sin filtrar")
+        return conformers_xyz
+    except FileNotFoundError:
+        log.error(f"[CENSO]  ✗  no se encontró el ejecutable ({CENSO_BIN}) — "
+                  f"¿'conda activate sciencebitch'? Usando ensemble CREST sin filtrar")
+        return conformers_xyz
+    except Exception as e:
+        log.error(f"[CENSO]  ✗  error inesperado: {e} — usando ensemble CREST sin filtrar")
+        return conformers_xyz
+
+    elapsed = (time.time() - t0) / 60
+
+    # Nombre exacto del output puede variar entre instalaciones/versiones;
+    # se revisan los candidatos más probables antes de rendirse.
+    for candidate in ["censo_ensemble_sorted.xyz", "censo_ensemble.xyz",
+                      "crest_conformers.xyz.sorted"]:
+        p = censo_dir / candidate
+        if p.exists() and p.stat().st_size > 0:
+            if not safe_copy(p, output_xyz):
+                log.warning(f"[CENSO] no se pudo normalizar {p.name} → {output_xyz.name} "
+                            f"— usando ensemble CREST sin filtrar")
+                return conformers_xyz
+            try:
+                n = len(read(str(output_xyz), index=":"))
+            except Exception:
+                n = "?"
+            log.info(f"[CENSO]  ✓  pre-screening terminó en {elapsed:.1f} min — "
+                     f"{n} confórmero(s) sobreviven ({p.name})")
+            return output_xyz
+
+    log.warning(f"[CENSO]  ✗  no se encontró un ensemble filtrado reconocible "
+                f"(returncode={returncode}) en {censo_dir} — revisa {censo_dir / 'censo.log'} "
+                f"a mano (el nombre del archivo puede no coincidir con los candidatos "
+                f"esperados). Usando ensemble CREST sin filtrar.")
+    return conformers_xyz
 
 
 def stage_opt(conformers_xyz: Path, mol_dir: Path,
@@ -1221,6 +1316,16 @@ Ejemplos (modo expansión conformacional):
                         help="etapa desde la que iniciar (default: crest)")
     parser.add_argument("--status", action="store_true",
                         help="mostrar estado de todos los runs y salir")
+    parser.add_argument(
+        "--use-censo-prescreen", action="store_true",
+        help=(
+            "Pre-screening barato con CENSO (PBE-D4/SV(p) vía ~/.censo2rc) "
+            "entre CREST y OPT, para descartar confórmeros de alta energía "
+            "antes del OPT costoso (ωB97X-D3/SVP). Solo aplica en modo normal "
+            "(no en --expand-crest). Fail-open: si CENSO falla, usa el "
+            "ensemble CREST sin filtrar."
+        ),
+    )
 
     # ── Recursos de cómputo ─────────────────────────────────────────────────
     res_group = parser.add_argument_group(
@@ -1633,6 +1738,10 @@ Ejemplos (modo expansión conformacional):
             sys.exit(f"ERROR: se pidió start={args.start} pero no existe "
                      f"{conformers_xyz}\nCorre primero con --start crest")
         log.info("[CREST] saltado (--start indica etapa posterior)")
+
+    # ── Etapa 1b: CENSO pre-screening (opcional) ─────────────────
+    if args.use_censo_prescreen and start_idx <= STEPS.index("opt"):
+        conformers_xyz = stage_censo_prescreen(conformers_xyz, mol_dir, args.charge, log)
 
     # ── Etapa 2: OPT ────────────────────────────────────────────
     if start_idx <= STEPS.index("opt"):
