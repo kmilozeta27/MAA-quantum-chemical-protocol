@@ -25,3 +25,10 @@ __pycache__/
 # === sistema ===
 .DS_Store
 *.log
+runs/
+*.out
+*.gbw
+*.densities
+*.hess
+__pycache__/
+*.pyc
