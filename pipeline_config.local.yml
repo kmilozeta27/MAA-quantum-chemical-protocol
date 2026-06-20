@@ -1,0 +1,28 @@
+# ─────────────────────────────────────────────────────────────────────────
+# pipeline_config.yml — configuración de máquina para pipeline.py
+#
+# Copia este archivo y ajusta las rutas/recursos a tu propio sistema.
+# pipeline.py lo busca por defecto en el mismo directorio desde el que
+# se ejecuta, o en la ruta indicada con --config.
+#
+# Prioridad de configuración (de menor a mayor):
+#   1. Defaults internos del script (por si falta este archivo)
+#   2. Este archivo (pipeline_config.yml)
+#   3. Argumentos de línea de comandos (--nprocs, --cores, etc.)
+# ─────────────────────────────────────────────────────────────────────────
+
+binaries:
+  orca: /usr/local/orca_6_1_1_avx2/orca   # ruta completa al ejecutable de ORCA
+  crest: crest                             # nombre o ruta; "crest" asume PATH
+  censo: /miniforge3/envs/sciencebitch/bin/censo                             # nombre o ruta; "censo" asume PATH
+
+resources:
+  nprocs: 4               # cores para OPT / SP / TDDFT
+  nprocs_numfreq: 6       # cores para NumFreq (más jobs independientes, escala mejor)
+  maxcore: 3500           # MB de RAM por core, OPT/SP/TDDFT
+  maxcore_numfreq: 2300   # MB de RAM por core, NumFreq
+  max_ram_mb: 29000       # techo de seguridad para validar nprocs × maxcore
+
+timeouts:
+  crest_hours: 18.0
+  censo_hours: 8.0
