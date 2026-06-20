@@ -1,0 +1,1415 @@
+#!/usr/bin/env python3
+"""
+protonation_cycle.py — Ciclo termodinámico de pKa y distribución de Boltzmann
+                        entre estados de protonación con distinta carga y N_átomos
+
+═══════════════════════════════════════════════════════════════════════════════
+FUNDAMENTO TERMODINÁMICO
+═══════════════════════════════════════════════════════════════════════════════
+
+Compara N estados de protonación de la misma molécula esencial:
+  AH₂  (q=0,  N   átomos)   →  estado neutro
+  AH⁻  (q=−1, N−1 átomos)   →  primer anión (primera desprotonación)
+  A²⁻  (q=−2, N−2 átomos)   →  segundo anión (segunda desprotonación)
+
+El problema central: NO se pueden comparar energías DFT brutas entre estados
+con distinta carga/composición. La solución es el ciclo termodinámico de Born
+(Ho & Coote, Theor. Chem. Acc. 2010), que incluye explícitamente la energía
+del protón transferido.
+
+CICLO DE BORN para AH₂ → AH⁻ + H⁺  (pKa₁):
+
+  AH₂(gas) ─────────────────────────────────► AH⁻(gas) + H⁺(gas)
+      │               ΔG_gas                        │
+  ΔG_solv(AH₂)                         ΔG_solv(AH⁻) + ΔG_solv(H⁺)
+      │                                              │
+      ▼                                              ▼
+  AH₂(aq) ─────────────────────────────────► AH⁻(aq) + H⁺(aq)
+                          ΔG_aq
+
+  ΔG_aq = ΔG_gas + ΔG_solv(AH⁻) + ΔG_solv(H⁺) − ΔG_solv(AH₂)
+  pKa   = ΔG_aq / (RT · ln10)
+
+Lo mismo para el segundo pKa usando AH⁻ y A²⁻.
+
+ENERGÍAS COMPUESTAS (ciclo Ho & Coote):
+
+  G_total(X) = E_SP(TZVPD, CPCM) + G_corr(SVP, CPCM)
+  G_gas(X)   = E_SP(TZVPD, gas)  + G_corr(SVP, CPCM)    [aproximación RRHO]
+  ΔG_solv(X) = E_SP(TZVPD, CPCM) − E_SP(TZVPD, gas) + δG_conc
+
+  δG_conc = +1.894 kcal/mol  [corrección 1 atm → 1 M a 298.15 K]
+
+CONSTANTES DEL PROTÓN (298.15 K):
+
+  G(H⁺, gas)   = −6.28 kcal/mol     [Tissandier et al. J. Phys. Chem. A 1998]
+  ΔG_solv(H⁺)  = −265.9 kcal/mol    [Kelly, Cramer & Truhlar J. Phys. Chem. B 2006]
+
+BOLTZMANN DE ESTADOS DE PROTONACIÓN:
+
+  Se calcula a partir de los pKa usando Henderson-Hasselbalch encadenado.
+  La fracción de cada especie depende del pH, no de comparar G's directamente.
+
+  Para diacido con pKa₁ < pKa₂:
+    f(AH₂) = 1 / D
+    f(AH⁻) = 10^(pH − pKa₁) / D
+    f(A²⁻) = 10^(2·pH − pKa₁ − pKa₂) / D
+    D       = 1 + 10^(pH − pKa₁) + 10^(2·pH − pKa₁ − pKa₂)
+
+BOLTZMANN DE CONFÓRMEROS (dentro de cada estado):
+
+  Previo al ciclo de pKa, cada estado necesita su G_Boltzmann (energía libre
+  efectiva del ensemble conformacional), calculada desde el confórmero más
+  estable o como promedio de Boltzmann explícito.
+
+═══════════════════════════════════════════════════════════════════════════════
+ESTRUCTURA DE DIRECTORIOS (igual que pipeline.py / results_collector.py)
+═══════════════════════════════════════════════════════════════════════════════
+
+  /home/kmilozeta/MGLYVAL/runs/
+  ├── R/                         ← estado de referencia/neutro
+  │   ├── 03_numfreq/conf_001/freq.out
+  │   ├── 04_sp/conf_001/sp.out          ← SP acuoso (CPCM)
+  │   └── 06_sp_gas/conf_001/sp_gas.out  ← SP fase gas (sin CPCM) [NUEVO]
+  ├── A/                         ← estado de protonación A
+  │   └── (mismo árbol)
+  ├── B/                         ← estado de protonación B
+  │   └── (mismo árbol)
+  └── C/                         ← estado de protonación C
+      └── (mismo árbol)
+
+WORK_ROOT apunta a /home/kmilozeta/MGLYVAL/runs. Los nombres de estado que se
+pasan en --neutral/--anion/--dianion son los nombres de carpeta dentro de
+runs/ (p. ej. "R", "A", "B", "C"), no rutas completas.
+
+Para el ciclo de pKa se requieren los SP en fase gas (06_sp_gas).
+Si no existen, el módulo de pKa se omite con advertencia clara.
+
+═══════════════════════════════════════════════════════════════════════════════
+USO
+═══════════════════════════════════════════════════════════════════════════════
+
+  # Caso más común: tres estados, pKa1 + pKa2 + distribución
+  python protonation_cycle.py \\
+      --neutral  R \\
+      --anion    B \\
+      --dianion  C
+
+  # Solo pKa1 (R → B)
+  python protonation_cycle.py \\
+      --neutral R --anion B
+
+  # Evaluar distribución a pH específico además del rango
+  python protonation_cycle.py \\
+      --neutral R --anion B --dianion C \\
+      --ph 8.1
+
+  # Exportar resultados
+  python protonation_cycle.py \\
+      --neutral R --anion B --dianion C \\
+      --export xlsx --plot
+
+  # Modo detallado (muestra contribuciones del ciclo de Born paso a paso)
+  python protonation_cycle.py \\
+      --neutral R --anion B --dianion C \\
+      --verbose
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+import warnings
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+
+# ─────────────────────────────────────────────
+#  CONSTANTES  (idénticas a results_collector.py)
+# ─────────────────────────────────────────────
+
+WORK_ROOT        = Path("/home/kmilozeta/MGLYVAL/runs")
+HARTREE_TO_KCAL  = 627.5094740631
+HARTREE_TO_KJ    = HARTREE_TO_KCAL * 4.184
+R_KCAL           = 1.9872041e-3        # kcal/(mol·K)
+LN10             = 2.302585093
+T_STD            = 298.15              # K
+
+# Temperaturas de análisis (contexto FAE antártico)
+TEMPS_K     = [250.0, 274.15, 298.15, 310.0]
+TEMP_LABELS = ["250K", "274K", "298K", "310K"]
+
+# G(H⁺, aq) — DOS CONVENCIONES DISTINTAS, NO INTERCAMBIABLES:
+#
+# 1) Para el CICLO DE BORN (gas + ΔG_solv separados):
+#      G(H⁺,gas) = -6.28 kcal/mol      [Tissandier et al. 1998]
+#      ΔG_solv(H⁺) = -265.9 kcal/mol   [Kelly, Cramer & Truhlar 2006]
+#      G(H⁺,aq) implícito = -272.18 kcal/mol
+#    Esta convención está calibrada para combinarse con E_SP en FASE GAS
+#    pura (sin CPCM). Úsala solo si G_gas_acid/G_gas_base vienen de SP sin
+#    solvente implícito.
+#
+# 2) Para el MÉTODO DIRECTO (solo energías ya en CPCM, sin SP fase gas):
+#    Las energías E_SP_CPCM(X) ya incluyen el efecto de solvatación de la
+#    molécula vía el modelo de continuo. Usar G(H⁺,aq) de Tissandier/Kelly
+#    aquí sobreestima la estabilización del protón en ~8-10 kcal/mol, porque
+#    esa constante fue derivada para cerrar un ciclo gas+solv explícito, no
+#    para emparejarse con energías que ya son "solución implícita".
+#    El valor correcto para esquemas de fase condensada / esquema directo
+#    es el de Pliego & Riveros, J. Phys. Chem. A 2002, 106, 7434:
+#      G(H⁺,aq) = -264.61 kcal/mol  (escala molar, 298.15 K, calibrado con
+#                                     ciclos de fase condensada, consistente
+#                                     con Zhan & Dixon 2001 ≈ -262.4 kcal/mol)
+G_HPLUS_GAS   = -6.28    # kcal/mol   G(H⁺, gas)       Tissandier et al. 1998
+DG_SOLV_HPLUS = -265.9   # kcal/mol   ΔG_solv(H⁺)      Kelly et al. 2006
+DG_CONC_CORR  = 1.894    # kcal/mol   δG_conc 1 atm→1M  RT·ln(24.5) a 298.15 K
+
+# G(H⁺, aq) PARA EL CICLO DE BORN (gas + solv explícitos, NO usar con el método directo)
+G_HPLUS_AQ_BORN   = G_HPLUS_GAS + DG_SOLV_HPLUS   # kcal/mol  ≈ -272.18
+
+# G(H⁺, aq) PARA EL MÉTODO DIRECTO (energías ya en CPCM) — Pliego & Riveros 2002
+G_HPLUS_AQ_DIRECT = -264.61   # kcal/mol   [Pliego & Riveros, JPCA 2002, 106, 7434]
+
+# Alias retro-compatible: NO usar en código nuevo, mantenido solo por si algo
+# externo importa G_HPLUS_AQ directamente.
+G_HPLUS_AQ = G_HPLUS_AQ_DIRECT
+
+# Subdirectorios dentro de cada mol en runs/
+SUBDIR_SP      = "04_sp"
+SUBDIR_FREQ    = "03_numfreq"
+SUBDIR_SP_GAS  = "06_sp_gas"   # SPs sin CPCM para el ciclo de pKa
+
+# pH de referencia oceánico antártico (WAP superficial, verano)
+PH_ANTARCTIC   = 8.1
+PH_STANDARD    = 7.0
+
+
+# ─────────────────────────────────────────────
+#  PARSERS  (extraídos de results_collector.py,
+#            sin dependencias cruzadas)
+# ─────────────────────────────────────────────
+
+def parse_sp_energy(out_file: Path) -> Optional[float]:
+    """
+    Extrae la última 'FINAL SINGLE POINT ENERGY' del .out de ORCA.
+    Retorna energía en Hartree, o None si no se encuentra.
+    """
+    if not out_file.exists():
+        return None
+    energy = None
+    for line in out_file.read_text(errors="replace").splitlines():
+        if "FINAL SINGLE POINT ENERGY" in line:
+            try:
+                energy = float(line.split()[-1])
+            except ValueError:
+                pass
+    return energy
+
+
+def parse_theory_level(out_file: Path) -> Optional[str]:
+    """
+    Extrae la línea de keywords ORCA ('! funcional base CPCM ...') del .out,
+    tal como aparece ecoizada al inicio del cálculo (línea '|  1> ! ...').
+
+    Se usa solo para diagnóstico de consistencia entre estados — NO se usa
+    para ningún cálculo numérico. Retorna None si no se encuentra.
+    """
+    if not out_file.exists():
+        return None
+    pat = re.compile(r"^\s*\|\s*1>\s*!\s*(.+)$")
+    for line in out_file.read_text(errors="replace").splitlines():
+        m = pat.match(line)
+        if m:
+            return m.group(1).strip()
+    return None
+
+
+def parse_thermochem(freq_out: Path, T: float = T_STD) -> dict:
+    """
+    Extrae correcciones termoquímicas del bloque THERMOCHEMISTRY de ORCA 6.
+
+    Lógica idéntica a results_collector.py:
+      - 'Final entropy term' es T·S a T_parsed (en Eh), NO es S puro.
+      - S_total = TS_total / T_parsed   (Eh/K)
+      - G_corr(T) = H_corr − T · S_total
+
+    Retorna dict con claves:
+        E_elec_freq, ZPE, H_corr, TS_total, S_total,
+        G_corr, G_total_freq, T_parsed, n_imag, ok
+    Todos los valores en Hartree (salvo T_parsed en K y n_imag entero).
+    """
+    null = {
+        "E_elec_freq": None, "ZPE": None,       "H_corr": None,
+        "TS_total":    None, "S_total": None,    "G_corr": None,
+        "G_total_freq": None, "T_parsed": None,
+        "n_imag": 0,         "ok": False,
+    }
+
+    if not freq_out.exists():
+        return null
+
+    try:
+        lines = freq_out.read_text(errors="replace").splitlines()
+    except OSError:
+        return null
+
+    # Frecuencias imaginarias
+    n_imag = sum(
+        1 for l in lines
+        if re.match(r"\s+\d+:\s+(-\d+\.\d+)\s+cm", l)
+    )
+
+    # Energía electrónica (primera ocurrencia = SP del NumFreq)
+    E_elec_freq: Optional[float] = None
+    for line in lines:
+        if "FINAL SINGLE POINT ENERGY" in line:
+            try:
+                E_elec_freq = float(line.split()[-1])
+                break
+            except ValueError:
+                pass
+
+    # Bloque THERMOCHEMISTRY (última ocurrencia)
+    thermo_start = -1
+    for idx, line in enumerate(lines):
+        if "THERMOCHEMISTRY AT" in line.upper():
+            thermo_start = idx
+
+    if thermo_start < 0:
+        result = dict(null)
+        result["E_elec_freq"] = E_elec_freq
+        result["n_imag"] = n_imag
+        return result
+
+    # Temperatura del bloque
+    T_parsed: Optional[float] = None
+    m = re.search(r"THERMOCHEMISTRY AT\s+([\d.]+)\s*K",
+                  lines[thermo_start], re.IGNORECASE)
+    if m:
+        try:
+            T_parsed = float(m.group(1))
+        except ValueError:
+            pass
+
+    # Patrones ORCA 6
+    _pat_zpe = re.compile(r"Zero point energy\s+\.\.\.\s+([-\d.]+)\s*Eh", re.I)
+    _pat_h   = re.compile(r"Total [Ee]nthalpy\s+\.\.\.\s+([-\d.]+)\s*Eh", re.I)
+    _pat_s   = re.compile(r"Final entropy term\s+\.\.\.\s+([-\d.]+)\s*Eh", re.I)
+    _pat_g   = re.compile(
+        r"(?:Total|Final) Gibbs free energy\s+\.\.\.\s+([-\d.]+)\s*Eh", re.I
+    )
+
+    ZPE = H_total = TS_total = G_total_freq = None
+    for line in lines[thermo_start:]:
+        if ZPE is None:
+            m = _pat_zpe.search(line)
+            if m:
+                try: ZPE = float(m.group(1))
+                except ValueError: pass
+        if H_total is None:
+            m = _pat_h.search(line)
+            if m:
+                try: H_total = float(m.group(1))
+                except ValueError: pass
+        if TS_total is None:
+            m = _pat_s.search(line)
+            if m:
+                try: TS_total = float(m.group(1))
+                except ValueError: pass
+        if G_total_freq is None:
+            m = _pat_g.search(line)
+            if m:
+                try: G_total_freq = float(m.group(1))
+                except ValueError: pass
+
+    # Derivar correcciones
+    H_corr  = (H_total - E_elec_freq) if (H_total is not None and E_elec_freq is not None) else None
+    S_total = (TS_total / T_parsed)   if (TS_total is not None and T_parsed and T_parsed != 0) else None
+    G_corr  = (H_corr - T * S_total)  if (H_corr is not None and S_total is not None) else None
+
+    ok = all(x is not None for x in [ZPE, H_corr, TS_total, G_corr, G_total_freq])
+
+    return {
+        "E_elec_freq":  E_elec_freq,
+        "ZPE":          ZPE,
+        "H_corr":       H_corr,
+        "TS_total":     TS_total,
+        "S_total":      S_total,       # Eh/K
+        "G_corr":       G_corr,        # Eh, a temperatura T
+        "G_total_freq": G_total_freq,  # Eh
+        "T_parsed":     T_parsed,
+        "n_imag":       n_imag,
+        "ok":           ok,
+    }
+
+
+# ─────────────────────────────────────────────
+#  COLECTOR POR MOL  (versión ligera, sin TDDFT
+#  ni CREST reranking — solo lo necesario para
+#  el ciclo de pKa)
+# ─────────────────────────────────────────────
+
+def collect_mol_data(mol_name: str, verbose: bool = False) -> dict:
+    """
+    Recolecta los datos termodinámicos de todos los confórmeros de una molécula.
+
+    Para cada confórmero con SP acuoso:
+      - E_sp_aq   : energía SP con CPCM (Hartree)
+      - E_sp_gas  : energía SP sin CPCM (Hartree, de 06_sp_gas — opcional)
+      - G_corr(T) : corrección de Gibbs de NumFreq, re-evaluada a cada T (Hartree)
+      - G_total(T): E_sp_aq + G_corr(T)    ciclo compuesto Ho & Coote
+
+    Retorna dict con:
+        mol_name        : str
+        conformers      : list[dict]  — datos por confórmero
+        df              : pd.DataFrame
+        best_conf_298K  : str — id del confórmero con menor G_total a 298.15 K
+        G_boltz(T)      : dict {label: G_boltzmann en Hartree} — ensemble efectivo
+        ok              : bool
+        warnings        : list[str]
+    """
+    mol_dir = WORK_ROOT / mol_name
+    warns: list[str] = []
+
+    if not mol_dir.exists():
+        return {"mol_name": mol_name, "ok": False,
+                "warnings": [f"Directorio no encontrado: {mol_dir}"],
+                "conformers": [], "df": pd.DataFrame()}
+
+    sp_dirs = sorted((mol_dir / SUBDIR_SP).glob("conf_*")) \
+              if (mol_dir / SUBDIR_SP).exists() else []
+
+    if not sp_dirs:
+        return {"mol_name": mol_name, "ok": False,
+                "warnings": [f"Sin confórmeros SP en {mol_dir / SUBDIR_SP}"],
+                "conformers": [], "df": pd.DataFrame()}
+
+    rows: list[dict] = []
+
+    for sp_dir in sp_dirs:
+        conf_id = sp_dir.name
+
+        # SP acuoso (CPCM)
+        sp_aq_file  = sp_dir / "sp.out"
+        e_sp_aq     = parse_sp_energy(sp_aq_file)
+
+        # SP fase gas (sin CPCM) — para el ciclo de pKa
+        sp_gas_file = mol_dir / SUBDIR_SP_GAS / conf_id / "sp_gas.out"
+        e_sp_gas    = parse_sp_energy(sp_gas_file)
+
+        # Correcciones térmicas (NumFreq) — leídas a T_STD, S_total re-escalado
+        freq_file = mol_dir / SUBDIR_FREQ / conf_id / "freq.out"
+        tc = parse_thermochem(freq_file, T=T_STD)
+
+        row: dict = {
+            "conformer":   conf_id,
+            "E_sp_aq":     e_sp_aq,
+            "E_sp_gas":    e_sp_gas,
+            "thermo_ok":   tc["ok"],
+            "n_imag":      tc["n_imag"],
+            "H_corr":      tc["H_corr"],
+            "S_total_EhK": tc["S_total"],
+            "ZPE":         tc["ZPE"],
+        }
+
+        # G_total compuesto a cada temperatura
+        for T, lbl in zip(TEMPS_K, TEMP_LABELS):
+            if e_sp_aq is not None and tc["ok"]:
+                G_corr_T  = tc["H_corr"] - T * tc["S_total"]
+                row[f"G_total_{lbl}"] = e_sp_aq + G_corr_T
+            else:
+                row[f"G_total_{lbl}"] = None
+
+        rows.append(row)
+
+        if verbose:
+            gas_str = f"{e_sp_gas:.8f}" if e_sp_gas is not None else "—"
+            aq_str  = f"{e_sp_aq:.8f}"  if e_sp_aq is not None  else "—"
+            print(f"    {conf_id}: E_aq={aq_str}  E_gas={gas_str}  "
+                  f"thermo={'✓' if tc['ok'] else '✗'}  n_imag={tc['n_imag']}")
+
+    df = pd.DataFrame(rows)
+
+    # Pesos de Boltzmann conformacional a cada T
+    G_boltz: dict[str, Optional[float]] = {}
+    for T, lbl in zip(TEMPS_K, TEMP_LABELS):
+        col = f"G_total_{lbl}"
+        valid = df[col].notna() & df["thermo_ok"]
+        if valid.any():
+            G_vals = df.loc[valid, col].values.astype(float)
+            G_min  = G_vals.min()
+            dG     = G_vals - G_min                           # en Hartree
+            dG_kcal= dG * HARTREE_TO_KCAL
+            weights = np.exp(-dG_kcal / (R_KCAL * T))
+            weights /= weights.sum()
+            df.loc[valid, f"boltz_{lbl}"] = weights
+            df.loc[valid, f"dG_{lbl}_kcal"] = dG_kcal
+
+            # G_Boltzmann del ensemble (free energy efectivo):
+            # -RT·ln(Σ exp(-G_i/RT)) = G_min - RT·ln(Σ exp(-ΔG_i/RT))
+            ln_Z   = np.log(np.sum(np.exp(-dG_kcal / (R_KCAL * T))))
+            G_boltz[lbl] = G_min - (R_KCAL * T * ln_Z) / HARTREE_TO_KCAL
+        else:
+            G_boltz[lbl] = None
+            if not df["thermo_ok"].any():
+                warns.append(
+                    f"[{mol_name}] Sin correcciones térmicas válidas. "
+                    f"Boltzmann conformacional no disponible."
+                )
+
+    # Confórmero representativo (mínimo G_total a 298.15 K)
+    col_298 = "G_total_298K"
+    best_conf = None
+    if col_298 in df.columns:
+        valid = df[col_298].notna() & df["thermo_ok"]
+        if valid.any():
+            best_conf = df.loc[df.loc[valid, col_298].idxmin(), "conformer"]
+
+    # Advertencia sobre frecuencias imaginarias
+    n_imag_any = (df["n_imag"] > 0).sum()
+    if n_imag_any > 0:
+        warns.append(
+            f"[{mol_name}] {n_imag_any} confórmero(s) con frecuencias imaginarias. "
+            f"Revisar geometrías antes de usar en el ciclo de pKa."
+        )
+
+    # Advertencia si falta SP gas
+    n_missing_gas = df["E_sp_gas"].isna().sum()
+    if n_missing_gas > 0:
+        warns.append(
+            f"[{mol_name}] {n_missing_gas}/{len(df)} confórmeros sin SP fase gas "
+            f"(esperado en runs/{mol_name}/{SUBDIR_SP_GAS}/conf_NNN/sp_gas.out). "
+            f"El ciclo de pKa requiere SP gas del confórmero representativo."
+        )
+
+    return {
+        "mol_name":     mol_name,
+        "conformers":   rows,
+        "df":           df,
+        "best_conf":    best_conf,
+        "G_boltz":      G_boltz,      # Hartree, ensemble efectivo por T
+        "ok":           len(rows) > 0,
+        "warnings":     warns,
+    }
+
+
+# ─────────────────────────────────────────────
+#  CICLO TERMODINÁMICO DE pKa
+# ─────────────────────────────────────────────
+
+def compute_pka(
+    data_acid: dict,
+    data_base: dict,
+    T: float = T_STD,
+    verbose: bool = False,
+    method: str = "auto",
+) -> dict:
+    """
+    Calcula el pKa de AH → A⁻ + H⁺.
+
+    Dos métodos disponibles:
+
+    1. "born"   — Ciclo de Born completo (Ho & Coote 2010). Requiere SP en
+                  fase gas (06_sp_gas) además del SP acuoso (CPCM):
+                    ΔG_solv(X) = E_SP(CPCM) − E_SP(gas) + δG_conc
+                    ΔG_aq = ΔG_gas + ΔG_solv(A⁻) + ΔG_solv(H⁺) − ΔG_solv(AH)
+                  Usa G(H⁺,aq) implícito de Tissandier 1998 + Kelly 2006
+                  (−272.18 kcal/mol), calibrado para cerrar el ciclo gas+solv
+                  explícito.
+
+    2. "direct" — Método directo solo-CPCM. No requiere SP fase gas; usa
+                  directamente G_total ya calculado con CPCM (E_SP_CPCM + G_corr)
+                  y la energía libre del protón de Pliego & Riveros 2002
+                  (G_HPLUS_AQ_DIRECT = −264.61 kcal/mol):
+                    ΔG_aq = G_total_CPCM(A⁻) − G_total_CPCM(AH) + G(H⁺, aq)
+                  IMPORTANTE: esta constante NO es la misma que la de "born".
+                  Las energías E_SP_CPCM ya incluyen el efecto de solvatación
+                  de la molécula vía el modelo de continuo; usar la constante
+                  de Tissandier/Kelly aquí sobreestima la estabilización del
+                  protón en ~8-10 kcal/mol porque esa constante está calibrada
+                  para emparejarse con energías en fase gas pura, no con
+                  energías ya en solución implícita.
+
+    method="auto" (default): usa "born" si hay SP fase gas disponibles para
+    ambos confórmeros representativos; si no, cae automáticamente a "direct"
+    y lo deja registrado en result["method"] / result["warnings"].
+
+    Usa el confórmero representativo (mínimo G_total a 298 K) de cada estado.
+    Retorna dict con todas las contribuciones al ciclo y el pKa final.
+    """
+    mol_acid = data_acid["mol_name"]
+    mol_base = data_base["mol_name"]
+    warns: list[str] = []
+    result: dict = {
+        "mol_acid": mol_acid, "mol_base": mol_base,
+        "T": T, "pKa": None, "ok": False, "warnings": warns,
+        "method": None,
+        # contribuciones (ciclo de Born)
+        "dG_gas_kcal": None, "dG_solv_acid_kcal": None,
+        "dG_solv_base_kcal": None, "dG_solv_hplus_kcal": DG_SOLV_HPLUS,
+        "dG_aq_kcal": None,
+        # contribuciones (método directo)
+        "G_total_acid_Eh": None, "G_total_base_Eh": None,
+        "G_hplus_aq_kcal": None,
+        # datos intermedios
+        "conf_acid": None, "conf_base": None,
+        "G_gas_acid_Eh": None, "G_gas_base_Eh": None,
+        "E_sp_aq_acid_Eh": None, "E_sp_aq_base_Eh": None,
+        "E_sp_gas_acid_Eh": None, "E_sp_gas_base_Eh": None,
+        "G_corr_acid_Eh": None, "G_corr_base_Eh": None,
+        "theory_sp_acid": None, "theory_sp_base": None,
+        "theory_freq_acid": None, "theory_freq_base": None,
+    }
+
+    def _warn(msg: str):
+        warns.append(msg)
+        warnings.warn(f"[pKa {mol_acid}→{mol_base}] {msg}")
+
+    if method not in ("auto", "born", "direct"):
+        raise ValueError(f"method debe ser 'auto', 'born' o 'direct', no {method!r}")
+
+    # ── Obtener confórmero representativo de cada estado ──────────────────
+    conf_acid = data_acid.get("best_conf")
+    conf_base = data_base.get("best_conf")
+    result["conf_acid"] = conf_acid
+    result["conf_base"] = conf_base
+
+    if conf_acid is None:
+        _warn(f"No hay confórmero representativo para {mol_acid}.")
+        return result
+    if conf_base is None:
+        _warn(f"No hay confórmero representativo para {mol_base}.")
+        return result
+
+    df_acid = data_acid["df"]
+    df_base = data_base["df"]
+
+    row_acid = df_acid[df_acid["conformer"] == conf_acid].iloc[0]
+    row_base = df_base[df_base["conformer"] == conf_base].iloc[0]
+
+    # ── Verificación de consistencia de nivel de teoría ────────────────────
+    # Compara las líneas de keywords ORCA del SP acuoso y del freq.out entre
+    # acid y base. Un desajuste aquí (distinta base, funcional, o grid) invalida
+    # la resta de energías de ~1000+ Eh para sacar una diferencia de ~0.4 Eh,
+    # independientemente de qué convención de G(H⁺) se use después.
+    sp_acid_file  = WORK_ROOT / mol_acid / SUBDIR_SP / conf_acid / "sp.out"
+    sp_base_file  = WORK_ROOT / mol_base / SUBDIR_SP / conf_base / "sp.out"
+    freq_acid_lvl = parse_theory_level(WORK_ROOT / mol_acid / SUBDIR_FREQ / conf_acid / "freq.out")
+    freq_base_lvl = parse_theory_level(WORK_ROOT / mol_base / SUBDIR_FREQ / conf_base / "freq.out")
+    sp_acid_lvl   = parse_theory_level(sp_acid_file)
+    sp_base_lvl   = parse_theory_level(sp_base_file)
+
+    result["theory_sp_acid"]   = sp_acid_lvl
+    result["theory_sp_base"]   = sp_base_lvl
+    result["theory_freq_acid"] = freq_acid_lvl
+    result["theory_freq_base"] = freq_base_lvl
+
+    if sp_acid_lvl and sp_base_lvl and sp_acid_lvl != sp_base_lvl:
+        _warn(
+            f"NIVEL DE TEORÍA INCONSISTENTE en el SP acuoso entre "
+            f"{mol_acid} ('{sp_acid_lvl}') y {mol_base} ('{sp_base_lvl}'). "
+            f"El ciclo de pKa NO es válido si la base/funcional/CPCM difieren "
+            f"entre estados — revisar antes de reportar."
+        )
+    if freq_acid_lvl and freq_base_lvl and freq_acid_lvl != freq_base_lvl:
+        _warn(
+            f"NIVEL DE TEORÍA INCONSISTENTE en NumFreq entre "
+            f"{mol_acid} ('{freq_acid_lvl}') y {mol_base} ('{freq_base_lvl}')."
+        )
+
+    # ── Energías SP acuosas (CPCM) ────────────────────────────────────────
+    E_aq_acid = row_acid["E_sp_aq"]
+    E_aq_base = row_base["E_sp_aq"]
+    result["E_sp_aq_acid_Eh"] = E_aq_acid
+    result["E_sp_aq_base_Eh"] = E_aq_base
+
+    if E_aq_acid is None or pd.isna(E_aq_acid):
+        _warn(f"Sin SP acuoso para {mol_acid}/{conf_acid}.")
+        return result
+    if E_aq_base is None or pd.isna(E_aq_base):
+        _warn(f"Sin SP acuoso para {mol_base}/{conf_base}.")
+        return result
+
+    # ── Energías SP fase gas (pueden faltar) ───────────────────────────────
+    E_gas_acid = row_acid["E_sp_gas"]
+    E_gas_base = row_base["E_sp_gas"]
+    result["E_sp_gas_acid_Eh"] = E_gas_acid
+    result["E_sp_gas_base_Eh"] = E_gas_base
+
+    have_gas = not (
+        E_gas_acid is None or pd.isna(E_gas_acid) or
+        E_gas_base is None or pd.isna(E_gas_base)
+    )
+
+    # ── Decidir método ──────────────────────────────────────────────────────
+    if method == "born" and not have_gas:
+        _warn(
+            f"method='born' solicitado pero faltan SP fase gas para "
+            f"{mol_acid}/{conf_acid} y/o {mol_base}/{conf_base}. "
+            f"Crear runs/{mol_acid}/{SUBDIR_SP_GAS}/{conf_acid}/sp_gas.inp "
+            f"y el equivalente para {mol_base} (mismo funcional/base, sin CPCM)."
+        )
+        return result
+
+    use_born = have_gas and method in ("auto", "born")
+
+    if method == "auto" and not have_gas:
+        _warn(
+            f"Sin SP fase gas para {mol_acid}/{conf_acid} y/o {mol_base}/{conf_base}. "
+            f"Se usa el método directo (solo CPCM) en su lugar: "
+            f"ΔG_aq = G_total_CPCM(base) − G_total_CPCM(acid) + G(H⁺,aq). "
+            f"Para el ciclo de Born completo, crear los SP fase gas en "
+            f"{SUBDIR_SP_GAS}/conf_NNN/sp_gas.out."
+        )
+
+    # ── Correcciones térmicas G_corr a temperatura T (necesarias en ambos métodos) ─
+    freq_acid = WORK_ROOT / mol_acid / SUBDIR_FREQ / conf_acid / "freq.out"
+    freq_base = WORK_ROOT / mol_base / SUBDIR_FREQ / conf_base / "freq.out"
+    tc_acid = parse_thermochem(freq_acid, T=T)
+    tc_base = parse_thermochem(freq_base, T=T)
+
+    G_corr_acid: Optional[float] = None
+    G_corr_base: Optional[float] = None
+
+    if tc_acid["ok"]:
+        G_corr_acid = tc_acid["G_corr"]
+    else:
+        _warn(
+            f"G_corr no disponible para {mol_acid}/{conf_acid}. "
+            f"Se usa G ≈ E_SP (sin ZPE/entropía; pKa con mayor incertidumbre)."
+        )
+    if tc_base["ok"]:
+        G_corr_base = tc_base["G_corr"]
+    else:
+        _warn(
+            f"G_corr no disponible para {mol_base}/{conf_base}. "
+            f"Se usa G ≈ E_SP."
+        )
+
+    result["G_corr_acid_Eh"] = G_corr_acid
+    result["G_corr_base_Eh"] = G_corr_base
+
+    if use_born:
+        # ── G_total en fase gas ───────────────────────────────────────────
+        # G_gas(X) = E_SP_gas(X) + G_corr(X)
+        # Aproximación Ho & Coote: G_corr del cálculo CPCM es válido en gas.
+        G_gas_acid = E_gas_acid + (G_corr_acid if G_corr_acid is not None else 0.0)
+        G_gas_base = E_gas_base + (G_corr_base if G_corr_base is not None else 0.0)
+        result["G_gas_acid_Eh"] = G_gas_acid
+        result["G_gas_base_Eh"] = G_gas_base
+
+        # ── ΔG_gas ─────────────────────────────────────────────────────────
+        # ΔG_gas = G(A⁻, gas) + G(H⁺, gas) − G(AH, gas)
+        dG_gas_kcal = (G_gas_base - G_gas_acid) * HARTREE_TO_KCAL + G_HPLUS_GAS
+        result["dG_gas_kcal"] = dG_gas_kcal
+
+        # ── ΔG_solv por especie ───────────────────────────────────────────
+        # ΔG_solv(X) = E_SP(CPCM) − E_SP(gas) + δG_conc
+        dG_solv_acid = (E_aq_acid - E_gas_acid) * HARTREE_TO_KCAL + DG_CONC_CORR
+        dG_solv_base = (E_aq_base - E_gas_base) * HARTREE_TO_KCAL + DG_CONC_CORR
+        result["dG_solv_acid_kcal"] = dG_solv_acid
+        result["dG_solv_base_kcal"] = dG_solv_base
+
+        # ── ΔG_aq (ciclo de Born completo) ────────────────────────────────
+        # ΔG_aq = ΔG_gas + ΔG_solv(A⁻) + ΔG_solv(H⁺) − ΔG_solv(AH)
+        dG_aq_kcal = (
+            dG_gas_kcal
+            + dG_solv_base
+            + DG_SOLV_HPLUS
+            - dG_solv_acid
+        )
+        result["dG_aq_kcal"] = dG_aq_kcal
+        result["method"] = "born"
+
+    else:
+        # ── Método directo: solo energías CPCM ───────────────────────────
+        # G_total_CPCM(X) = E_SP(CPCM) + G_corr(X)
+        G_total_acid = E_aq_acid + (G_corr_acid if G_corr_acid is not None else 0.0)
+        G_total_base = E_aq_base + (G_corr_base if G_corr_base is not None else 0.0)
+        result["G_total_acid_Eh"] = G_total_acid
+        result["G_total_base_Eh"] = G_total_base
+        result["G_hplus_aq_kcal"] = G_HPLUS_AQ_DIRECT
+
+        # ΔG_aq = G_total_CPCM(A⁻) − G_total_CPCM(AH) + G(H⁺, aq)
+        dG_aq_kcal = (G_total_base - G_total_acid) * HARTREE_TO_KCAL + G_HPLUS_AQ_DIRECT
+        result["dG_aq_kcal"] = dG_aq_kcal
+        result["method"] = "direct"
+
+    # ── pKa ──────────────────────────────────────────────────────────────
+    pKa = result["dG_aq_kcal"] / (R_KCAL * T * LN10)
+    result["pKa"] = pKa
+    result["ok"]  = True
+
+    if verbose:
+        if result["method"] == "born":
+            _print_born_cycle(result)
+        else:
+            _print_direct_cycle(result)
+
+    return result
+
+
+def _print_born_cycle(r: dict):
+    """Imprime las contribuciones detalladas del ciclo de Born."""
+    sep = "─" * 66
+    print(f"\n  {sep}")
+    print(f"  CICLO DE BORN — {r['mol_acid']} → {r['mol_base']} + H⁺")
+    print(f"  T = {r['T']:.2f} K")
+    print(f"  {sep}")
+    print(f"  Conf. AH  : {r['conf_acid']}")
+    print(f"  Conf. A⁻  : {r['conf_base']}")
+    print(f"  Nivel SP(AH)  : {r['theory_sp_acid'] or '—'}")
+    print(f"  Nivel SP(A⁻)  : {r['theory_sp_base'] or '—'}")
+    print()
+    print(f"  {'Término':<40} {'Valor':>12}")
+    print(f"  {'─'*40}  {'─'*12}")
+
+    def fmt(v): return f"{v:+12.3f}" if v is not None else "       N/A"
+
+    print(f"  {'G_gas(AH)  [Eh]':<40} {r['G_gas_acid_Eh']:>12.8f}")
+    print(f"  {'G_gas(A⁻)  [Eh]':<40} {r['G_gas_base_Eh']:>12.8f}")
+    print(f"  {'G(H⁺, gas)  [kcal/mol]':<40} {G_HPLUS_GAS:>12.3f}")
+    print()
+    print(f"  {'ΔG_gas  [kcal/mol]':<40} {fmt(r['dG_gas_kcal'])}")
+    print(f"  {'ΔG_solv(AH)  [kcal/mol]':<40} {fmt(r['dG_solv_acid_kcal'])}")
+    print(f"  {'ΔG_solv(A⁻)  [kcal/mol]':<40} {fmt(r['dG_solv_base_kcal'])}")
+    print(f"  {'ΔG_solv(H⁺) [Kelly 2006]  [kcal/mol]':<40} {DG_SOLV_HPLUS:>12.3f}")
+    print(f"  {'─'*40}  {'─'*12}")
+    print(f"  {'ΔG_aq  [kcal/mol]':<40} {fmt(r['dG_aq_kcal'])}")
+    print(f"  {'ΔG_aq  [kJ/mol]':<40} {r['dG_aq_kcal']*4.184:>12.3f}" if r['dG_aq_kcal'] else "")
+    print()
+    pka_str = f"{r['pKa']:.2f}" if r['pKa'] is not None else "N/A"
+    print(f"  pKa = ΔG_aq / (RT·ln10)  =  {pka_str}")
+    print(f"  (incertidumbre típica ±1–2 unidades; Born/CPCM/TZVPD)")
+    if r["warnings"]:
+        print(f"\n  Advertencias:")
+        for w in r["warnings"]:
+            print(f"    ⚠  {w}")
+    print(f"  {sep}\n")
+
+
+def _print_direct_cycle(r: dict):
+    """Imprime las contribuciones del método directo (solo CPCM, sin fase gas)."""
+    sep = "─" * 66
+    print(f"\n  {sep}")
+    print(f"  MÉTODO DIRECTO (solo CPCM) — {r['mol_acid']} → {r['mol_base']} + H⁺")
+    print(f"  T = {r['T']:.2f} K")
+    print(f"  {sep}")
+    print(f"  Conf. AH  : {r['conf_acid']}")
+    print(f"  Conf. A⁻  : {r['conf_base']}")
+    print(f"  Nivel SP(AH)  : {r['theory_sp_acid'] or '—'}")
+    print(f"  Nivel SP(A⁻)  : {r['theory_sp_base'] or '—'}")
+    print()
+    print(f"  {'G_total_CPCM(AH)  [Eh]':<40} {r['G_total_acid_Eh']:>12.8f}")
+    print(f"  {'G_total_CPCM(A⁻)  [Eh]':<40} {r['G_total_base_Eh']:>12.8f}")
+    print(f"  {'G(H⁺, aq)  [kcal/mol]':<40} {r['G_hplus_aq_kcal']:>12.3f}"
+          f"   [Pliego & Riveros 2002, JPCA 106, 7434]")
+    print(f"  {'─'*40}  {'─'*12}")
+    dG = r["dG_aq_kcal"]
+    print(f"  {'ΔG_aq  [kcal/mol]':<40} {dG:+12.3f}" if dG is not None else "")
+    print(f"  {'ΔG_aq  [kJ/mol]':<40} {dG*4.184:>12.3f}" if dG is not None else "")
+    print()
+    pka_str = f"{r['pKa']:.2f}" if r['pKa'] is not None else "N/A"
+    print(f"  pKa = ΔG_aq / (RT·ln10)  =  {pka_str}")
+    print(f"  (método directo: válido si el error de solvatación del nivel de")
+    print(f"  teoría es consistente entre especies; incertidumbre típica ±1–2")
+    print(f"  unidades, similar al ciclo de Born completo)")
+    if r["warnings"]:
+        print(f"\n  Advertencias:")
+        for w in r["warnings"]:
+            print(f"    ⚠  {w}")
+    print(f"  {sep}\n")
+
+
+# ─────────────────────────────────────────────
+#  DISTRIBUCIÓN DE BOLTZMANN ENTRE ESTADOS
+# ─────────────────────────────────────────────
+
+def boltzmann_protonation_states(
+    pKa1: Optional[float],
+    pKa2: Optional[float],
+    pH_values: list[float],
+    T: float = T_STD,
+) -> pd.DataFrame:
+    """
+    Calcula la distribución de especies entre estados de protonación
+    a múltiples valores de pH usando Henderson-Hasselbalch encadenado.
+
+    Para un diácido con pKa1 (AH₂ → AH⁻) y pKa2 (AH⁻ → A²⁻):
+
+      f(AH₂) = 1 / D
+      f(AH⁻) = 10^(pH − pKa1) / D
+      f(A²⁻) = 10^(2·pH − pKa1 − pKa2) / D
+      D = 1 + 10^(pH − pKa1) + 10^(2·pH − pKa1 − pKa2)
+
+    Si solo hay pKa1 (sin pKa2 / sin dianión):
+      f(AH)  = 1 / (1 + 10^(pH − pKa1))
+      f(A⁻)  = 10^(pH − pKa1) / (1 + 10^(pH − pKa1))
+
+    Retorna DataFrame con columnas:
+      pH, f_neutral, f_anion, f_dianion (si pKa2 disponible)
+    """
+    rows = []
+    for pH in pH_values:
+        if pKa1 is not None and pKa2 is not None:
+            a0 = 1.0
+            a1 = 10 ** (pH - pKa1)
+            a2 = 10 ** (2 * pH - pKa1 - pKa2)
+            D  = a0 + a1 + a2
+            rows.append({
+                "pH":        pH,
+                "f_neutral": a0 / D,
+                "f_anion":   a1 / D,
+                "f_dianion": a2 / D,
+            })
+        elif pKa1 is not None:
+            a0 = 1.0
+            a1 = 10 ** (pH - pKa1)
+            D  = a0 + a1
+            rows.append({
+                "pH":        pH,
+                "f_neutral": a0 / D,
+                "f_anion":   a1 / D,
+            })
+        else:
+            rows.append({"pH": pH})
+
+    return pd.DataFrame(rows)
+
+
+# ─────────────────────────────────────────────
+#  IMPRESIÓN DE RESULTADOS
+# ─────────────────────────────────────────────
+
+def print_mol_summary(data: dict, verbose: bool = False):
+    """Imprime resumen del ensemble conformacional de una molécula."""
+    mol = data["mol_name"]
+    df  = data["df"]
+    sep = "─" * 74
+
+    print(f"\n{sep}")
+    print(f"  ESTADO: {mol}")
+    print(sep)
+
+    if df.empty:
+        print("  ⚠  Sin datos.")
+        return
+
+    # Tabla de confórmeros
+    cols_base = ["conformer", "E_sp_aq", "thermo_ok", "n_imag"]
+    cols_g    = [c for c in df.columns if c.startswith("G_total_")]
+    cols_b    = [c for c in df.columns if c.startswith("boltz_")]
+    cols_dg   = [c for c in df.columns if c.startswith("dG_")]
+
+    print(f"\n  Confórmeros SP (acuoso, CPCM):")
+    disp = df[cols_base + cols_g[:2] + cols_b[:2] + cols_dg[:2]].copy()
+    print(disp.to_string(index=False, float_format=lambda x: f"{x:.5f}"))
+
+    print(f"\n  Confórmero representativo (min G_total @ 298K): {data['best_conf']}")
+    print(f"\n  G_Boltzmann del ensemble (energía libre efectiva, Hartree):")
+    for lbl, G in data["G_boltz"].items():
+        if G is not None:
+            print(f"    {lbl}: {G:.8f} Eh")
+        else:
+            print(f"    {lbl}: N/A")
+
+    for w in data["warnings"]:
+        print(f"\n  ⚠  {w}")
+
+
+def print_pka_summary(pka1: dict, pka2: Optional[dict] = None):
+    """Imprime resumen de pKa1 y pKa2 con diagnóstico de incertidumbre."""
+    sep = "═" * 74
+    print(f"\n{sep}")
+    print(f"  RESULTADOS FINALES — CICLOS DE pKa")
+    print(sep)
+
+    if pka1["ok"]:
+        print(f"\n  pKa₁  ({pka1['mol_acid']} → {pka1['mol_base']} + H⁺)"
+              f"   [método: {pka1['method']}]")
+        if pka1["method"] == "born":
+            print(f"  ΔG_gas        = {pka1['dG_gas_kcal']:+.3f} kcal/mol")
+            print(f"  ΔG_solv(AH)   = {pka1['dG_solv_acid_kcal']:+.3f} kcal/mol")
+            print(f"  ΔG_solv(A⁻)   = {pka1['dG_solv_base_kcal']:+.3f} kcal/mol")
+            print(f"  ΔG_solv(H⁺)   = {DG_SOLV_HPLUS:+.3f} kcal/mol  [Kelly 2006]")
+        else:
+            print(f"  G(H⁺, aq)     = {pka1['G_hplus_aq_kcal']:+.3f} kcal/mol "
+                  f"[Pliego & Riveros 2002]")
+        print(f"  ΔG_aq         = {pka1['dG_aq_kcal']:+.3f} kcal/mol")
+        print(f"\n  ━━►  pKa₁  =  {pka1['pKa']:.2f}  (T = {pka1['T']:.2f} K)")
+        if pka1["warnings"]:
+            print(f"\n  ⚠  Advertencias (revisar antes de reportar):")
+            for w in pka1["warnings"]:
+                print(f"     ⚠  {w}")
+    else:
+        print(f"\n  pKa₁: NO calculado.")
+        for w in pka1["warnings"]:
+            print(f"    ⚠  {w}")
+
+    if pka2 is not None:
+        print()
+        if pka2["ok"]:
+            print(f"  pKa₂  ({pka2['mol_acid']} → {pka2['mol_base']} + H⁺)"
+                  f"   [método: {pka2['method']}]")
+            if pka2["method"] == "born":
+                print(f"  ΔG_gas        = {pka2['dG_gas_kcal']:+.3f} kcal/mol")
+                print(f"  ΔG_solv(AH⁻)  = {pka2['dG_solv_acid_kcal']:+.3f} kcal/mol")
+                print(f"  ΔG_solv(A²⁻)  = {pka2['dG_solv_base_kcal']:+.3f} kcal/mol")
+                print(f"  ΔG_solv(H⁺)   = {DG_SOLV_HPLUS:+.3f} kcal/mol  [Kelly 2006]")
+            else:
+                print(f"  G(H⁺, aq)     = {pka2['G_hplus_aq_kcal']:+.3f} kcal/mol "
+                      f"[Pliego & Riveros 2002]")
+            print(f"  ΔG_aq         = {pka2['dG_aq_kcal']:+.3f} kcal/mol")
+            print(f"\n  ━━►  pKa₂  =  {pka2['pKa']:.2f}  (T = {pka2['T']:.2f} K)")
+            if pka2["warnings"]:
+                print(f"\n  ⚠  Advertencias (revisar antes de reportar):")
+                for w in pka2["warnings"]:
+                    print(f"     ⚠  {w}")
+        else:
+            print(f"  pKa₂: NO calculado.")
+            for w in pka2["warnings"]:
+                print(f"    ⚠  {w}")
+
+    print(f"\n  Nota: incertidumbre típica ±1–2 unidades de pKa para métodos")
+    print(f"  Born/CPCM a nivel ωB97X-D3/def2-TZVPD (Ho & Coote 2010). El método")
+    print(f"  'direct' usa solo energías CPCM (sin SP fase gas) con G(H⁺,aq) de")
+    print(f"  Pliego & Riveros 2002 — esta constante NO es intercambiable con la")
+    print(f"  de Tissandier/Kelly usada en 'born', que está calibrada para SP en")
+    print(f"  fase gas pura. Cada método usa su propia referencia del protón.")
+    print(f"{sep}\n")
+
+
+def print_distribution_table(
+    df_dist: pd.DataFrame,
+    pKa1: Optional[float],
+    pKa2: Optional[float],
+    ph_highlight: Optional[float] = None,
+):
+    """Imprime tabla de distribución de especies por pH."""
+    sep = "─" * 74
+    print(f"\n{sep}")
+    print(f"  DISTRIBUCIÓN DE ESTADOS DE PROTONACIÓN  "
+          f"(pKa₁ = {pKa1:.2f}" + (f", pKa₂ = {pKa2:.2f}" if pKa2 else "") + ")")
+    print(sep)
+
+    has_dianion = "f_dianion" in df_dist.columns
+
+    # Cabecera
+    if has_dianion:
+        print(f"\n  {'pH':>6}  {'f(AH₂)':>10}  {'f(AH⁻)':>10}  {'f(A²⁻)':>10}  {'Dominante'}")
+        print(f"  {'─'*6}  {'─'*10}  {'─'*10}  {'─'*10}  {'─'*12}")
+    else:
+        print(f"\n  {'pH':>6}  {'f(AH)':>10}  {'f(A⁻)':>10}  {'Dominante'}")
+        print(f"  {'─'*6}  {'─'*10}  {'─'*10}  {'─'*12}")
+
+    for _, row in df_dist.iterrows():
+        pH   = row["pH"]
+        fn   = row.get("f_neutral", 0.0)
+        fa   = row.get("f_anion",   0.0)
+        fd   = row.get("f_dianion", 0.0) if has_dianion else None
+
+        fracs = {"neutral": fn, "anion": fa}
+        if has_dianion:
+            fracs["dianion"] = fd
+        dominant = max(fracs, key=fracs.get)
+
+        marker = " ◀" if (ph_highlight is not None and abs(pH - ph_highlight) < 0.05) else ""
+
+        if has_dianion:
+            print(f"  {pH:6.2f}  {fn:10.4f}  {fa:10.4f}  {fd:10.4f}  "
+                  f"{dominant}{marker}")
+        else:
+            print(f"  {pH:6.2f}  {fn:10.4f}  {fa:10.4f}  {dominant}{marker}")
+
+    # Puntos de cambio de especie dominante
+    print(f"\n  Punto isoelectrónico (dominancia igual):")
+    if pKa1:
+        print(f"    AH₂ = AH⁻  →  pH = pKa₁ = {pKa1:.2f}")
+    if pKa2:
+        print(f"    AH⁻ = A²⁻  →  pH = pKa₂ = {pKa2:.2f}")
+    if pKa1 and pKa2:
+        pH_PI = (pKa1 + pKa2) / 2
+        print(f"    Punto isoeléctrico (pI) ≈ (pKa₁ + pKa₂)/2 = {pH_PI:.2f}")
+
+    print(sep)
+
+
+# ─────────────────────────────────────────────
+#  VISUALIZACIÓN (matplotlib)
+# ─────────────────────────────────────────────
+
+def plot_distribution(
+    df_dist: pd.DataFrame,
+    pKa1: Optional[float],
+    pKa2: Optional[float],
+    output_path: Optional[Path] = None,
+    ph_highlight: Optional[float] = None,
+):
+    """
+    Diagrama de distribución de especies (fracciones molares vs pH).
+    Guarda como PNG si se provee output_path; si no, muestra en pantalla.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.ticker as ticker
+    except ImportError:
+        print("  ⚠  matplotlib no disponible. Instalar con: conda install matplotlib")
+        return
+
+    has_dianion = "f_dianion" in df_dist.columns
+    pH_vals = df_dist["pH"].values
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    colors = ["#2196F3", "#4CAF50", "#F44336"]  # azul, verde, rojo
+    labels = ["AH₂ (q=0)", "AH⁻ (q=−1)", "A²⁻ (q=−2)"]
+    cols   = ["f_neutral", "f_anion"] + (["f_dianion"] if has_dianion else [])
+
+    for col, label, color in zip(cols, labels, colors):
+        if col in df_dist.columns:
+            ax.plot(pH_vals, df_dist[col].values * 100, label=label,
+                    color=color, linewidth=2.0)
+
+    # Líneas verticales en pKa
+    if pKa1:
+        ax.axvline(pKa1, color="#2196F3", linestyle="--", alpha=0.6,
+                   label=f"pKa₁ = {pKa1:.2f}")
+    if pKa2:
+        ax.axvline(pKa2, color="#4CAF50", linestyle="--", alpha=0.6,
+                   label=f"pKa₂ = {pKa2:.2f}")
+
+    # pH oceánico antártico
+    if ph_highlight:
+        ax.axvline(ph_highlight, color="gray", linestyle=":", alpha=0.8,
+                   label=f"pH = {ph_highlight} (referencia)")
+        ax.axvspan(ph_highlight - 0.1, ph_highlight + 0.1,
+                   alpha=0.08, color="gray")
+
+    ax.set_xlabel("pH", fontsize=12)
+    ax.set_ylabel("Fracción molar (%)", fontsize=12)
+    ax.set_title("Distribución de estados de protonación\n"
+                 "(Henderson-Hasselbalch, ciclo de Born)", fontsize=11)
+    ax.set_ylim(-2, 102)
+    ax.set_xlim(pH_vals[0], pH_vals[-1])
+    ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%g%%"))
+    ax.legend(fontsize=9, loc="center right")
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    if output_path:
+        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        print(f"  Gráfico guardado en: {output_path}")
+    else:
+        plt.show()
+    plt.close(fig)
+
+
+def plot_conformer_boltzmann(data_list: list[dict], output_path: Optional[Path] = None):
+    """
+    Gráfico de barras apiladas: distribución conformacional (298 K) por estado.
+    Muestra los confórmeros con mayor peso en cada estado de protonación.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.cm as cm
+    except ImportError:
+        return
+
+    fig, axes = plt.subplots(1, len(data_list), figsize=(5 * len(data_list), 4),
+                             sharey=True)
+    if len(data_list) == 1:
+        axes = [axes]
+
+    for ax, data in zip(axes, data_list):
+        df = data["df"]
+        if df.empty or "boltz_298K" not in df.columns:
+            ax.set_title(data["mol_name"])
+            ax.text(0.5, 0.5, "Sin datos", ha="center", va="center",
+                    transform=ax.transAxes)
+            continue
+
+        # Filtrar confs con boltz > 1%
+        col_b = "boltz_298K"
+        sub = df[df[col_b] > 0.01].sort_values(col_b, ascending=False)
+
+        colors = cm.viridis(np.linspace(0.2, 0.85, len(sub)))
+        bars = ax.bar(range(len(sub)), sub[col_b].values * 100,
+                      color=colors, width=0.7)
+        ax.set_xticks(range(len(sub)))
+        ax.set_xticklabels(sub["conformer"].tolist(), rotation=45, ha="right",
+                           fontsize=7)
+        ax.set_title(data["mol_name"], fontsize=9)
+        ax.set_ylabel("Boltzmann @ 298 K (%)" if ax == axes[0] else "")
+        ax.set_ylim(0, 105)
+
+        # Anotar porcentaje sobre cada barra
+        for bar, pct in zip(bars, sub[col_b].values * 100):
+            if pct > 5:
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 1,
+                        f"{pct:.1f}%", ha="center", fontsize=7)
+
+    fig.suptitle("Distribución conformacional (Boltzmann, 298 K)", fontsize=11)
+    plt.tight_layout()
+
+    if output_path:
+        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        print(f"  Gráfico conformacional guardado en: {output_path}")
+    else:
+        plt.show()
+    plt.close(fig)
+
+
+# ─────────────────────────────────────────────
+#  EXPORTACIÓN
+# ─────────────────────────────────────────────
+
+def export_results(
+    pka1: dict,
+    pka2: Optional[dict],
+    df_dist: pd.DataFrame,
+    data_list: list[dict],
+    fmt: str,
+):
+    """Exporta resultados del ciclo de pKa y distribución de especies."""
+    out_dir = WORK_ROOT
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── DataFrame del ciclo de Born ─────────────────────────────────────
+    cycle_rows = []
+    for pka_r, label in [(pka1, "pKa1"), (pka2, "pKa2")]:
+        if pka_r is None:
+            continue
+        cycle_rows.append({
+            "reaction":          label,
+            "mol_acid":          pka_r.get("mol_acid"),
+            "mol_base":          pka_r.get("mol_base"),
+            "method":            pka_r.get("method"),
+            "conf_acid":         pka_r.get("conf_acid"),
+            "conf_base":         pka_r.get("conf_base"),
+            "T_K":               pka_r.get("T"),
+            "dG_gas_kcal":       pka_r.get("dG_gas_kcal"),
+            "dG_solv_acid_kcal": pka_r.get("dG_solv_acid_kcal"),
+            "dG_solv_base_kcal": pka_r.get("dG_solv_base_kcal"),
+            "dG_solv_Hplus_kcal": DG_SOLV_HPLUS if pka_r.get("method") == "born" else None,
+            "G_hplus_aq_kcal":   pka_r.get("G_hplus_aq_kcal"),
+            "dG_aq_kcal":        pka_r.get("dG_aq_kcal"),
+            "dG_aq_kJ":          (pka_r.get("dG_aq_kcal") or 0) * 4.184,
+            "pKa":               pka_r.get("pKa"),
+            "ok":                pka_r.get("ok"),
+        })
+
+    df_cycle = pd.DataFrame(cycle_rows)
+
+    # ── DataFrame de distribución conformacional ─────────────────────────
+    conf_rows = []
+    for d in data_list:
+        df_c = d["df"]
+        for _, row in df_c.iterrows():
+            r = {"mol": d["mol_name"]}
+            r.update(row.to_dict())
+            conf_rows.append(r)
+    df_confs = pd.DataFrame(conf_rows)
+
+    if fmt in ("csv", "both"):
+        df_cycle.to_csv(out_dir / "pka_cycle.csv", index=False)
+        df_dist.to_csv(out_dir / "protonation_distribution.csv", index=False)
+        df_confs.to_csv(out_dir / "conformer_boltzmann.csv", index=False)
+        print(f"  CSVs guardados en: {out_dir}/")
+
+    if fmt in ("xlsx", "both"):
+        xlsx_path = out_dir / "protonation_cycle_results.xlsx"
+        with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+            if not df_cycle.empty:
+                df_cycle.to_excel(writer, sheet_name="pKa_cycle", index=False)
+            df_dist.to_excel(writer, sheet_name="Species_distribution", index=False)
+            if not df_confs.empty:
+                # columnas relevantes
+                keep = ["mol", "conformer", "E_sp_aq", "thermo_ok", "n_imag",
+                        "G_total_298K", "boltz_298K", "dG_298K_kcal"]
+                keep = [c for c in keep if c in df_confs.columns]
+                df_confs[keep].to_excel(writer, sheet_name="Conformer_Boltzmann", index=False)
+        print(f"  Excel guardado en: {xlsx_path}")
+
+
+# ─────────────────────────────────────────────
+#  PUNTO DE ENTRADA
+# ─────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Ciclo termodinámico de pKa y distribución de Boltzmann "
+                    "entre estados de protonación (Born cycle, Ho & Coote 2010).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Ejemplos:
+  # Los tres estados (pKa1 + pKa2 + distribución completa):
+  python protonation_cycle.py \\
+      --neutral R --anion B --dianion C
+
+  # Solo pKa1:
+  python protonation_cycle.py --neutral R --anion B
+
+  # Con exportación, gráficos y pH de referencia antártico:
+  python protonation_cycle.py \\
+      --neutral R --anion B --dianion C \\
+      --ph 8.1 --export xlsx --plot --verbose
+        """,
+    )
+
+    parser.add_argument("--neutral",  metavar="DIR",
+                        help="Nombre de carpeta en runs/ para AH₂ (q=0), p. ej. 'R'")
+    parser.add_argument("--anion",    metavar="DIR",
+                        help="Nombre de carpeta en runs/ para AH⁻ (q=−1), p. ej. 'B'")
+    parser.add_argument("--dianion",  metavar="DIR",
+                        help="Nombre de carpeta en runs/ para A²⁻ (q=−2), p. ej. 'C'")
+    parser.add_argument("--ph",       type=float, default=PH_ANTARCTIC,
+                        help=f"pH de referencia para la distribución "
+                             f"(default: {PH_ANTARCTIC}, agua de mar antártica)")
+    parser.add_argument("--ph-range", nargs=2, type=float, default=[0.0, 14.0],
+                        metavar=("pH_MIN", "pH_MAX"),
+                        help="Rango de pH para el diagrama (default: 0 14)")
+    parser.add_argument("--ph-step",  type=float, default=0.1,
+                        help="Paso del eje de pH (default: 0.1)")
+    parser.add_argument("--method",   choices=["auto", "born", "direct"], default="auto",
+                        help="Método para ΔG_aq: 'born' (ciclo completo, requiere "
+                             "SP fase gas), 'direct' (solo CPCM, sin SP fase gas), "
+                             "'auto' usa born si hay SP gas y si no cae a direct "
+                             "(default: auto)")
+    parser.add_argument("--export",   choices=["csv", "xlsx", "both"], default=None,
+                        help="Exportar resultados")
+    parser.add_argument("--plot",     action="store_true",
+                        help="Generar gráficos de distribución y Boltzmann conformacional")
+    parser.add_argument("--verbose",  action="store_true",
+                        help="Mostrar contribuciones detalladas del ciclo de Born")
+    args = parser.parse_args()
+
+    # Verificar que se pasó al menos un par de estados
+    if args.neutral is None and args.anion is None:
+        parser.error("Debes proporcionar al menos --neutral y --anion.")
+
+    # ── Recolectar datos por estado ──────────────────────────────────────
+    data_neutral = data_anion = data_dianion = None
+
+    print("\n" + "═" * 74)
+    print("  PROTONATION CYCLE  —  FAE-MAA / kmilozeta")
+    print("═" * 74)
+
+    if args.neutral:
+        print(f"\n▸ Cargando estado neutro: {args.neutral}")
+        data_neutral = collect_mol_data(args.neutral, verbose=args.verbose)
+        print_mol_summary(data_neutral, verbose=args.verbose)
+
+    if args.anion:
+        print(f"\n▸ Cargando anión: {args.anion}")
+        data_anion = collect_mol_data(args.anion, verbose=args.verbose)
+        print_mol_summary(data_anion, verbose=args.verbose)
+
+    if args.dianion:
+        print(f"\n▸ Cargando dianión: {args.dianion}")
+        data_dianion = collect_mol_data(args.dianion, verbose=args.verbose)
+        print_mol_summary(data_dianion, verbose=args.verbose)
+
+    # ── Ciclo de pKa ─────────────────────────────────────────────────────
+    pka1_result = None
+    pka2_result = None
+
+    if data_neutral and data_anion:
+        print(f"\n▸ Calculando pKa₁  ({args.neutral} → {args.anion} + H⁺)")
+        pka1_result = compute_pka(data_neutral, data_anion,
+                                  T=T_STD, verbose=args.verbose, method=args.method)
+
+    if data_anion and data_dianion:
+        print(f"\n▸ Calculando pKa₂  ({args.anion} → {args.dianion} + H⁺)")
+        pka2_result = compute_pka(data_anion, data_dianion,
+                                  T=T_STD, verbose=args.verbose, method=args.method)
+
+    if pka1_result is None and pka2_result is None:
+        print("\n  ⚠  No se pudo calcular ningún pKa. "
+              "Revisa los directorios y los SP fase gas.")
+        sys.exit(1)
+
+    # Imprimir resumen de pKa
+    print_pka_summary(
+        pka1_result or {"ok": False, "warnings": ["No calculado"], "mol_acid": "—",
+                        "mol_base": "—", "T": T_STD, "method": None},
+        pka2_result,
+    )
+
+    # ── Distribución de especies ──────────────────────────────────────────
+    pKa1 = pka1_result["pKa"] if (pka1_result and pka1_result["ok"]) else None
+    pKa2 = pka2_result["pKa"] if (pka2_result and pka2_result["ok"]) else None
+
+    if pKa1 is not None:
+        pH_range = np.arange(args.ph_range[0], args.ph_range[1] + args.ph_step / 2,
+                             args.ph_step)
+        # Incluir siempre los pH de referencia y los pKa
+        pH_highlights = [args.ph, PH_STANDARD]
+        if pKa1: pH_highlights.append(round(pKa1, 1))
+        if pKa2: pH_highlights.append(round(pKa2, 1))
+        pH_all = sorted(set(list(pH_range) + pH_highlights))
+        pH_all = [p for p in pH_all if args.ph_range[0] <= p <= args.ph_range[1]]
+
+        df_dist = boltzmann_protonation_states(pKa1, pKa2, pH_all)
+
+        # Tabla condensada (paso 0.5 para no saturar la pantalla)
+        pH_display = np.arange(args.ph_range[0], args.ph_range[1] + 0.5, 0.5)
+        pH_display_list = sorted(set(
+            [round(p, 1) for p in pH_display] + pH_highlights
+        ))
+        pH_display_list = [p for p in pH_display_list
+                           if args.ph_range[0] <= p <= args.ph_range[1]]
+        df_display = boltzmann_protonation_states(pKa1, pKa2, pH_display_list)
+        print_distribution_table(df_display, pKa1, pKa2, ph_highlight=args.ph)
+
+        # Distribución a los pH de referencia
+        print(f"\n  ── Fracciones a pH de referencia ──")
+        for pH_ref, label in [
+            (args.ph,     f"pH {args.ph} (agua de mar antártica)"),
+            (PH_STANDARD, f"pH {PH_STANDARD} (estándar)"),
+        ]:
+            row = boltzmann_protonation_states(pKa1, pKa2, [pH_ref])
+            if not row.empty:
+                fn = row["f_neutral"].iloc[0] * 100 if "f_neutral" in row else None
+                fa = row["f_anion"].iloc[0]   * 100 if "f_anion"   in row else None
+                fd = row["f_dianion"].iloc[0] * 100 if "f_dianion" in row else None
+                parts = []
+                if fn is not None: parts.append(f"f(AH₂)={fn:.1f}%")
+                if fa is not None: parts.append(f"f(AH⁻)={fa:.1f}%")
+                if fd is not None: parts.append(f"f(A²⁻)={fd:.1f}%")
+                print(f"    {label}: {', '.join(parts)}")
+    else:
+        df_dist = pd.DataFrame()
+
+    # ── Exportar ─────────────────────────────────────────────────────────
+    data_list = [d for d in [data_neutral, data_anion, data_dianion] if d is not None]
+
+    if args.export and not df_dist.empty:
+        export_results(
+            pka1_result or {},
+            pka2_result,
+            df_dist,
+            data_list,
+            args.export,
+        )
+
+    # ── Gráficos ─────────────────────────────────────────────────────────
+    if args.plot and pKa1 is not None:
+        out_dir = WORK_ROOT
+        plot_distribution(
+            df_dist, pKa1, pKa2,
+            output_path=out_dir / "species_distribution.png",
+            ph_highlight=args.ph,
+        )
+        plot_conformer_boltzmann(
+            data_list,
+            output_path=out_dir / "conformer_boltzmann.png",
+        )
+
+    print("\nTerminado.\n")
+
+
+if __name__ == "__main__":
+    main()
