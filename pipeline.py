@@ -7,6 +7,7 @@ Uso (modo normal):
     python pipeline.py --mol molecules/mol_A.xyz --charge -1
     python pipeline.py --mol molecules/mol_A.xyz --charge 0 --start sp
     python pipeline.py --mol molecules/mol_A.xyz --charge -1 --nconf 5 --start tddft
+    python pipeline.py --mol molecules/mol_A.xyz --charge -1 --skipnumfreq   # OPT → SP → TDDFT directo
     python pipeline.py --status                  # ver estado de todos los runs
 
 Uso (modo expansión conformacional, --expand-crest):
@@ -1555,6 +1556,14 @@ Ejemplos (modo expansión conformacional):
     parser.add_argument("--status", action="store_true",
                         help="mostrar estado de todos los runs y salir")
     parser.add_argument(
+        "--skipnumfreq", action="store_true",
+        help=(
+            "Salta NUMFREQ y pasa directo de OPT a SP/TDDFT (modo normal, "
+            "no aplica a --expand-crest). Usa la geometría de 02_opt/ "
+            "directamente como input de SP, sin correcciones térmicas de NumFreq."
+        ),
+    )
+    parser.add_argument(
         "--use-censo-prescreen", action="store_true",
         help=(
             "Pre-screening barato con CENSO (PBE-D4/SV(p) vía ~/.censo2rc) "
@@ -1644,6 +1653,18 @@ Ejemplos (modo expansión conformacional):
     )
 
     args = parser.parse_args()
+
+    if args.skipnumfreq and args.expand_crest:
+        sys.exit(
+            "ERROR: --skipnumfreq no aplica en modo --expand-crest "
+            "(usa --start numfreq/sp/tddft para saltar etapas ahí)."
+        )
+    if args.skipnumfreq and args.start in ("numfreq", "sp", "tddft"):
+        sys.exit(
+            f"ERROR: --skipnumfreq es incompatible con --start {args.start}. "
+            f"--skipnumfreq ya implica saltar NUMFREQ desde OPT; usa solo "
+            f"--start opt (o --start crest) junto con --skipnumfreq."
+        )
 
     # ── Resolver recursos: --cores (simple) vs flags avanzados ───────────────
     # RAM total en MB asumida (ajusta si tienes diferente; 28 GB dejan margen al OS)
@@ -1993,7 +2014,14 @@ Ejemplos (modo expansión conformacional):
         log.info(f"[OPT] saltado — encontrados {len(opt_dirs)} directorios previos")
 
     # ── Etapa 3: NUMFREQ ────────────────────────────────────────
-    if start_idx <= STEPS.index("numfreq"):
+    if args.skipnumfreq:
+        log.warning(
+            "[NUMFREQ] SALTADO por --skipnumfreq — SP/TDDFT usarán "
+            "geometría de 02_opt/ directamente. Sin correcciones térmicas "
+            "de NumFreq en el ciclo termodinámico de pKa."
+        )
+        freq_dirs = opt_dirs
+    elif start_idx <= STEPS.index("numfreq"):
         freq_dirs = stage_numfreq(opt_dirs, mol_dir, args.charge, log)
         if not freq_dirs:
             log.error("Ningún cálculo de frecuencias completado. Abortando.")
