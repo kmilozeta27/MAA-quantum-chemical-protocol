@@ -29,8 +29,10 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -65,12 +67,63 @@ def build_omp_env(nprocs: int) -> dict:
         "OMP_NUM_THREADS": str(nprocs),
         "MKL_NUM_THREADS": "1",
         "OPENBLAS_NUM_THREADS": "1",
+        # ── Fix para CPU híbrida P-core/E-core + taskset ──────────────
+        # Cuando taskset restringe el proceso a un subconjunto de cores,
+        # el mpirun interno de ORCA (orca_leanscf_mpi en la fase LEANSCF)
+        # invoca hwloc para detectar topología, y hwloc lee /sys/.../cluster
+        # directamente — sin filtrar por el cpuset heredado de taskset.
+        # En esta CPU híbrida eso produce cpusets de cluster L1d que no son
+        # subconjunto coherente del cpuset restringido ("intersection
+        # without inclusion"), y aunque hwloc dice que ignora el error y
+        # continúa, el reparto de trabajo entre ranks MPI en LEANSCF queda
+        # corrupto y aborta justo al iniciar la formación de Fock.
+        # Forzar el binding por núcleo en vez de por topología (que es lo
+        # que realmente queremos al usar taskset) evita que hwloc intente
+        # razonar sobre clusters L1d/L2 inconsistentes.
+        "OMPI_MCA_hwloc_base_binding_policy": "none",
+        "OMPI_MCA_rmaps_base_mapping_policy": "core",
+        "OMPI_MCA_hwloc_base_use_hwthreads_as_cpus": "1",
     }
 
 # Alias global mantenido para compatibilidad con run_orca(env=None)
 OMP_ENV: dict = build_omp_env(NPROCS)
 
 STEPS = ["crest", "opt", "numfreq", "sp", "tddft"]
+
+# ─────────────────────────────────────────────
+#  GESTIÓN DE SEÑALES / CTRL-C
+# ─────────────────────────────────────────────
+
+_active_procs: list[subprocess.Popen] = []   # procesos ORCA activos
+_procs_lock   = threading.Lock()
+
+def _kill_active_procs() -> None:
+    """Mata todos los subprocesos ORCA/taskset registrados en _active_procs."""
+    with _procs_lock:
+        procs = list(_active_procs)
+    for p in procs:
+        try:
+            p.terminate()
+        except OSError:
+            pass
+    # Espera breve y SIGKILL si siguen vivos
+    for p in procs:
+        try:
+            p.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            try:
+                p.kill()
+            except OSError:
+                pass
+
+def _sigint_handler(signum, frame) -> None:  # noqa: ANN001
+    print("\n[pipeline] Ctrl-C recibido — terminando procesos ORCA activos…",
+          file=sys.stderr)
+    _kill_active_procs()
+    sys.exit(130)   # código estándar para Ctrl-C (128 + SIGINT)
+
+signal.signal(signal.SIGINT,  _sigint_handler)
+signal.signal(signal.SIGTERM, _sigint_handler)
 
 # ─────────────────────────────────────────────
 #  CONSTANTES FÍSICAS / MODO EXPAND
@@ -360,13 +413,25 @@ def resolve_opt_xyz(opt_dir: Path) -> Optional[Path]:
 
 def run_orca(inp_file: Path, out_file: Path, log: logging.Logger,
              timeout_hours: float = 16.0,
-             env: Optional[dict] = None) -> bool:
+             env: Optional[dict] = None,
+             cpu_list: Optional[list[int]] = None) -> bool:
     """
     Lanza ORCA de forma síncrona. Devuelve True si terminó bien.
     Si el .out ya existe y tiene TERMINATED NORMALLY, omite la ejecución.
     `env` permite pasar un entorno de proceso personalizado; si es None
     se construye dinámicamente desde los globales NPROCS actuales (evita
     usar el OMP_ENV construido al inicio del módulo, que puede estar obsoleto).
+
+    `cpu_list`: lista explícita de CPUs lógicas (no necesariamente
+    contiguas) a las que confinar el proceso vía `taskset -c cpu1,cpu2,...`.
+    Se usa una lista en vez de un rango lo-hi porque la topología real de
+    esta máquina (CPU híbrida P-core/E-core, ver `assign_cpu_lists`) no
+    siempre permite asignar rangos contiguos sin partir un core físico
+    SMT entre dos jobs distintos — confinar 2 ranks MPI a los 2 hilos SMT
+    del MISMO P-core (ej. CPUs 0,1) no es un problema en sí, pero mezclar
+    eso con asunciones de "cores contiguos = cores físicos distintos"
+    llevó a un crash de hwloc en LEANSCF (ver historial: "intersection
+    without inclusion" + abort en la formación de Fock).
     """
     if check_success(out_file):
         log.info(f"  ↩  ya completado: {out_file.name} — saltando")
@@ -380,18 +445,46 @@ def run_orca(inp_file: Path, out_file: Path, log: logging.Logger,
         log.error(f"  ✗  no se encontró el ejecutable de ORCA en: {ORCA_BIN}")
         return False
 
-    log.info(f"  ▶  lanzando ORCA: {inp_file.name}")
-    t0 = time.time()
+    cmd = [str(ORCA_BIN), str(inp_file.resolve())]
+    if cpu_list:
+        cpu_str = ",".join(str(c) for c in cpu_list)
+        cmd = ["taskset", "-c", cpu_str] + cmd
+        log.info(f"  ▶  lanzando ORCA: {inp_file.name}  (cores {cpu_str})")
+    else:
+        log.info(f"  ▶  lanzando ORCA: {inp_file.name}")
+
+    t0       = time.time()
+    timeout  = timeout_hours * 3600
+    proc_env = env if env is not None else build_omp_env(NPROCS)
+
     try:
         with open(out_file, "w") as fout:
-            proc = subprocess.run(
-                [str(ORCA_BIN), str(inp_file.resolve())],
+            proc = subprocess.Popen(
+                cmd,
                 stdout=fout,
                 stderr=subprocess.STDOUT,
                 cwd=inp_file.parent,
-                env=env if env is not None else build_omp_env(NPROCS),
-                timeout=timeout_hours * 3600,
+                env=proc_env,
             )
+
+        # Registrar para que _sigint_handler pueda matar el proceso
+        with _procs_lock:
+            _active_procs.append(proc)
+
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            log.error(f"  ✗  {inp_file.name} TIMEOUT ({timeout_hours} h)")
+            return False
+        finally:
+            with _procs_lock:
+                try:
+                    _active_procs.remove(proc)
+                except ValueError:
+                    pass
+
         elapsed = (time.time() - t0) / 60
         if check_success(out_file):
             log.info(f"  ✓  {inp_file.name} terminó en {elapsed:.1f} min")
@@ -407,11 +500,12 @@ def run_orca(inp_file: Path, out_file: Path, log: logging.Logger,
             log.error(f"  ✗  {inp_file.name} FALLÓ (returncode={proc.returncode}, "
                       f"{elapsed:.1f} min) — revisa {out_file}")
             return False
-    except subprocess.TimeoutExpired:
-        log.error(f"  ✗  {inp_file.name} TIMEOUT ({timeout_hours} h)")
-        return False
-    except FileNotFoundError:
-        log.error(f"  ✗  no se pudo ejecutar ORCA — verifica ORCA_BIN: {ORCA_BIN}")
+    except FileNotFoundError as e:
+        if cpu_list and "taskset" in str(e):
+            log.error(f"  ✗  no se encontró 'taskset' en PATH — instálalo "
+                      f"(paquete util-linux) o llama a run_orca sin cpu_list")
+        else:
+            log.error(f"  ✗  no se pudo ejecutar ORCA — verifica ORCA_BIN: {ORCA_BIN}")
         return False
     except Exception as e:
         log.error(f"  ✗  error inesperado al lanzar ORCA: {e}")
@@ -793,22 +887,36 @@ def stage_sp(freq_dirs: list[Path], mol_dir: Path,
             for d in freq_dirs
         ]
 
+        _check_cpu_budget(batch_size, _nprocs, log)
+
         for b_start in range(0, len(tasks_all), batch_size):
             batch    = tasks_all[b_start : b_start + batch_size]
             lote_num = b_start // batch_size + 1
             ids      = [t["conf_id"] for t in batch]
-            log.info(f"[SP] ── Lote {lote_num}/{n_lotes}: {ids}")
+
+            cpu_lists = assign_cpu_lists(len(batch), _nprocs)
+            for t, cl in zip(batch, cpu_lists):
+                t["cpu_list"] = cl
+
+            log.info(f"[SP] ── Lote {lote_num}/{n_lotes}: {ids}  "
+                     f"(cores: {[','.join(map(str, cl)) for cl in cpu_lists]})")
 
             with ThreadPoolExecutor(max_workers=len(batch)) as pool:
                 futures = {pool.submit(_sp_worker, t): t["conf_id"] for t in batch}
-                for fut in as_completed(futures):
-                    res = fut.result()
-                    tag = "✓" if res["success"] else "✗"
-                    log.info(f"[SP]   {tag} {res['conf_id']}  ({res['elapsed']:.1f} min)")
-                    if res["success"] and res["sp_dir"] is not None:
-                        successful.append(res["sp_dir"])
-                    else:
-                        log.warning(f"[SP] {res['conf_id']} falló — excluido")
+                try:
+                    for fut in as_completed(futures):
+                        res = fut.result()
+                        tag = "✓" if res["success"] else "✗"
+                        log.info(f"[SP]   {tag} {res['conf_id']}  ({res['elapsed']:.1f} min)")
+                        if res["success"] and res["sp_dir"] is not None:
+                            successful.append(res["sp_dir"])
+                        else:
+                            log.warning(f"[SP] {res['conf_id']} falló — excluido")
+                except KeyboardInterrupt:
+                    log.warning("[SP] Ctrl-C — cancelando lote, esperando workers…")
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    _kill_active_procs()
+                    sys.exit(130)
 
     log.info(f"[SP] {len(successful)}/{len(freq_dirs)} completados")
     return successful
@@ -911,6 +1019,11 @@ def _opt_worker(task: dict) -> dict:
 
     task debe contener:
         conf_id, conf_dir, atoms, charge, template, nprocs, maxcore, log
+    Opcional:
+        cpu_list: list[int] de CPUs lógicas exclusivas para este worker,
+                  asignado por el orquestador del lote (stage_expand_opt)
+                  vía assign_cpu_lists() para evitar que OpenMPI distribuya
+                  mal los procesos entre workers concurrentes.
 
     Devuelve:
         dict con conf_id, conf_dir, energy (Ha o None), success, elapsed (min)
@@ -923,6 +1036,7 @@ def _opt_worker(task: dict) -> dict:
     nprocs   : int           = task["nprocs"]
     maxcore  : int           = task["maxcore"]
     log      : logging.Logger = task["log"]
+    cpu_list : Optional[list[int]] = task.get("cpu_list")
 
     inp_file = conf_dir / "opt.inp"
     out_file = conf_dir / "opt.out"
@@ -942,7 +1056,7 @@ def _opt_worker(task: dict) -> dict:
     # Env por worker: construido con el nprocs del task, no con el global.
     # Evita race conditions al modificar os.environ desde hilos concurrentes.
     worker_env = build_omp_env(nprocs)
-    success = run_orca(inp_file, out_file, log, env=worker_env)
+    success = run_orca(inp_file, out_file, log, env=worker_env, cpu_list=cpu_list)
     elapsed = (time.time() - t0) / 60
 
     energy: Optional[float] = None
@@ -970,6 +1084,8 @@ def _sp_worker(task: dict) -> dict:
 
     task debe contener:
         conf_id, freq_dir, charge, template, nprocs, maxcore, mol_dir, log
+    Opcional:
+        cpu_list: list[int] de CPUs lógicas exclusivas para este worker.
 
     Devuelve:
         dict con conf_id, sp_dir (Path o None), success, elapsed (min)
@@ -982,6 +1098,7 @@ def _sp_worker(task: dict) -> dict:
     maxcore  : int            = task["maxcore"]
     mol_dir  : Path           = task["mol_dir"]
     log      : logging.Logger = task["log"]
+    cpu_list : Optional[list[int]] = task.get("cpu_list")
 
     opt_xyz = resolve_opt_xyz(freq_dir)
     if opt_xyz is None:
@@ -1006,7 +1123,7 @@ def _sp_worker(task: dict) -> dict:
 
     t0         = time.time()
     worker_env = build_omp_env(nprocs)
-    success    = run_orca(inp_file, out_file, log, env=worker_env)
+    success    = run_orca(inp_file, out_file, log, env=worker_env, cpu_list=cpu_list)
     elapsed    = (time.time() - t0) / 60
 
     return {
@@ -1015,6 +1132,112 @@ def _sp_worker(task: dict) -> dict:
         "success": success,
         "elapsed": elapsed,
     }
+
+
+def assign_cpu_lists(batch_size: int, nprocs_per_job: int) -> list[list[int]]:
+    """
+    Calcula listas explícitas de CPUs lógicas (no necesariamente
+    contiguas) para cada worker de un lote, basadas en la topología REAL
+    de este ThinkPad T14 (Core Ultra 7), confirmada con `lscpu -e`:
+
+        CPU lógica  →  CORE físico   →  tipo
+        0, 1        →  CORE 0        →  P-core (2 hilos SMT, mismo L2)
+        2, 3        →  CORE 1        →  P-core (2 hilos SMT, mismo L2)
+        4           →  CORE 2        →  E-core
+        5           →  CORE 3        →  E-core
+        6           →  CORE 4        →  E-core
+        7           →  CORE 5        →  E-core
+        8           →  CORE 6        →  E-core
+        9           →  CORE 7        →  E-core
+        10          →  CORE 8        →  E-core
+        11          →  CORE 9        →  E-core
+        12          →  CORE 10       →  LP E-core (max 400 MHz — evitar)
+        13          →  CORE 11       →  LP E-core (max ~1.3 GHz — evitar)
+
+    Por qué NO se puede usar aritmética ingenua (i*n, (i+1)*n-1) ni rangos
+    lo-hi contiguos: los pares (0,1) y (2,3) son hilos SMT del MISMO core
+    físico, no dos cores distintos. Confinar 2 ranks MPI ahí no es
+    problemático en sí mismo, pero asumir que "rango contiguo == cores
+    físicos independientes" en una CPU híbrida hizo que hwloc (usado
+    internamente por el mpirun que ORCA lanza para LEANSCF) leyera una
+    topología de cluster L1d/L2 inconsistente con el cpuset heredado de
+    taskset, produciendo "intersection without inclusion" y abortando el
+    cálculo justo al iniciar la formación de Fock (visto en conf_008).
+
+    Estrategia: cada worker recibe un conjunto explícito de CPUs lógicas
+    que corresponden a unidades físicas reales — 1 P-core completo (sus 2
+    hilos SMT juntos, nunca repartidos entre dos workers distintos) o
+    E-cores individuales. Los LP E-cores se usan solo como último recurso
+    porque corren a relojes mucho más bajos y desbalancean el lote
+    (todos los workers de un batch esperan al más lento).
+
+    nprocs_per_job determina cuántas CPUs lógicas recibe cada worker:
+      - == 2: preferentemente 1 P-core completo (2 hilos SMT); si no
+        alcanzan los P-cores, 2 E-cores individuales (no comparten core
+        físico entre sí, pero tampoco se parte ningún core entre jobs).
+      - == 1: 1 E-core (preferido) o, si no alcanzan, 1 hilo SMT de P-core.
+      - otro valor (ej. 6 para NumFreq): reparto secuencial sobre el pool
+        completo en el mismo orden de prioridad.
+
+    Devuelve una lista de listas de CPUs, una por worker, en el mismo
+    orden que `batch`. Si no hay suficientes CPUs físicas para satisfacer
+    batch_size workers, la lista devuelta es más corta que batch_size
+    (el caller debe manejarlo o confiar en _check_cpu_budget para advertir
+    antes de llegar aquí).
+    """
+    P_CORE_BLOCKS   = [[0, 1], [2, 3]]                 # CORE 0, CORE 1 (SMT)
+    E_CORE_SINGLES  = [4, 5, 6, 7, 8, 9, 10, 11]        # CORE 2-9
+    LP_CORE_SINGLES = [12, 13]                          # CORE 10-11 (lentos)
+
+    lists: list[list[int]] = []
+
+    if nprocs_per_job == 2:
+        for block in P_CORE_BLOCKS:
+            if len(lists) >= batch_size:
+                break
+            lists.append(list(block))
+
+        e_pool = list(E_CORE_SINGLES)
+        while len(lists) < batch_size and len(e_pool) >= 2:
+            lists.append([e_pool.pop(0), e_pool.pop(0)])
+
+        lp_pool = list(LP_CORE_SINGLES)
+        while len(lists) < batch_size and len(lp_pool) >= 2:
+            lists.append([lp_pool.pop(0), lp_pool.pop(0)])
+
+    elif nprocs_per_job == 1:
+        pool = list(E_CORE_SINGLES) + list(LP_CORE_SINGLES) + \
+               [c for block in P_CORE_BLOCKS for c in block]
+        for cpu in pool:
+            if len(lists) >= batch_size:
+                break
+            lists.append([cpu])
+
+    else:
+        full_pool = [c for block in P_CORE_BLOCKS for c in block] + \
+                    E_CORE_SINGLES + LP_CORE_SINGLES
+        idx = 0
+        for _ in range(batch_size):
+            chunk = full_pool[idx: idx + nprocs_per_job]
+            if len(chunk) < nprocs_per_job:
+                break
+            lists.append(chunk)
+            idx += nprocs_per_job
+
+    return lists
+
+
+def _check_cpu_budget(batch_size: int, nprocs_per_job: int, log: logging.Logger) -> None:
+    """Advierte (no bloquea) si el lote pide más cores de los físicamente disponibles."""
+    requested = batch_size * nprocs_per_job
+    available = os.cpu_count() or 0
+    if requested > available:
+        log.warning(
+            f"  ⚠  el lote pide {requested} cores ({batch_size}×{nprocs_per_job}) "
+            f"pero la máquina solo tiene {available} — los rangos de taskset "
+            f"se solaparán o excederán los cores reales. Reduce --parallel o "
+            f"--nprocs-per-job."
+        )
 
 
 def stage_expand_opt(
@@ -1092,6 +1315,7 @@ def stage_expand_opt(
 
     # ── Armar lista de tareas ────────────────────────────────────
     template  = get_template("opt")
+    _check_cpu_budget(batch_size, nprocs_per_job, log)
     tasks_all = [
         {
             "conf_id":  f"conf_{skip + rel + 1:03d}",
@@ -1120,17 +1344,31 @@ def stage_expand_opt(
         batch    = tasks_all[b_start : b_start + batch_size]
         lote_num = b_start // batch_size + 1
         ids      = [t["conf_id"] for t in batch]
-        log.info(f"[EXPAND] ── Lote {lote_num}/{n_lotes}: {ids}")
+
+        # Cores exclusivos por worker dentro de ESTE lote (no solapan entre
+        # sí; se reasignan en cada lote ya que los lotes son secuenciales).
+        cpu_lists = assign_cpu_lists(len(batch), nprocs_per_job)
+        for t, cl in zip(batch, cpu_lists):
+            t["cpu_list"] = cl
+
+        log.info(f"[EXPAND] ── Lote {lote_num}/{n_lotes}: {ids}  "
+                 f"(cores: {[','.join(map(str, cl)) for cl in cpu_lists]})")
 
         with ThreadPoolExecutor(max_workers=len(batch)) as pool:
             futures = {pool.submit(_opt_worker, t): t["conf_id"] for t in batch}
-            for fut in as_completed(futures):
-                res = fut.result()
-                opt_results.append(res)
-                tag = "✓" if res["success"] else "✗"
-                e_s = f"{res['energy']:.10f} Ha" if res["energy"] is not None else "—"
-                log.info(f"[EXPAND]   {tag} {res['conf_id']}  "
-                         f"E = {e_s}  ({res['elapsed']:.1f} min)")
+            try:
+                for fut in as_completed(futures):
+                    res = fut.result()
+                    opt_results.append(res)
+                    tag = "✓" if res["success"] else "✗"
+                    e_s = f"{res['energy']:.10f} Ha" if res["energy"] is not None else "—"
+                    log.info(f"[EXPAND]   {tag} {res['conf_id']}  "
+                             f"E = {e_s}  ({res['elapsed']:.1f} min)")
+            except KeyboardInterrupt:
+                log.warning("[EXPAND] Ctrl-C — cancelando lote, esperando workers…")
+                pool.shutdown(wait=False, cancel_futures=True)
+                _kill_active_procs()
+                sys.exit(130)
 
     # ── Actualizar E_ref con el mínimo del lote actual ───────────
     ok_new = [r for r in opt_results if r["success"] and r["energy"] is not None]
