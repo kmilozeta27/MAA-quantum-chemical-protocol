@@ -1,0 +1,129 @@
+# Full pipeline from scratch (charge -1, 3 confs by default)
+python pipeline.py --mol molecules/mglyval.xyz --charge -1
+
+# Specify number of conformers
+python pipeline.py --mol molecules/mglyval.xyz --charge -1 --nconf 5
+
+# Neutral molecule
+python pipeline.py --mol molecules/mol_A.xyz --charge 0
+
+# Resume from OPT (CREST already done)
+python pipeline.py --mol molecules/mglyval.xyz --charge -1 --start opt
+
+# Resume from NumFreq (auto-detects restart if freq_D*.res.Gradients is present)
+python pipeline.py --mol molecules/mglyval.xyz --charge -1 --start numfreq
+
+# Resume from SP
+python pipeline.py --mol molecules/mglyval.xyz --charge -1 --start sp
+
+# Resume from TDDFT
+python pipeline.py --mol molecules/mglyval.xyz --charge -1 --start tddft --nconf 3
+
+# Skip NumFreq entirely: OPT → SP → TDDFT directly (normal mode only,
+# not compatible with --expand-crest). Uses 02_opt/ geometry directly as
+# SP input, with no NumFreq thermal corrections in the pKa cycle.
+python pipeline.py --mol molecules/mol_A.xyz --charge -1 --skipnumfreq
+
+# Cheap CENSO pre-screening between CREST and OPT (PBE-D4/SV(p) via
+# ~/.censo2rc) to discard high-energy conformers before the costly
+# wB97X-D3/SVP OPT. Normal mode only. Fail-open: if CENSO fails, the
+# unfiltered CREST ensemble is used.
+python pipeline.py --mol molecules/mol_A.xyz --charge -1 --use-censo-prescreen
+
+# SP + NRoots 1 mode: minimal TD-DFT SP (NRoots 1) on the best conformers
+# by OPT DFT energy (requires 02_opt/ to be complete). Inputs written to
+# 06_sp_nroot/<conf_id>/sp_nroot.inp. Incompatible with --expand-crest.
+python pipeline.py --mol molecules/mglyval.xyz --charge -1 --nroot
+
+# Same, but over the top-3 conformers instead of the default top-5
+python pipeline.py --mol molecules/mglyval.xyz --charge -1 --nroot --nroot-top 3
+
+# Simple mode: declare total cores available
+# (OPT/SP/TDDFT use all of them; NumFreq uses min(--cores, 6))
+python pipeline.py --mol molecules/mglyval.xyz --charge -1 --cores 8
+
+# Run two pipelines in parallel without competing for cores (7+7 = 14 cores)
+python pipeline.py --mol molecules/mol_A.xyz --charge -1 --cores 7 &
+python pipeline.py --mol molecules/mol_B.xyz --charge -1 --cores 7 &
+
+# Fine-grained control per stage
+python pipeline.py --mol molecules/mglyval.xyz --charge -1 \
+    --nprocs 4 --maxcore 3500 \
+    --nprocs-numfreq 6 --maxcore-numfreq 2300
+
+# Only change memory (useful under RAM pressure)
+python pipeline.py --mol molecules/mglyval.xyz --charge -1 \
+    --maxcore 2500 --maxcore-numfreq 1800
+
+# Expand with defaults (skip=3, window=17, threshold=3.0 kcal/mol, 3 parallel OPTs)
+python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest
+
+# Custom expand: skip the first 5 confs, explore 20 more
+python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest \
+    --crest-skip 5 --crest-window 20
+
+# Change the ΔE filter threshold
+python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest \
+    --dft-threshold 2.0
+
+# Control expand parallelism: 3 OPTs × 4 cores = 12 total cores
+python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest \
+    --cores 12 --parallel 3
+
+# Resume expand from NumFreq (expand OPTs already done)
+python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest \
+    --start numfreq
+
+# Full expand with all parameters explicit
+python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest \
+    --crest-skip 3 --crest-window 17 \
+    --dft-threshold 3.0 \
+    --parallel 3 \
+    --cores 12
+
+# See status of all runs
+python pipeline.py --status
+
+# Follow the live log of a specific run
+tail -f runs/mglyval/pipeline.log
+
+# Monitor core usage
+htop
+
+# See all active ORCA processes
+ps aux | grep orca
+
+# Check how many conformers CREST generated
+python3 -c "from ase.io import read; print(len(read('runs/mglyval/01_crest/crest_conformers.xyz', index=':')))"
+
+# M-Gly:Val, charge -1, standard full flow
+python pipeline.py --mol molecules/mglyval.xyz --charge -1 --nconf 3
+
+# Two molecules in parallel, 7 cores each
+nohup python pipeline.py --mol molecules/mglyval.xyz --charge -1 --cores 7 \
+    > mglyval.log 2>&1 &
+nohup python pipeline.py --mol molecules/mol_B.xyz --charge -1 --cores 7 \
+    > mol_B.log 2>&1 &
+
+# Expand to explore the GFN2→DFT energy inversion
+python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest \
+    --crest-skip 3 --crest-window 17 --dft-threshold 3.0 \
+    --parallel 3 --cores 12 --start opt
+
+    # Single state, full analysis
+python results_collector.py --mol mglyval
+
+# Export with all 4 Excel sheets
+python results_collector.py --mol mglyval --export xlsx
+
+# Multi-temperature spectrum
+python results_collector.py --mol mglyval --plot
+
+# Compare all protonation states
+python results_collector.py --compare
+
+# With energy reference and export
+python results_collector.py --compare --ref mglyval_neutral --export xlsx --plot
+
+# Zoom into the UV-A/UVB range relevant for MAAs
+python results_collector.py --mol mglyval --plot --xmin 280 --xmax 420

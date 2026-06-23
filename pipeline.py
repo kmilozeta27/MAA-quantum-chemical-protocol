@@ -8,6 +8,8 @@ Uso (modo normal):
     python pipeline.py --mol molecules/mol_A.xyz --charge 0 --start sp
     python pipeline.py --mol molecules/mol_A.xyz --charge -1 --nconf 5 --start tddft
     python pipeline.py --mol molecules/mol_A.xyz --charge -1 --skipnumfreq   # OPT → SP → TDDFT directo
+    python pipeline.py --mol molecules/mol_A.xyz --charge -1 --nroot         # SP+NRoots1 top-5 por E_OPT
+    python pipeline.py --mol molecules/mol_A.xyz --charge -1 --nroot --nroot-top 3  # top-3
     python pipeline.py --status                  # ver estado de todos los runs
 
 Uso (modo expansión conformacional, --expand-crest):
@@ -276,6 +278,28 @@ end
 * xyzfile {CHARGE} {MULT} opt_opt.xyz
 """
 
+TEMPLATE_SP_NROOT = """\
+! wB97X-D3 def2-TZVPD def2/J CPCM(water) RIJCOSX TightSCF defgrid3
+%scf
+  MaxIter 300
+end
+%tddft
+  NRoots    1
+  MaxDim    20
+  ETol      1e-6
+  RTol      1e-6
+  TDA       false
+  Triplets  false
+  PrintLevel 3
+end
+%maxcore {MAXCORE}
+%pal
+  nprocs {NPROCS}
+end
+
+* xyzfile {CHARGE} {MULT} opt_opt.xyz
+"""
+
 TEMPLATE_TDDFT = """\
 ! wB97X-D3 def2-TZVPD def2-TZVPD/C CPCM(water) RIJCOSX TightSCF
 %pal
@@ -312,6 +336,7 @@ def get_template(step: str) -> str:
         "numfreq":         TEMPLATE_NUMFREQ,
         "numfreq_restart": TEMPLATE_NUMFREQ_RESTART,
         "sp":              TEMPLATE_SP,
+        "sp_nroot":        TEMPLATE_SP_NROOT,
         "tddft":           TEMPLATE_TDDFT,
     }
     return mapping[step]
@@ -976,6 +1001,97 @@ def stage_tddft(sp_dirs: list[Path], mol_dir: Path,
 
 
 # ─────────────────────────────────────────────
+#  ETAPA SP_NROOT  (--nroot)
+# ─────────────────────────────────────────────
+
+def stage_sp_nroot(mol_dir: Path, charge: int, log: logging.Logger,
+                   n_top: int = 5) -> list[Path]:
+    """
+    Etapa 06_sp_nroot: SP con NRoots 1 (TD-DFT mínimo) sobre los N mejores
+    confórmeros según energía DFT de OPT (02_opt/conf_*/opt.out).
+
+    Selección: ordena todos los conf_* exitosos de 02_opt/ por energía SCF
+    (FINAL SINGLE POINT ENERGY del OPT) y toma los n_top más bajos.
+
+    Escribe los inputs como 'sp_nroot.inp' en 06_sp_nroot/<conf_id>/.
+    Copia la geometría optimizada (opt_opt.xyz) de 02_opt/<conf_id>/.
+
+    Devuelve lista de directorios 06_sp_nroot/<conf_id>/ completados con éxito.
+    """
+    opt_root = mol_dir / "02_opt"
+    if not opt_root.exists():
+        log.error("[SP_NROOT] No existe 02_opt/ — corre primero las etapas OPT.")
+        return []
+
+    # ── Recopilar energías OPT ────────────────────────────────────
+    energies: list[tuple[float, Path]] = []
+    for conf_dir in sorted(opt_root.glob("conf_*")):
+        out_file = conf_dir / "opt.out"
+        if not check_success(out_file):
+            continue
+        e = extract_sp_energy(out_file)
+        if e is not None:
+            energies.append((e, conf_dir))
+        else:
+            log.warning(f"[SP_NROOT] {conf_dir.name}: OPT completado pero sin energía parseable — excluido")
+
+    if not energies:
+        log.error("[SP_NROOT] Ningún confórmero OPT exitoso con energía válida.")
+        return []
+
+    # Ordenar por energía ascendente y tomar los n_top mejores
+    energies.sort(key=lambda x: x[0])
+    selected = energies[:n_top]
+
+    e_ref = selected[0][0]
+    log.info(f"[SP_NROOT] {len(energies)} conf(s) OPT disponibles → "
+             f"seleccionando top-{len(selected)} por E(OPT):")
+    for rank, (e, conf_dir) in enumerate(selected, start=1):
+        dE = (e - e_ref) * HARTREE_TO_KCAL
+        log.info(f"[SP_NROOT]   #{rank:2d}  {conf_dir.name}  "
+                 f"E = {e:.10f} Ha  ΔE = {dE:+.4f} kcal/mol")
+
+    # ── Calcular SP+NRoots 1 ─────────────────────────────────────
+    template   = get_template("sp_nroot")
+    nroot_root = mol_dir / "06_sp_nroot"
+    nroot_root.mkdir(parents=True, exist_ok=True)
+    successful = []
+
+    for e, opt_dir in selected:
+        conf_id  = opt_dir.name
+        opt_xyz  = resolve_opt_xyz(opt_dir)
+
+        if opt_xyz is None:
+            log.warning(f"[SP_NROOT] {conf_id}: no se encontró opt_opt.xyz — saltando")
+            continue
+
+        nroot_dir = nroot_root / conf_id
+        nroot_dir.mkdir(parents=True, exist_ok=True)
+
+        out_file = nroot_dir / "sp_nroot.out"
+        inp_file = nroot_dir / "sp_nroot.inp"
+
+        if not check_success(out_file):
+            if not safe_copy(opt_xyz, nroot_dir / "opt_opt.xyz"):
+                log.warning(f"[SP_NROOT] {conf_id}: error copiando opt_opt.xyz — saltando")
+                continue
+            inp_text = template.format(
+                CHARGE=charge, MULT=MULT,
+                NPROCS=NPROCS, MAXCORE=MAXCORE,
+            )
+            inp_file.write_text(inp_text)
+
+        ok = run_orca(inp_file, out_file, log)
+        if ok:
+            successful.append(nroot_dir)
+        else:
+            log.warning(f"[SP_NROOT] {conf_id} falló")
+
+    log.info(f"[SP_NROOT] {len(successful)}/{len(selected)} completados")
+    return successful
+
+
+# ─────────────────────────────────────────────
 #  EXPANSIÓN CONFORMACIONAL (--expand-crest)
 # ─────────────────────────────────────────────
 
@@ -1474,7 +1590,7 @@ def print_status():
         if not mol_dir.is_dir():
             continue
         print(f"\n  📁 {mol_dir.name}")
-        for step_num in ["01_crest", "02_opt", "03_numfreq", "04_sp", "05_tddft"]:
+        for step_num in ["01_crest", "02_opt", "03_numfreq", "04_sp", "05_tddft", "06_sp_nroot"]:
             step_dir = mol_dir / step_num
             if not step_dir.exists():
                 print(f"     {step_num:12s}  —  no iniciado")
@@ -1525,6 +1641,10 @@ Ejemplos (modo normal):
 
   # Solo TDDFT, 3 confórmeros
   python pipeline.py --mol molecules/mglyval.xyz --charge -1 --nconf 3 --start tddft
+
+  # SP+NRoots 1 sobre los 5 mejores confórmeros por E_OPT (requiere 02_opt/ completo)
+  python pipeline.py --mol molecules/mglyval.xyz --charge -1 --nroot
+  python pipeline.py --mol molecules/mglyval.xyz --charge -1 --nroot --nroot-top 3
 
   # Ver estado de todos los runs
   python pipeline.py --status
@@ -1652,6 +1772,24 @@ Ejemplos (modo expansión conformacional):
         ),
     )
 
+    # ── Modo SP + NRoots 1 ─────────────────────────────────────────────────
+    parser.add_argument(
+        "--nroot", action="store_true",
+        help=(
+            "Modo SP+NRoots 1: calcula un SP con TD-DFT mínimo (NRoots 1) "
+            "sobre los mejores confórmeros según energía DFT de OPT (02_opt/). "
+            "Los inputs se escriben en 06_sp_nroot/<conf_id>/sp_nroot.inp. "
+            "Requiere que OPT haya completado. Incompatible con --expand-crest."
+        ),
+    )
+    parser.add_argument(
+        "--nroot-top", type=int, default=5, metavar="N",
+        help=(
+            "Número de confórmeros (top-N por E_OPT) sobre los que correr "
+            "el SP+NRoots 1 con --nroot (default: 5)."
+        ),
+    )
+
     args = parser.parse_args()
 
     if args.skipnumfreq and args.expand_crest:
@@ -1664,6 +1802,11 @@ Ejemplos (modo expansión conformacional):
             f"ERROR: --skipnumfreq es incompatible con --start {args.start}. "
             f"--skipnumfreq ya implica saltar NUMFREQ desde OPT; usa solo "
             f"--start opt (o --start crest) junto con --skipnumfreq."
+        )
+    if args.nroot and args.expand_crest:
+        sys.exit(
+            "ERROR: --nroot es incompatible con --expand-crest. "
+            "Corre --nroot como paso independiente sobre un run ya completado."
         )
 
     # ── Resolver recursos: --cores (simple) vs flags avanzados ───────────────
@@ -1784,6 +1927,22 @@ Ejemplos (modo expansión conformacional):
     log.info("=" * 60)
 
     start_idx = STEPS.index(args.start)
+
+    # ════════════════════════════════════════════════════════════
+    #  MODO SP + NROOTS 1  (--nroot)
+    # ════════════════════════════════════════════════════════════
+    if args.nroot:
+        log.info("MODO: SP + NRoots 1 (--nroot)")
+        log.info(f"Top-N confórmeros por E_OPT: {args.nroot_top}")
+        nroot_dirs = stage_sp_nroot(mol_dir, args.charge, log, n_top=args.nroot_top)
+        if not nroot_dirs:
+            log.error("[SP_NROOT] Ningún cálculo completado.")
+            sys.exit(1)
+        log.info("=" * 60)
+        log.info("PIPELINE (SP_NROOT) FINALIZADO")
+        log.info(f"Resultados en: {(mol_dir / '06_sp_nroot').resolve()}")
+        log.info("=" * 60)
+        return
 
     # ════════════════════════════════════════════════════════════
     #  MODO EXPANSIÓN CONFORMACIONAL  (--expand-crest)
