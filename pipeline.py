@@ -67,12 +67,19 @@ CENSO_TIMEOUT_HOURS = 4.0           # timeout CENSO pre-screening (horas) — ba
 # Los defaults de recursos (NPROCS, MAXCORE, etc.) se inicializan más abajo
 # por ResourceProfile.detect() tras leer la topología real del sistema.
 # Estos valores son placeholders que main() sobreescribe siempre.
+NPROCS_CREST    = 12   # CREST/CENSO: xTB escala bien, priorizar más cores
 NPROCS          = 4
 NPROCS_NUMFREQ  = 8
+NPROCS_TDDFT    = 6
 MAXCORE         = 3500
 MAXCORE_NUMFREQ = 2800
+MAXCORE_TDDFT   = 2000
 NPROCS_ADC2     = 4
 MAXCORE_ADC2    = 5500
+# Batch sizes para modo normal (sobreescritos por ResourceProfile en main())
+OPT_BATCH_SIZE  = 3
+SP_BATCH_SIZE   = 3
+TDDFT_BATCH_SIZE = 2
 
 # OMP_ENV se construye bajo demanda en build_omp_env() para que siempre
 # refleje el valor actualizado de NPROCS (nunca queda obsoleto si el
@@ -161,25 +168,30 @@ class ResourceProfile:
 
     Reglas de distribución por tipo de cálculo
     ──────────────────────────────────────────
-    OPT  → escala mal con muchos cores (cuello de botella en comm. MPI).
-            En modo normal: usa TODOS los cores disponibles (un solo job).
-            En modo expand: se reparten entre batch_size jobs simultáneos.
-            El sweet-spot empírico para esta CPU es ≤ 6 cores por job;
-            más de eso y la eficiencia MPI cae por debajo del 70%.
+    CREST → xTB no tiene cuello de botella MPI como ORCA.
+            El flag --T N reparte exploraciones iMTD-GC independientes entre
+            núcleos de forma casi perfectamente lineal hasta saturar el BW de
+            memoria (~12 cores en el T14 Gen5).
+            Se usa MAX_CREST_NPROCS (default 12) para priorizar throughput.
+
+    OPT  → 3 confórmeros en paralelo × 4 cores/job = 12 cores totales.
+            El paralelismo entre confórmeros es perfecto (no hay comunicación
+            entre jobs); el MPI interno de cada job sigue con su cuello de
+            botella pero a 4 cores la eficiencia se mantiene alta.
+            OPT_BATCH_SIZE = 3, MAX_OPT_NPROCS_PER_JOB = 4.
 
     NUMFREQ → paralelismo ideal: cada desplazamiento es un SCF independiente.
-              Usa TODOS los cores disponibles en un único job secuencial.
-              No hay comunicación MPI entre desplazamientos → escala lineal
-              hasta saturar el ancho de banda de memoria (~12 cores).
+              Usa hasta MAX_NUMFREQ_NPROCS en un único job secuencial.
+              No hay comunicación MPI entre desplazamientos → escala lineal.
 
-    SP   → cálculo puro de SCF con base grande (def2-TZVPD). Escala bien
-           hasta ~8 cores; por encima los beneficios son marginales.
-           En modo normal: usa todos los disponibles (≤ MAX_SP_NPROCS).
-           En modo expand: se reparte entre jobs paralelos igual que OPT.
+    SP   → mismo esquema que OPT: 3 × 4 cores = 12 cores totales.
+           SP_BATCH_SIZE = 3, MAX_SP_NPROCS = 4.
 
-    TDDFT → igual que SP pero con mayor consumo de RAM por NRoots.
-            Se aplica un factor RAM_PENALTY_TDDFT sobre el maxcore calculado
-            para evitar OOM. Siempre se corre secuencial (1 job a la vez).
+    TDDFT → 2 confórmeros en paralelo × 6 cores/job = 12 cores totales.
+            Con NRoots 15 el consumo de RAM por job es mayor que SP,
+            por eso se usan 2 jobs en vez de 3.
+            Se aplica RAM_PENALTY_TDDFT sobre el maxcore calculado.
+            TDDFT_BATCH_SIZE = 2, TDDFT_NPROCS_PER_JOB = 6.
 
     ADC2  → muy costoso en memoria (transformación integral 4-índice).
             Se limita explícitamente a NPROCS_ADC2_MAX cores y se asigna
@@ -191,8 +203,14 @@ class ResourceProfile:
 
     Parámetros ajustables al inicio de la clase:
         SAFETY_FACTOR          — fracción de RAM reservada para el SO
-        MAX_OPT_NPROCS_PER_JOB — límite de cores/job en OPT paralelo
-        MAX_SP_NPROCS          — límite de cores en SP secuencial
+        MAX_CREST_NPROCS       — límite de cores para CREST/CENSO (xTB)
+        MAX_NUMFREQ_NPROCS     — límite de cores para NUMFREQ
+        MAX_OPT_NPROCS_PER_JOB — cores/job en OPT (modo normal y expand)
+        OPT_BATCH_SIZE         — jobs paralelos en OPT modo normal
+        MAX_SP_NPROCS          — cores/job en SP
+        SP_BATCH_SIZE          — jobs paralelos en SP modo normal
+        TDDFT_NPROCS_PER_JOB   — cores/job en TDDFT
+        TDDFT_BATCH_SIZE       — jobs paralelos en TDDFT
         RAM_PENALTY_TDDFT      — divisor extra de maxcore para TDDFT
         NPROCS_ADC2_MAX        — máximo cores para ADC2
         MAXCORE_ADC2_MIN       — mínimo MB/core para ADC2
@@ -200,8 +218,14 @@ class ResourceProfile:
 
     # ── Parámetros de política (ajustar aquí si cambia el hardware) ──────
     SAFETY_FACTOR          = 0.85   # fracción de RAM que puede usar ORCA
-    MAX_OPT_NPROCS_PER_JOB = 6     # sweet-spot empírico para OPT wB97X-D3/SVP
-    MAX_SP_NPROCS          = 8     # SP escala hasta ~8 cores con def2-TZVPD
+    MAX_CREST_NPROCS       = 12    # CREST/xTB paraleliza bien (--T N): priorizar hasta 12 cores
+    MAX_NUMFREQ_NPROCS     = 12    # NUMFREQ: escala lineal hasta saturar BW de memoria (~12 cores)
+    MAX_OPT_NPROCS_PER_JOB = 4     # OPT: 3 jobs × 4 cores = 12 cores en paralelo
+    OPT_BATCH_SIZE         = 3     # OPT modo normal: siempre 3 confórmeros en paralelo
+    MAX_SP_NPROCS          = 4     # SP: 3 jobs × 4 cores = 12 cores en paralelo
+    SP_BATCH_SIZE          = 3     # SP modo normal: siempre 3 confórmeros en paralelo
+    TDDFT_NPROCS_PER_JOB   = 6     # TDDFT: 2 jobs × 6 cores = 12 cores en paralelo
+    TDDFT_BATCH_SIZE       = 2     # TDDFT: 2 confórmeros en paralelo
     RAM_PENALTY_TDDFT      = 1.4   # TDDFT consume ~40% más RAM que SP por NRoots
     NPROCS_ADC2_MAX        = 4     # ADC2: más cores no ayudan, solo gastan RAM
     MAXCORE_ADC2_MIN       = 5000  # MB/core mínimo para ADC2 (transformación 4-índice)
@@ -288,6 +312,9 @@ class ResourceProfile:
         ram_total  = self.ram_mb / 1024
         ram_usable = ram_total * self.SAFETY_FACTOR
 
+        opt_batch  = self.batch_size if self.batch_size > 1 else self.OPT_BATCH_SIZE
+        sp_batch   = self.batch_size if self.batch_size > 1 else self.SP_BATCH_SIZE
+
         if self.batch_size > 1:
             expand_info = (
                 f"\n  Expand batch    : {self.batch_size} jobs × {self.nprocs_opt} cores "
@@ -300,15 +327,16 @@ class ResourceProfile:
         return (
             f"  Sistema         : {self.total_cores} CPUs lógicas  "
             f"RAM {ram_total:.0f} GB total / {ram_usable:.0f} GB usable\n"
-            f"  OPT/job         : {self.nprocs_opt} cores / {self.maxcore_opt} MB  "
-            f"→ {ram_opt:.1f} GB\n"
-            f"  SP/job          : {self.nprocs_sp} cores / {self.maxcore_sp} MB  "
-            f"→ {ram_sp:.1f} GB\n"
-            f"  TDDFT/job       : {self.nprocs_tddft} cores / {self.maxcore_tddft} MB  "
-            f"→ {ram_tddft:.1f} GB  (×{self.RAM_PENALTY_TDDFT} RAM penalty)\n"
-            f"  NumFreq/job     : {self.nprocs_numfreq} cores / {self.maxcore_numfreq} MB  "
+            f"  CREST/CENSO     : {self.nprocs_crest} cores  (xTB --T, escala lineal)\n"
+            f"  OPT             : {opt_batch} jobs × {self.nprocs_opt} cores / {self.maxcore_opt} MB  "
+            f"→ {ram_opt:.1f} GB/job\n"
+            f"  SP              : {sp_batch} jobs × {self.nprocs_sp} cores / {self.maxcore_sp} MB  "
+            f"→ {ram_sp:.1f} GB/job\n"
+            f"  TDDFT           : {self.TDDFT_BATCH_SIZE} jobs × {self.nprocs_tddft} cores / {self.maxcore_tddft} MB  "
+            f"→ {ram_tddft:.1f} GB/job  (×{self.RAM_PENALTY_TDDFT} RAM penalty, NRoots 15)\n"
+            f"  NumFreq         : 1 job × {self.nprocs_numfreq} cores / {self.maxcore_numfreq} MB  "
             f"→ {ram_nf:.1f} GB  (escala lineal)\n"
-            f"  ADC2/job        : {self.nprocs_adc2} cores / {self.maxcore_adc2} MB  "
+            f"  ADC2            : 1 job × {self.nprocs_adc2} cores / {self.maxcore_adc2} MB  "
             f"→ {ram_adc2:.1f} GB{expand_info}"
         )
 
@@ -320,42 +348,52 @@ class ResourceProfile:
         p   = self.batch_size
         ram = int(self.ram_mb * self.SAFETY_FACTOR)
 
-        # ── OPT ──────────────────────────────────────────────────────────
-        # En modo normal (p=1): todos los cores, limitado al sweet-spot.
-        # En modo expand (p>1): se reparten entre p jobs simultáneos.
-        if p <= 1:
-            self.nprocs_opt = min(c, self.MAX_OPT_NPROCS_PER_JOB)
-        else:
-            raw = max(1, c // p)
-            self.nprocs_opt = min(raw, self.MAX_OPT_NPROCS_PER_JOB)
+        # ── CREST / CENSO ─────────────────────────────────────────────────
+        # xTB paralleliza bien (--T N): cada núcleo corre una exploración
+        # iMTD-GC independiente → escala casi lineal hasta saturar BW de memoria.
+        # Se usa MAX_CREST_NPROCS para priorizar throughput sin desperdiciar cores
+        # que beneficiarían a ORCA (que escala peor).
+        self.nprocs_crest = min(c, self.MAX_CREST_NPROCS)
 
-        active_opt_cores = self.nprocs_opt * p
+        # ── OPT ──────────────────────────────────────────────────────────
+        # Modo normal: siempre OPT_BATCH_SIZE jobs × MAX_OPT_NPROCS_PER_JOB cores.
+        # Modo expand (p>1): batch_size viene de --parallel; mismo límite por job.
+        effective_opt_batch = p if p > 1 else self.OPT_BATCH_SIZE
+        if p <= 1:
+            self.nprocs_opt = min(c // max(self.OPT_BATCH_SIZE, 1),
+                                  self.MAX_OPT_NPROCS_PER_JOB)
+        else:
+            self.nprocs_opt = min(max(1, c // p), self.MAX_OPT_NPROCS_PER_JOB)
+
+        active_opt_cores = self.nprocs_opt * effective_opt_batch
         self.maxcore_opt = max(500, ram // max(active_opt_cores, 1))
 
         # ── NUMFREQ ──────────────────────────────────────────────────────
-        # Siempre secuencial (1 job), usa todos los cores disponibles.
-        # No hay límite de sweet-spot: paralelismo perfecto entre desplazamientos.
-        self.nprocs_numfreq  = c
-        self.maxcore_numfreq = max(500, ram // max(c, 1))
+        # Siempre 1 job; escala lineal hasta MAX_NUMFREQ_NPROCS (saturaación BW mem).
+        self.nprocs_numfreq  = min(c, self.MAX_NUMFREQ_NPROCS)
+        self.maxcore_numfreq = max(500, ram // max(self.nprocs_numfreq, 1))
 
         # ── SP ───────────────────────────────────────────────────────────
-        # Secuencial (1 job); escala hasta MAX_SP_NPROCS con def2-TZVPD.
-        # En modo expand p>1 se comporta igual que OPT (se puede paralelizar
-        # igual que expand-OPT si stage_sp se llama con batch_size>1).
+        # Modo normal: siempre SP_BATCH_SIZE jobs × MAX_SP_NPROCS cores.
+        # Modo expand (p>1): mismo esquema que OPT.
         if p <= 1:
-            self.nprocs_sp = min(c, self.MAX_SP_NPROCS)
+            self.nprocs_sp = min(c // max(self.SP_BATCH_SIZE, 1),
+                                 self.MAX_SP_NPROCS)
         else:
-            raw = max(1, c // p)
-            self.nprocs_sp = min(raw, self.MAX_SP_NPROCS)
+            self.nprocs_sp = min(max(1, c // p), self.MAX_SP_NPROCS)
 
-        active_sp_cores = self.nprocs_sp * max(p, 1)
+        effective_sp_batch = p if p > 1 else self.SP_BATCH_SIZE
+        active_sp_cores = self.nprocs_sp * effective_sp_batch
         self.maxcore_sp = max(500, ram // max(active_sp_cores, 1))
 
         # ── TDDFT ────────────────────────────────────────────────────────
-        # Siempre 1 job (secuencial); mismo nprocs que SP pero maxcore reducido
-        # por RAM_PENALTY_TDDFT para acomodar los vectores de excitación (NRoots 20).
-        self.nprocs_tddft  = self.nprocs_sp
-        raw_maxcore_tddft  = max(500, ram // max(self.nprocs_tddft, 1))
+        # Siempre TDDFT_BATCH_SIZE jobs × TDDFT_NPROCS_PER_JOB cores.
+        # maxcore reducido por RAM_PENALTY_TDDFT para acomodar vectores de
+        # excitación (NRoots 15).
+        self.nprocs_tddft  = min(c // max(self.TDDFT_BATCH_SIZE, 1),
+                                 self.TDDFT_NPROCS_PER_JOB)
+        active_tddft_cores = self.nprocs_tddft * self.TDDFT_BATCH_SIZE
+        raw_maxcore_tddft  = max(500, ram // max(active_tddft_cores, 1))
         self.maxcore_tddft = max(500, int(raw_maxcore_tddft / self.RAM_PENALTY_TDDFT))
 
         # ── ADC2 ─────────────────────────────────────────────────────────
@@ -541,8 +579,8 @@ end
   MOInp "{GBW_PATH}"
 end
 %tddft
-  NRoots    20
-  MaxDim    200
+  NRoots    15
+  MaxDim    150
   ETol      1e-6
   RTol      1e-6
   TDA       false
@@ -815,7 +853,7 @@ def stage_crest(mol_xyz: Path, mol_dir: Path, charge: int,
     cmd = [
         str(CREST_BIN),
         str(input_xyz.name),
-        "--T", str(NPROCS),
+        "--T", str(NPROCS_CREST),
         "--chrg", str(charge),
         "--uhf", "0",
         "--alpb", "water",
@@ -830,7 +868,7 @@ def stage_crest(mol_xyz: Path, mol_dir: Path, charge: int,
                 stdout=flog,
                 stderr=subprocess.STDOUT,
                 cwd=crest_dir,
-                env=build_omp_env(NPROCS),
+                env=build_omp_env(NPROCS_CREST),
                 timeout=CREST_TIMEOUT_HOURS * 3600,
             )
         returncode = proc.returncode
@@ -908,7 +946,7 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
         "-c", str(charge),
         "-u", "0",                  # MULT global siempre 1 → singlete, capa cerrada
         "--solvent", "water",
-        "--maxcores", str(NPROCS),
+        "--maxcores", str(NPROCS_CREST),
         "-T", "274.15",             # temperatura Antártica (1°C)
     ]
 
@@ -918,7 +956,7 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
         with open(censo_dir / "censo.log", "w") as flog:
             proc = subprocess.run(
                 cmd, stdout=flog, stderr=subprocess.STDOUT,
-                cwd=censo_dir, env=build_omp_env(NPROCS),
+                cwd=censo_dir, env=build_omp_env(NPROCS_CREST),
                 timeout=CENSO_TIMEOUT_HOURS * 3600,
             )
         returncode = proc.returncode
@@ -1084,6 +1122,11 @@ def stage_opt(conformers_xyz: Path, mol_dir: Path,
     """
     Etapa 02_opt: optimización DFT de cada confórmero.
     `nconf` ya viene calculado por select_nconf_auto().
+
+    Corre OPT_BATCH_SIZE confórmeros en paralelo (ThreadPoolExecutor),
+    cada uno con NPROCS cores y MAXCORE MB. El paralelismo entre confórmeros
+    es perfecto (no hay comunicación entre jobs).
+
     Devuelve lista de directorios exitosos.
     """
     log.info(f"[OPT] optimizando {nconf} confórmeros (seleccionados automáticamente)")
@@ -1097,39 +1140,61 @@ def stage_opt(conformers_xyz: Path, mol_dir: Path,
         log.error("[OPT] el archivo de confórmeros está vacío")
         return []
 
-    log.info(f"[OPT] {len(conformers)} confórmeros disponibles")
-    template = get_template("opt")
+    log.info(f"[OPT] {len(conformers)} confórmeros disponibles — "
+             f"batch {OPT_BATCH_SIZE}×{NPROCS} cores")
+    template   = get_template("opt")
     successful = []
 
-    for i, atoms in enumerate(conformers, start=1):
-        conf_id  = f"conf_{i:03d}"
-        conf_dir = mol_dir / "02_opt" / conf_id
-        conf_dir.mkdir(parents=True, exist_ok=True)
+    tasks_all = [
+        {
+            "conf_id":  f"conf_{i:03d}",
+            "conf_dir": mol_dir / "02_opt" / f"conf_{i:03d}",
+            "atoms":    atoms,
+            "charge":   charge,
+            "template": template,
+            "nprocs":   NPROCS,
+            "maxcore":  MAXCORE,
+            "log":      log,
+        }
+        for i, atoms in enumerate(conformers, start=1)
+    ]
 
-        inp_file = conf_dir / "opt.inp"
-        out_file = conf_dir / "opt.out"
+    n_lotes = -(-len(tasks_all) // OPT_BATCH_SIZE)   # ceiling division
+    _check_cpu_budget(OPT_BATCH_SIZE, NPROCS, log)
 
-        if not check_success(out_file):
-            coords   = atoms_to_xyz_block(atoms)
-            inp_text = template.format(
-                CHARGE=charge, MULT=MULT,
-                NPROCS=NPROCS, MAXCORE=MAXCORE,
-                COORDS=coords,
-            )
-            inp_file.write_text(inp_text)
+    for b_start in range(0, len(tasks_all), OPT_BATCH_SIZE):
+        batch    = tasks_all[b_start : b_start + OPT_BATCH_SIZE]
+        lote_num = b_start // OPT_BATCH_SIZE + 1
+        ids      = [t["conf_id"] for t in batch]
 
-        ok = run_orca(inp_file, out_file, log)
-        if ok:
-            # ORCA 6 escribe opt.xyz; versiones anteriores opt_opt.xyz.
-            # Normalizar siempre a opt_opt.xyz para las etapas siguientes.
-            xyz_out = resolve_opt_xyz(conf_dir)
-            if xyz_out is None:
-                log.warning(f"[OPT] {conf_id}: ORCA terminó pero no se generó "
-                            f"geometría optimizada (opt.xyz / opt_opt.xyz) — excluido")
-            else:
-                successful.append(conf_dir)
-        else:
-            log.warning(f"[OPT] {conf_id} falló — excluido de etapas siguientes")
+        cpu_lists = assign_cpu_lists(len(batch), NPROCS)
+        for t, cl in zip(batch, cpu_lists):
+            t["cpu_list"] = cl
+
+        log.info(f"[OPT] ── Lote {lote_num}/{n_lotes}: {ids}  "
+                 f"(cores: {[','.join(map(str, cl)) for cl in cpu_lists]})")
+
+        with ThreadPoolExecutor(max_workers=len(batch)) as pool:
+            futures = {pool.submit(_opt_worker, t): t["conf_id"] for t in batch}
+            try:
+                for fut in as_completed(futures):
+                    res = fut.result()
+                    tag = "✓" if res["success"] else "✗"
+                    log.info(f"[OPT]   {tag} {res['conf_id']}  ({res['elapsed']:.1f} min)")
+                    if res["success"]:
+                        xyz_out = resolve_opt_xyz(res["conf_dir"])
+                        if xyz_out is None:
+                            log.warning(f"[OPT] {res['conf_id']}: ORCA OK pero sin "
+                                        f"geometría optimizada — excluido")
+                        else:
+                            successful.append(res["conf_dir"])
+                    else:
+                        log.warning(f"[OPT] {res['conf_id']} falló — excluido de etapas siguientes")
+            except KeyboardInterrupt:
+                log.warning("[OPT] Ctrl-C — cancelando lote, esperando workers…")
+                pool.shutdown(wait=False, cancel_futures=True)
+                _kill_active_procs()
+                sys.exit(130)
 
     log.info(f"[OPT] {len(successful)}/{len(conformers)} confórmeros optimizados")
     return successful
@@ -1208,162 +1273,204 @@ def stage_numfreq(opt_dirs: list[Path], mol_dir: Path,
 
 def stage_sp(freq_dirs: list[Path], mol_dir: Path,
              charge: int, log: logging.Logger,
-             batch_size: int = 1,
+             batch_size: int = 0,
              nprocs_per_job: Optional[int] = None,
              maxcore_per_job: Optional[int] = None) -> list[Path]:
     """
     Etapa 04_sp: single point de alta precisión.
     Devuelve directorios sp exitosos.
 
-    batch_size=1  → modo secuencial (pipeline normal, usa todos los cores del job).
-    batch_size>1  → modo paralelo por lotes (--expand-crest), análogo al
-                    ThreadPoolExecutor de stage_expand_opt.
+    batch_size=0  → usa SP_BATCH_SIZE global (modo normal: 3 jobs × 4 cores).
+    batch_size>0  → valor explícito (usado por --expand-crest con --parallel N).
     nprocs_per_job / maxcore_per_job sobreescriben los globals NPROCS / MAXCORE
     para cada worker paralelo; si son None se usan los globals vigentes.
     """
+    _batch   = batch_size if batch_size > 0 else SP_BATCH_SIZE
     _nprocs  = nprocs_per_job  if nprocs_per_job  is not None else NPROCS
     _maxcore = maxcore_per_job if maxcore_per_job is not None else MAXCORE
 
     log.info(f"[SP] single point para {len(freq_dirs)} confórmeros "
-             f"(batch={batch_size}, {_nprocs} cores/job)")
+             f"(batch={_batch}, {_nprocs} cores/job)")
     template   = get_template("sp")
     successful = []
 
-    if batch_size <= 1:
-        # ── Modo secuencial (pipeline normal) ────────────────────────
-        for freq_dir in freq_dirs:
-            conf_id  = freq_dir.name
-            opt_xyz  = resolve_opt_xyz(freq_dir)
+    n_lotes = -(-len(freq_dirs) // _batch)   # ceiling division
+    log.info(f"[SP] {len(freq_dirs)} SPs en {n_lotes} lote(s) de ≤{_batch} "
+             f"(CPUs activos/lote: {_batch * _nprocs})")
 
-            if opt_xyz is None:
-                log.warning(f"[SP] {conf_id}: no se encontró opt_opt.xyz ni opt.xyz — saltando")
-                continue
+    tasks_all = [
+        {
+            "conf_id":  d.name,
+            "freq_dir": d,
+            "charge":   charge,
+            "template": template,
+            "nprocs":   _nprocs,
+            "maxcore":  _maxcore,
+            "mol_dir":  mol_dir,
+            "log":      log,
+        }
+        for d in freq_dirs
+    ]
 
-            sp_dir = mol_dir / "04_sp" / conf_id
-            sp_dir.mkdir(parents=True, exist_ok=True)
+    _check_cpu_budget(_batch, _nprocs, log)
 
-            out_file = sp_dir / "sp.out"
-            inp_file = sp_dir / "sp.inp"
+    for b_start in range(0, len(tasks_all), _batch):
+        batch    = tasks_all[b_start : b_start + _batch]
+        lote_num = b_start // _batch + 1
+        ids      = [t["conf_id"] for t in batch]
 
-            # Solo copiar geometría si el cálculo no está ya completo
-            if not check_success(out_file):
-                if not safe_copy(opt_xyz, sp_dir / "opt_opt.xyz"):
-                    log.warning(f"[SP] {conf_id}: error copiando opt_opt.xyz — saltando")
-                    continue
-                inp_text = template.format(
-                    CHARGE=charge, MULT=MULT,
-                    NPROCS=_nprocs, MAXCORE=_maxcore,
-                )
-                inp_file.write_text(inp_text)
+        cpu_lists = assign_cpu_lists(len(batch), _nprocs)
+        for t, cl in zip(batch, cpu_lists):
+            t["cpu_list"] = cl
 
-            ok = run_orca(inp_file, out_file, log)
-            if ok:
-                successful.append(sp_dir)
-            else:
-                log.warning(f"[SP] {conf_id} falló — excluido")
+        log.info(f"[SP] ── Lote {lote_num}/{n_lotes}: {ids}  "
+                 f"(cores: {[','.join(map(str, cl)) for cl in cpu_lists]})")
 
-    else:
-        # ── Modo paralelo por lotes (--expand-crest) ─────────────────
-        n_lotes = -(-len(freq_dirs) // batch_size)   # ceiling division
-        log.info(f"[SP] {len(freq_dirs)} SPs en {n_lotes} lote(s) de ≤{batch_size} "
-                 f"(CPUs activos/lote: {batch_size * _nprocs})")
-
-        tasks_all = [
-            {
-                "conf_id":  d.name,
-                "freq_dir": d,
-                "charge":   charge,
-                "template": template,
-                "nprocs":   _nprocs,
-                "maxcore":  _maxcore,
-                "mol_dir":  mol_dir,
-                "log":      log,
-            }
-            for d in freq_dirs
-        ]
-
-        _check_cpu_budget(batch_size, _nprocs, log)
-
-        for b_start in range(0, len(tasks_all), batch_size):
-            batch    = tasks_all[b_start : b_start + batch_size]
-            lote_num = b_start // batch_size + 1
-            ids      = [t["conf_id"] for t in batch]
-
-            cpu_lists = assign_cpu_lists(len(batch), _nprocs)
-            for t, cl in zip(batch, cpu_lists):
-                t["cpu_list"] = cl
-
-            log.info(f"[SP] ── Lote {lote_num}/{n_lotes}: {ids}  "
-                     f"(cores: {[','.join(map(str, cl)) for cl in cpu_lists]})")
-
-            with ThreadPoolExecutor(max_workers=len(batch)) as pool:
-                futures = {pool.submit(_sp_worker, t): t["conf_id"] for t in batch}
-                try:
-                    for fut in as_completed(futures):
-                        res = fut.result()
-                        tag = "✓" if res["success"] else "✗"
-                        log.info(f"[SP]   {tag} {res['conf_id']}  ({res['elapsed']:.1f} min)")
-                        if res["success"] and res["sp_dir"] is not None:
-                            successful.append(res["sp_dir"])
-                        else:
-                            log.warning(f"[SP] {res['conf_id']} falló — excluido")
-                except KeyboardInterrupt:
-                    log.warning("[SP] Ctrl-C — cancelando lote, esperando workers…")
-                    pool.shutdown(wait=False, cancel_futures=True)
-                    _kill_active_procs()
-                    sys.exit(130)
+        with ThreadPoolExecutor(max_workers=len(batch)) as pool:
+            futures = {pool.submit(_sp_worker, t): t["conf_id"] for t in batch}
+            try:
+                for fut in as_completed(futures):
+                    res = fut.result()
+                    tag = "✓" if res["success"] else "✗"
+                    log.info(f"[SP]   {tag} {res['conf_id']}  ({res['elapsed']:.1f} min)")
+                    if res["success"] and res["sp_dir"] is not None:
+                        successful.append(res["sp_dir"])
+                    else:
+                        log.warning(f"[SP] {res['conf_id']} falló — excluido")
+            except KeyboardInterrupt:
+                log.warning("[SP] Ctrl-C — cancelando lote, esperando workers…")
+                pool.shutdown(wait=False, cancel_futures=True)
+                _kill_active_procs()
+                sys.exit(130)
 
     log.info(f"[SP] {len(successful)}/{len(freq_dirs)} completados")
     return successful
 
 
+def _tddft_worker(task: dict) -> dict:
+    """
+    Worker para un único TDDFT, diseñado para ejecutarse en un hilo de
+    ThreadPoolExecutor. ORCA corre como subproceso externo (libera el GIL).
+
+    task debe contener:
+        conf_id, sp_dir, charge, template, nprocs, maxcore, mol_dir, log
+    Opcional:
+        cpu_list: list[int] de CPUs lógicas exclusivas para este worker.
+
+    Devuelve:
+        dict con conf_id, tddft_dir (Path o None), success, elapsed (min)
+    """
+    conf_id  : str            = task["conf_id"]
+    sp_dir   : Path           = task["sp_dir"]
+    charge   : int            = task["charge"]
+    template : str            = task["template"]
+    nprocs   : int            = task["nprocs"]
+    maxcore  : int            = task["maxcore"]
+    mol_dir  : Path           = task["mol_dir"]
+    log      : logging.Logger = task["log"]
+    cpu_list : Optional[list[int]] = task.get("cpu_list")
+
+    gbw_file = sp_dir / "sp.gbw"
+    opt_xyz  = resolve_opt_xyz(sp_dir)
+
+    if not gbw_file.exists():
+        log.warning(f"[TDDFT] {conf_id}: no se encontró sp.gbw — saltando")
+        return {"conf_id": conf_id, "tddft_dir": None, "success": False, "elapsed": 0.0}
+    if opt_xyz is None:
+        log.warning(f"[TDDFT] {conf_id}: no se encontró opt_opt.xyz ni opt.xyz — saltando")
+        return {"conf_id": conf_id, "tddft_dir": None, "success": False, "elapsed": 0.0}
+
+    tddft_dir = mol_dir / "05_tddft" / conf_id
+    tddft_dir.mkdir(parents=True, exist_ok=True)
+
+    out_file = tddft_dir / "tddft.out"
+    inp_file = tddft_dir / "tddft.inp"
+
+    if not check_success(out_file):
+        if not safe_copy(opt_xyz, tddft_dir / "sp_opt.xyz"):
+            log.warning(f"[TDDFT] {conf_id}: error copiando sp_opt.xyz — saltando")
+            return {"conf_id": conf_id, "tddft_dir": None, "success": False, "elapsed": 0.0}
+        if not safe_copy(gbw_file, tddft_dir / "sp.gbw"):
+            log.warning(f"[TDDFT] {conf_id}: error copiando sp.gbw — saltando")
+            return {"conf_id": conf_id, "tddft_dir": None, "success": False, "elapsed": 0.0}
+        inp_text = template.format(
+            CHARGE=charge, MULT=MULT,
+            NPROCS=nprocs, MAXCORE=maxcore,
+            GBW_PATH="sp.gbw",
+        )
+        inp_file.write_text(inp_text)
+
+    t0         = time.time()
+    worker_env = build_omp_env(nprocs)
+    success    = run_orca(inp_file, out_file, log, env=worker_env, cpu_list=cpu_list)
+    elapsed    = (time.time() - t0) / 60
+
+    return {
+        "conf_id":   conf_id,
+        "tddft_dir": tddft_dir if success else None,
+        "success":   success,
+        "elapsed":   elapsed,
+    }
+
+
 def stage_tddft(sp_dirs: list[Path], mol_dir: Path,
                 charge: int, log: logging.Logger) -> list[Path]:
     """
-    Etapa 05_tddft: TD-DFT con guess orbital del SP.
+    Etapa 05_tddft: TD-DFT (NRoots 15) con guess orbital del SP.
+
+    Corre TDDFT_BATCH_SIZE confórmeros en paralelo (2 jobs × 6 cores = 12 cores).
+    MAXCORE_TDDFT ya incluye el factor RAM_PENALTY_TDDFT aplicado en ResourceProfile.
     """
-    log.info(f"[TDDFT] calculando espectros para {len(sp_dirs)} confórmeros")
+    log.info(f"[TDDFT] calculando espectros para {len(sp_dirs)} confórmeros — "
+             f"batch {TDDFT_BATCH_SIZE}×{NPROCS_TDDFT} cores (NRoots 15)")
     template   = get_template("tddft")
     successful = []
 
-    for sp_dir in sp_dirs:
-        conf_id  = sp_dir.name
-        gbw_file = sp_dir / "sp.gbw"
-        opt_xyz  = resolve_opt_xyz(sp_dir)
+    tasks_all = [
+        {
+            "conf_id":  d.name,
+            "sp_dir":   d,
+            "charge":   charge,
+            "template": template,
+            "nprocs":   NPROCS_TDDFT,
+            "maxcore":  MAXCORE_TDDFT,
+            "mol_dir":  mol_dir,
+            "log":      log,
+        }
+        for d in sp_dirs
+    ]
 
-        if not gbw_file.exists():
-            log.warning(f"[TDDFT] {conf_id}: no se encontró sp.gbw — saltando")
-            continue
-        if opt_xyz is None:
-            log.warning(f"[TDDFT] {conf_id}: no se encontró opt_opt.xyz ni opt.xyz — saltando")
-            continue
+    n_lotes = -(-len(tasks_all) // TDDFT_BATCH_SIZE)
+    _check_cpu_budget(TDDFT_BATCH_SIZE, NPROCS_TDDFT, log)
 
-        tddft_dir = mol_dir / "05_tddft" / conf_id
-        tddft_dir.mkdir(parents=True, exist_ok=True)
+    for b_start in range(0, len(tasks_all), TDDFT_BATCH_SIZE):
+        batch    = tasks_all[b_start : b_start + TDDFT_BATCH_SIZE]
+        lote_num = b_start // TDDFT_BATCH_SIZE + 1
+        ids      = [t["conf_id"] for t in batch]
 
-        out_file = tddft_dir / "tddft.out"
-        inp_file = tddft_dir / "tddft.inp"
+        cpu_lists = assign_cpu_lists(len(batch), NPROCS_TDDFT)
+        for t, cl in zip(batch, cpu_lists):
+            t["cpu_list"] = cl
 
-        # Solo copiar archivos si el cálculo no está ya completo
-        if not check_success(out_file):
-            if not safe_copy(opt_xyz, tddft_dir / "sp_opt.xyz"):
-                log.warning(f"[TDDFT] {conf_id}: error copiando sp_opt.xyz — saltando")
-                continue
-            if not safe_copy(gbw_file, tddft_dir / "sp.gbw"):
-                log.warning(f"[TDDFT] {conf_id}: error copiando sp.gbw — saltando")
-                continue
-            inp_text = template.format(
-                CHARGE=charge, MULT=MULT,
-                NPROCS=NPROCS, MAXCORE=MAXCORE,
-                GBW_PATH="sp.gbw",
-            )
-            inp_file.write_text(inp_text)
+        log.info(f"[TDDFT] ── Lote {lote_num}/{n_lotes}: {ids}  "
+                 f"(cores: {[','.join(map(str, cl)) for cl in cpu_lists]})")
 
-        ok = run_orca(inp_file, out_file, log)
-        if ok:
-            successful.append(tddft_dir)
-        else:
-            log.warning(f"[TDDFT] {conf_id} falló")
+        with ThreadPoolExecutor(max_workers=len(batch)) as pool:
+            futures = {pool.submit(_tddft_worker, t): t["conf_id"] for t in batch}
+            try:
+                for fut in as_completed(futures):
+                    res = fut.result()
+                    tag = "✓" if res["success"] else "✗"
+                    log.info(f"[TDDFT]   {tag} {res['conf_id']}  ({res['elapsed']:.1f} min)")
+                    if res["success"] and res["tddft_dir"] is not None:
+                        successful.append(res["tddft_dir"])
+                    else:
+                        log.warning(f"[TDDFT] {res['conf_id']} falló")
+            except KeyboardInterrupt:
+                log.warning("[TDDFT] Ctrl-C — cancelando lote, esperando workers…")
+                pool.shutdown(wait=False, cancel_futures=True)
+                _kill_active_procs()
+                sys.exit(130)
 
     log.info(f"[TDDFT] {len(successful)}/{len(sp_dirs)} completados")
     return successful
@@ -2087,7 +2194,9 @@ def print_status():
 # ─────────────────────────────────────────────
 
 def main():
-    global NPROCS, MAXCORE, NPROCS_NUMFREQ, MAXCORE_NUMFREQ, OMP_ENV
+    global NPROCS_CREST, NPROCS, MAXCORE, NPROCS_NUMFREQ, MAXCORE_NUMFREQ, \
+           NPROCS_TDDFT, MAXCORE_TDDFT, NPROCS_ADC2, MAXCORE_ADC2, \
+           OPT_BATCH_SIZE, SP_BATCH_SIZE, TDDFT_BATCH_SIZE, OMP_ENV
     parser = argparse.ArgumentParser(
         description=(
             "Pipeline ORCA: CREST → CENSO (prescreen) → Opt → NumFreq → SP → TDDFT → ADC2\n"
@@ -2273,10 +2382,10 @@ Ejemplos (modo expansión conformacional):
     #   3. Sin --cores → ResourceProfile.detect()  (lee topología real del sistema)
     #
     # ResourceProfile calcula por etapa:
-    #   OPT     : min(nprocs_per_job, MAX_OPT_NPROCS_PER_JOB)  — no escala bien > 6
-    #   NUMFREQ : todos los cores disponibles — escala perfecto (desplazamientos independientes)
-    #   SP      : min(cores, MAX_SP_NPROCS)  — escala hasta ~8 con def2-TZVPD
-    #   TDDFT   : igual que SP pero maxcore reducido (×RAM_PENALTY_TDDFT) por NRoots
+    #   OPT     : OPT_BATCH_SIZE × MAX_OPT_NPROCS_PER_JOB  (3×4 = 12 cores)
+    #   NUMFREQ : 1 × MAX_NUMFREQ_NPROCS                   (1×12 = 12 cores)
+    #   SP      : SP_BATCH_SIZE × MAX_SP_NPROCS             (3×4 = 12 cores)
+    #   TDDFT   : TDDFT_BATCH_SIZE × TDDFT_NPROCS_PER_JOB  (2×6 = 12 cores)
     #   ADC2    : fijo ≤ NPROCS_ADC2_MAX + RAM generosa por core
 
     if args.cores is not None:
@@ -2290,6 +2399,7 @@ Ejemplos (modo expansión conformacional):
         )
 
     # Extraer valores del perfil autodetectado
+    nprocs_crest          = rp.nprocs_crest
     nprocs                = rp.nprocs_opt
     maxcore               = rp.maxcore_opt
     nprocs_numfreq        = rp.nprocs_numfreq
@@ -2308,19 +2418,28 @@ Ejemplos (modo expansión conformacional):
         maxcore_nf = args.maxcore_numfreq
 
     # Valores derivados para TDDFT y ADC2 (no expuestos en CLI; vienen siempre del perfil)
-    nprocs_tddft  = rp.nprocs_tddft
-    maxcore_tddft = rp.maxcore_tddft
-    nprocs_adc2   = rp.nprocs_adc2
-    maxcore_adc2  = rp.maxcore_adc2
+    nprocs_tddft   = rp.nprocs_tddft
+    maxcore_tddft  = rp.maxcore_tddft
+    nprocs_adc2    = rp.nprocs_adc2
+    maxcore_adc2   = rp.maxcore_adc2
+    opt_batch_size = rp.OPT_BATCH_SIZE
+    sp_batch_size  = rp.SP_BATCH_SIZE
+    tddft_batch    = rp.TDDFT_BATCH_SIZE
 
     # Actualizar globales (usados en las funciones stage_*)
-    NPROCS          = nprocs
-    MAXCORE         = maxcore
-    NPROCS_NUMFREQ  = nprocs_numfreq
-    MAXCORE_NUMFREQ = maxcore_nf
-    NPROCS_ADC2     = nprocs_adc2
-    MAXCORE_ADC2    = maxcore_adc2
-    OMP_ENV         = build_omp_env(NPROCS)
+    NPROCS_CREST     = nprocs_crest
+    NPROCS           = nprocs
+    MAXCORE          = maxcore
+    NPROCS_NUMFREQ   = nprocs_numfreq
+    MAXCORE_NUMFREQ  = maxcore_nf
+    NPROCS_TDDFT     = nprocs_tddft
+    MAXCORE_TDDFT    = maxcore_tddft
+    NPROCS_ADC2      = nprocs_adc2
+    MAXCORE_ADC2     = maxcore_adc2
+    OPT_BATCH_SIZE   = opt_batch_size
+    SP_BATCH_SIZE    = sp_batch_size
+    TDDFT_BATCH_SIZE = tddft_batch
+    OMP_ENV          = build_omp_env(NPROCS)
 
     if args.status:
         print_status()
@@ -2352,10 +2471,15 @@ Ejemplos (modo expansión conformacional):
     log.info(f"Flujo: CREST → CENSO (prescreen) → OPT (nconf auto) → NumFreq → SP → TDDFT → ADC2")
     log.info(f"Inicio desde etapa: {args.start.upper()}")
     log.info(f"ORCA: {ORCA_BIN}")
-    log.info(f"Recursos OPT/SP/TDDFT : {nprocs} cores / {maxcore} MB per core "
-             f"→ {nprocs * maxcore / 1024:.1f} GB por job")
-    log.info(f"Recursos NumFreq       : {nprocs_numfreq} cores / {maxcore_nf} MB per core "
-             f"→ {nprocs_numfreq * maxcore_nf / 1024:.1f} GB por job")
+    log.info(f"Recursos CREST/CENSO   : {nprocs_crest} cores  (xTB --T, escala lineal)")
+    log.info(f"Recursos OPT           : {opt_batch_size}×{nprocs} cores / {maxcore} MB  "
+             f"→ {nprocs * maxcore / 1024:.1f} GB/job")
+    log.info(f"Recursos SP            : {sp_batch_size}×{nprocs} cores / {maxcore} MB  "
+             f"→ {nprocs * maxcore / 1024:.1f} GB/job")
+    log.info(f"Recursos TDDFT         : {tddft_batch}×{nprocs_tddft} cores / {maxcore_tddft} MB  "
+             f"→ {nprocs_tddft * maxcore_tddft / 1024:.1f} GB/job  (NRoots 15)")
+    log.info(f"Recursos NumFreq       : 1×{nprocs_numfreq} cores / {maxcore_nf} MB  "
+             f"→ {nprocs_numfreq * maxcore_nf / 1024:.1f} GB")
     if args.expand_crest:
         total_expand_cores = args.parallel * nprocs_per_expand_job
         total_expand_ram   = total_expand_cores * maxcore / 1024

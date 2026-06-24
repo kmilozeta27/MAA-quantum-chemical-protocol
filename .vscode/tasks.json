@@ -1,16 +1,5 @@
 {
-  // .vscode/tasks.json
-  // Colocar en la raíz del proyecto (mismo nivel que pipeline.py y runs/)
-  //
-  // Cómo usar:
-  //   Ctrl+Shift+P → "Tasks: Run Task" → elegir la tarea
-  //   O: Ctrl+Shift+B para lanzar la tarea de build por defecto (run_pipeline)
-  //
-  // Variables de entrada: VS Code te pregunta el nombre de la molécula
-  // y el charge al lanzar la tarea. Puedes modificar los defaults abajo.
-
   "version": "2.0.0",
-
   "inputs": [
     {
       "id": "mol_file",
@@ -34,21 +23,34 @@
       "id": "start_step",
       "type": "pickString",
       "description": "Etapa de inicio (--start)",
-      "options": ["crest", "opt", "numfreq", "sp", "tddft", "adc2"],
+      "options": [
+        "crest",
+        "opt",
+        "numfreq",
+        "sp",
+        "tddft",
+        "adc2"
+      ],
       "default": "crest"
     },
     {
       "id": "watch_step",
       "type": "pickString",
       "description": "Etapa a monitorear (--step, para watch manual)",
-      "options": ["auto", "crest", "censo", "opt", "numfreq", "sp", "tddft", "adc2"],
+      "options": [
+        "auto",
+        "crest",
+        "censo",
+        "opt",
+        "numfreq",
+        "sp",
+        "tddft",
+        "adc2"
+      ],
       "default": "auto"
     }
   ],
-
   "tasks": [
-
-    // ── 1. LANZAR PIPELINE COMPLETO ──────────────────────────────────────────
     {
       "label": "FAE: Run pipeline",
       "type": "shell",
@@ -61,15 +63,13 @@
         "echo": true,
         "reveal": "always",
         "focus": true,
-        "panel": "dedicated",        // terminal exclusivo para este proceso
+        "panel": "dedicated",
         "showReuseMessage": false,
         "clear": false
       },
       "problemMatcher": [],
       "detail": "CREST → CENSO → OPT → NumFreq → SP → TD-DFT → ADC2"
     },
-
-    // ── 2. LANZAR DESDE UNA ETAPA ESPECÍFICA ─────────────────────────────────
     {
       "label": "FAE: Run pipeline (desde etapa)",
       "type": "shell",
@@ -85,9 +85,6 @@
       "problemMatcher": [],
       "detail": "Retoma el pipeline desde la etapa elegida"
     },
-
-    // ── 3. MONITOR AUTOMÁTICO ────────────────────────────────────────────────
-    // Abre una segunda terminal y hace tail automático del archivo activo
     {
       "label": "FAE: Watch pipeline (auto)",
       "type": "shell",
@@ -103,8 +100,6 @@
       "problemMatcher": [],
       "detail": "tail -f automático: cambia de archivo al detectar nueva etapa"
     },
-
-    // ── 4. MONITOR MANUAL (ETAPA ESPECÍFICA) ─────────────────────────────────
     {
       "label": "FAE: Watch step (manual)",
       "type": "shell",
@@ -120,8 +115,6 @@
       "problemMatcher": [],
       "detail": "tail -f de una etapa concreta (opt, numfreq, sp, etc.)"
     },
-
-    // ── 5. VER ESTADO DE TODOS LOS RUNS ──────────────────────────────────────
     {
       "label": "FAE: Status",
       "type": "shell",
@@ -137,8 +130,6 @@
       "problemMatcher": [],
       "detail": "Muestra estado de todos los runs en runs/"
     },
-
-    // ── 6. TAIL DEL PIPELINE.LOG MAESTRO ─────────────────────────────────────
     {
       "label": "FAE: Watch pipeline.log",
       "type": "shell",
@@ -154,8 +145,6 @@
       "problemMatcher": [],
       "detail": "Log maestro del pipeline (timestamps + etapas)"
     },
-
-    // ── 7. COLLECT RESULTS ────────────────────────────────────────────────────
     {
       "label": "FAE: Collect results",
       "type": "shell",
@@ -171,10 +160,6 @@
       "problemMatcher": [],
       "detail": "Corre results_collector.py sobre el mol especificado"
     },
-
-    // ── 8. COMBO: PIPELINE + WATCH (dependencia) ──────────────────────────────
-    // Lanza el pipeline Y abre el monitor en la misma sesión de tareas.
-    // VS Code los muestra en paneles separados dentro de la terminal integrada.
     {
       "label": "FAE: Run + Watch",
       "dependsOn": [
@@ -185,6 +170,5 @@
       "group": "build",
       "detail": "Lanza pipeline y monitor simultáneamente en dos terminales"
     }
-
   ]
 }
