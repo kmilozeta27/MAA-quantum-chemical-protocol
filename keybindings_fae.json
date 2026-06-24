@@ -1,0 +1,25 @@
+// keybindings.json (fragmento para agregar a tu keybindings.json global)
+// Archivo: ~/.config/Code/User/keybindings.json
+//
+// Pegar estas entradas dentro del array [] de tu keybindings.json existente.
+
+[
+  // Ctrl+Shift+R → Run pipeline completo
+  {
+    "key": "ctrl+shift+r",
+    "command": "workbench.action.tasks.runTask",
+    "args": "FAE: Run pipeline"
+  },
+  // Ctrl+Shift+W → Watch automático
+  {
+    "key": "ctrl+shift+w",
+    "command": "workbench.action.tasks.runTask",
+    "args": "FAE: Watch pipeline (auto)"
+  },
+  // Ctrl+Shift+S → Status
+  {
+    "key": "ctrl+shift+s",
+    "command": "workbench.action.tasks.runTask",
+    "args": "FAE: Status"
+  }
+]
