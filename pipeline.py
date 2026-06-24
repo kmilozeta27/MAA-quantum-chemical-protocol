@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
 """
 pipeline.py — Pipeline ORCA automatizado para cálculos conformacionales
-Flujo: CREST → Opt → NumFreq → SP → TDDFT → ADC2 (validación, confórmero dominante)
+Flujo: CREST → CENSO (prescreen) → Opt → NumFreq → SP → TDDFT → ADC2
+
+El pipeline siempre empieza en CREST. CENSO pre-screening es obligatorio
+entre CREST y OPT. El número de confórmeros que pasan a OPT se determina
+automáticamente a partir del panorama conformacional post-CENSO (mín 3, máx 20).
 
 Uso (modo normal):
     python pipeline.py --mol molecules/mol_A.xyz --charge -1
-    python pipeline.py --mol molecules/mol_A.xyz --charge 0 --start sp
-    python pipeline.py --mol molecules/mol_A.xyz --charge -1 --nconf 5 --start tddft
+    python pipeline.py --mol molecules/mol_A.xyz --charge 0 --start opt
+    python pipeline.py --mol molecules/mol_A.xyz --charge -1 --start sp
     python pipeline.py --mol molecules/mol_A.xyz --charge -1 --skipnumfreq   # OPT → SP → TDDFT directo
     python pipeline.py --mol molecules/mol_A.xyz --charge -1 --nroot         # SP+NRoots1 top-5 por E_OPT
     python pipeline.py --mol molecules/mol_A.xyz --charge -1 --nroot --nroot-top 3  # top-3
     python pipeline.py --status                  # ver estado de todos los runs
+
+Nota: --start crest y --start opt son equivalentes al inicio (ambos requieren
+      que CREST+CENSO corran). Solo usar --start opt/numfreq/sp/tddft/adc2
+      para retomar un pipeline con CREST+CENSO ya completados.
 
 Uso (modo expansión conformacional, --expand-crest):
     Diseñado para casos como el estado B donde la inversión energética GFN2→DFT
@@ -953,13 +961,132 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
     return conformers_xyz
 
 
+# ─────────────────────────────────────────────
+#  AUTO-SELECCIÓN DE CONFÓRMEROS PARA OPT
+# ─────────────────────────────────────────────
+
+# Límites absolutos (nunca se violan)
+NCONF_MIN = 3
+NCONF_MAX = 20
+
+# Energías de GFN2-xTB en kcal/mol para definir ventanas conformacionales
+_WINDOW_SMALL  = 2.0   # paisaje plano  → cobertura generosa
+_WINDOW_MEDIUM = 3.0   # rango de decisión intermedio
+_WINDOW_LARGE  = 5.0   # paisaje amplio → cota conservadora
+
+
+def select_nconf_auto(conformers_xyz: Path, log: logging.Logger) -> int:
+    """
+    Decide automáticamente cuántos confórmeros pasan a OPT a partir del
+    panorama conformacional del ensemble post-CENSO (energías GFN2-xTB o
+    relativas al mínimo si no se pueden extraer).
+
+    Heurística por número de confórmeros disponibles y spread de energías:
+
+        n_avail ≤ NCONF_MIN            → usa todos (= NCONF_MIN)
+        n_avail ≤ NCONF_MAX            → usa todos (el ensemble ya es pequeño)
+        n_avail > NCONF_MAX:
+            spread ≤ _WINDOW_SMALL     → 5  (paisaje muy plano, muchos conf. equivalentes)
+            spread ≤ _WINDOW_MEDIUM    → 10 (paisaje moderado)
+            spread ≤ _WINDOW_LARGE     → 15 (paisaje amplio)
+            spread > _WINDOW_LARGE     → 20 (máximo, paisaje muy rugoso)
+
+    El spread se calcula con las energías del comentario de cada frame XYZ
+    (campo típico de CREST/CENSO). Si no se pueden leer, se usa n_avail como
+    proxy y se elige la cota media conservadora.
+
+    Siempre devuelve un valor en [NCONF_MIN, NCONF_MAX].
+    """
+    # ── Leer ensemble ────────────────────────────────────────────────────────
+    try:
+        all_conf = read(str(conformers_xyz), index=":")
+        if not isinstance(all_conf, list):
+            all_conf = [all_conf]
+        n_avail = len(all_conf)
+    except Exception as e:
+        log.warning(f"[NCONF-AUTO] no se pudo leer {conformers_xyz}: {e} "
+                    f"— usando nconf={NCONF_MIN}")
+        return NCONF_MIN
+
+    if n_avail == 0:
+        log.warning("[NCONF-AUTO] ensemble vacío — usando nconf={NCONF_MIN}")
+        return NCONF_MIN
+
+    # Caso trivial: todos los disponibles caben dentro del límite
+    if n_avail <= NCONF_MAX:
+        nconf = max(NCONF_MIN, n_avail)
+        log.info(f"[NCONF-AUTO] {n_avail} confórmeros disponibles ≤ {NCONF_MAX} "
+                 f"— todos pasan a OPT → nconf={nconf}")
+        return nconf
+
+    # ── Extraer energías del comentario de cada frame ────────────────────────
+    # CREST/CENSO escriben la energía en Hartree en el segundo campo del
+    # comentario (línea 2 de cada bloque XYZ). ASE la guarda en info["energy"]
+    # o en el comentario bruto ("comment" / "description").
+    energies_hartree: list[float] = []
+    for atoms in all_conf:
+        # Primero intentar el campo de energía nativo de ASE
+        e = atoms.info.get("energy") or atoms.info.get("Energy")
+        if e is None:
+            # Intentar parsear el comentario directamente
+            comment = atoms.info.get("comment", "") or atoms.info.get("description", "")
+            for token in str(comment).split():
+                try:
+                    e = float(token)
+                    break
+                except ValueError:
+                    continue
+        if e is not None:
+            try:
+                energies_hartree.append(float(e))
+            except (TypeError, ValueError):
+                pass
+
+    # ── Calcular spread y decidir nconf ─────────────────────────────────────
+    if len(energies_hartree) >= 2:
+        e_min = min(energies_hartree)
+        e_max = max(energies_hartree)
+        spread_kcal = (e_max - e_min) * HARTREE_TO_KCAL
+
+        if spread_kcal <= _WINDOW_SMALL:
+            nconf = 5
+            tier  = f"spread={spread_kcal:.2f} kcal/mol ≤ {_WINDOW_SMALL} (paisaje plano)"
+        elif spread_kcal <= _WINDOW_MEDIUM:
+            nconf = 10
+            tier  = f"spread={spread_kcal:.2f} kcal/mol ≤ {_WINDOW_MEDIUM} (moderado)"
+        elif spread_kcal <= _WINDOW_LARGE:
+            nconf = 15
+            tier  = f"spread={spread_kcal:.2f} kcal/mol ≤ {_WINDOW_LARGE} (amplio)"
+        else:
+            nconf = 20
+            tier  = f"spread={spread_kcal:.2f} kcal/mol > {_WINDOW_LARGE} (rugoso)"
+
+        log.info(
+            f"[NCONF-AUTO] {n_avail} confórmeros disponibles — {tier} "
+            f"→ nconf={nconf} (límites: [{NCONF_MIN}, {NCONF_MAX}])"
+        )
+    else:
+        # Sin energías legibles: heurística solo por tamaño del ensemble
+        # Escala logarítmica suave entre NCONF_MIN y NCONF_MAX
+        import math
+        ratio = math.log(n_avail) / math.log(100)  # 100 conf ≈ nconf_max
+        nconf = int(NCONF_MIN + (NCONF_MAX - NCONF_MIN) * min(ratio, 1.0))
+        log.warning(
+            f"[NCONF-AUTO] {n_avail} confórmeros disponibles — energías no legibles; "
+            f"usando heurística de tamaño → nconf={nconf}"
+        )
+
+    return max(NCONF_MIN, min(NCONF_MAX, nconf))
+
+
 def stage_opt(conformers_xyz: Path, mol_dir: Path,
               charge: int, nconf: int, log: logging.Logger) -> list[Path]:
     """
     Etapa 02_opt: optimización DFT de cada confórmero.
+    `nconf` ya viene calculado por select_nconf_auto().
     Devuelve lista de directorios exitosos.
     """
-    log.info(f"[OPT] optimizando los {nconf} mejores confórmeros")
+    log.info(f"[OPT] optimizando {nconf} confórmeros (seleccionados automáticamente)")
     try:
         conformers = read_conformers(conformers_xyz, nconf)
     except RuntimeError as e:
@@ -1962,12 +2089,19 @@ def print_status():
 def main():
     global NPROCS, MAXCORE, NPROCS_NUMFREQ, MAXCORE_NUMFREQ, OMP_ENV
     parser = argparse.ArgumentParser(
-        description="Pipeline ORCA: CREST → Opt → NumFreq → SP → TDDFT → ADC2",
+        description=(
+            "Pipeline ORCA: CREST → CENSO (prescreen) → Opt → NumFreq → SP → TDDFT → ADC2\n"
+            "CREST y CENSO pre-screening son obligatorios. El número de confórmeros para OPT\n"
+            "se determina automáticamente (mín 3, máx 20) según el panorama conformacional."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Ejemplos (modo normal):
-  # Pipeline completo, 8 cores totales (usa 8 para OPT/SP/TDDFT y NumFreq)
+  # Pipeline completo desde cero, 8 cores totales
   python pipeline.py --mol molecules/mglyval.xyz --charge -1 --cores 8
+
+  # Retomar desde OPT (CREST+CENSO ya hechos en 01_crest/ y 01b_censo_prescreen/)
+  python pipeline.py --mol molecules/mglyval.xyz --charge -1 --start opt
 
   # Retomar desde SP (opt y freq ya hechos)
   python pipeline.py --mol molecules/mglyval.xyz --charge -1 --start sp
@@ -1975,9 +2109,6 @@ Ejemplos (modo normal):
   # Retomar NumFreq interrumpida (detección automática de restart)
   python pipeline.py --mol molecules/mglyval.xyz --charge -1 --start numfreq
   # → si hay freq_D*.res.Gradients en la carpeta, activa Restart true solo
-
-  # Solo TDDFT, 3 confórmeros
-  python pipeline.py --mol molecules/mglyval.xyz --charge -1 --nconf 3 --start tddft
 
   # SP+NRoots 1 sobre los 5 mejores confórmeros por E_OPT (requiere 02_opt/ completo)
   python pipeline.py --mol molecules/mglyval.xyz --charge -1 --nroot
@@ -2006,8 +2137,6 @@ Ejemplos (modo expansión conformacional):
     parser.add_argument("--mol",    type=Path, help="ruta al .xyz de entrada")
     parser.add_argument("--charge", type=int, default=0,
                         help="carga formal de la molécula (default: 0)")
-    parser.add_argument("--nconf",  type=int, default=3,
-                        help="número de confórmeros a procesar (default: 3)")
     parser.add_argument("--start",  choices=STEPS, default="crest",
                         help="etapa desde la que iniciar (default: crest)")
     parser.add_argument("--status", action="store_true",
@@ -2018,16 +2147,6 @@ Ejemplos (modo expansión conformacional):
             "Salta NUMFREQ y pasa directo de OPT a SP/TDDFT (modo normal, "
             "no aplica a --expand-crest). Usa la geometría de 02_opt/ "
             "directamente como input de SP, sin correcciones térmicas de NumFreq."
-        ),
-    )
-    parser.add_argument(
-        "--use-censo-prescreen", action="store_true",
-        help=(
-            "Pre-screening barato con CENSO (PBE-D4/SV(p) vía ~/.censo2rc) "
-            "entre CREST y OPT, para descartar confórmeros de alta energía "
-            "antes del OPT costoso (ωB97X-D3/SVP). Solo aplica en modo normal "
-            "(no en --expand-crest). Fail-open: si CENSO falla, usa el "
-            "ensemble CREST sin filtrar."
         ),
     )
 
@@ -2229,7 +2348,8 @@ Ejemplos (modo expansión conformacional):
     log = setup_logging(mol_dir)
     log.info("=" * 60)
     log.info(f"PIPELINE ORCA  —  molécula: {mol_name}")
-    log.info(f"Carga: {args.charge}   Mult: {MULT}   Confs: {args.nconf}")
+    log.info(f"Carga: {args.charge}   Mult: {MULT}")
+    log.info(f"Flujo: CREST → CENSO (prescreen) → OPT (nconf auto) → NumFreq → SP → TDDFT → ADC2")
     log.info(f"Inicio desde etapa: {args.start.upper()}")
     log.info(f"ORCA: {ORCA_BIN}")
     log.info(f"Recursos OPT/SP/TDDFT : {nprocs} cores / {maxcore} MB per core "
@@ -2471,6 +2591,9 @@ Ejemplos (modo expansión conformacional):
     # ════════════════════════════════════════════════════════════
 
     # ── Etapa 1: CREST ──────────────────────────────────────────
+    # CREST siempre corre cuando start_idx == 0 (default).
+    # Si se usa --start opt/numfreq/sp/tddft/adc2, se asume que
+    # 01_crest/crest_conformers.xyz ya existe.
     conformers_xyz = mol_dir / "01_crest" / "crest_conformers.xyz"
 
     if start_idx == 0:
@@ -2480,17 +2603,27 @@ Ejemplos (modo expansión conformacional):
             sys.exit(1)
     else:
         if not conformers_xyz.exists():
-            sys.exit(f"ERROR: se pidió start={args.start} pero no existe "
-                     f"{conformers_xyz}\nCorre primero con --start crest")
+            sys.exit(
+                f"ERROR: se pidió start={args.start} pero no existe "
+                f"{conformers_xyz}\n"
+                f"       Corre primero desde el inicio (sin --start) para "
+                f"generar el ensemble CREST+CENSO."
+            )
         log.info("[CREST] saltado (--start indica etapa posterior)")
 
-    # ── Etapa 1b: CENSO pre-screening (opcional) ─────────────────
-    if args.use_censo_prescreen and start_idx <= STEPS.index("opt"):
+    # ── Etapa 1b: CENSO pre-screening (siempre obligatorio) ──────
+    # Corre entre CREST y OPT. Fail-open: si CENSO no está disponible
+    # o falla, el pipeline continúa con el ensemble CREST sin filtrar.
+    # En retoma (start > opt) se omite si ya existe el ensemble filtrado.
+    if start_idx <= STEPS.index("opt"):
         conformers_xyz = stage_censo_prescreen(conformers_xyz, mol_dir, args.charge, log)
 
     # ── Etapa 2: OPT ────────────────────────────────────────────
+    # El número de confórmeros se determina automáticamente en función
+    # del panorama conformacional del ensemble post-CENSO (mín 3, máx 20).
     if start_idx <= STEPS.index("opt"):
-        opt_dirs = stage_opt(conformers_xyz, mol_dir, args.charge, args.nconf, log)
+        nconf = select_nconf_auto(conformers_xyz, log)
+        opt_dirs = stage_opt(conformers_xyz, mol_dir, args.charge, nconf, log)
         if not opt_dirs:
             log.error("Ningún confórmero optimizado correctamente. Abortando.")
             sys.exit(1)
