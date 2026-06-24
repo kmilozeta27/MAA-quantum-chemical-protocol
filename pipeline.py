@@ -53,15 +53,18 @@ CENSO_BIN  = Path("censo")          # asumido en PATH (env sciencebitch); ajusta
 WORK_ROOT  = Path("runs")           # directorio de salida
 TMPL_DIR   = Path("templates")
 MULT       = 1                      # multiplicidad siempre 1
-NPROCS          = 4
-NPROCS_NUMFREQ  = 6      # NumFreq usa más cores: cada desplazamiento es un SCF
-                          # independiente → escala bien. Ajustable con --nprocs-numfreq.
-MAXCORE         = 3500
-MAXCORE_NUMFREQ = 2300   # memoria por core para NumFreq (6 cores × 2300 MB ≈ 13.8 GB)
-NPROCS_ADC2     = 4      # ADC2 (RI-CC2-like, vía MDCI) — costoso en memoria, pocos cores
-MAXCORE_ADC2    = 5500   # MB/core para ADC2 (4 cores × 5500 MB ≈ 21.5 GB)
 CREST_TIMEOUT_HOURS = 16.0          # timeout CREST (horas)
 CENSO_TIMEOUT_HOURS = 4.0           # timeout CENSO pre-screening (horas) — barato, no debería tardar
+
+# Los defaults de recursos (NPROCS, MAXCORE, etc.) se inicializan más abajo
+# por ResourceProfile.detect() tras leer la topología real del sistema.
+# Estos valores son placeholders que main() sobreescribe siempre.
+NPROCS          = 4
+NPROCS_NUMFREQ  = 8
+MAXCORE         = 3500
+MAXCORE_NUMFREQ = 2800
+NPROCS_ADC2     = 4
+MAXCORE_ADC2    = 5500
 
 # OMP_ENV se construye bajo demanda en build_omp_env() para que siempre
 # refleje el valor actualizado de NPROCS (nunca queda obsoleto si el
@@ -137,6 +140,223 @@ signal.signal(signal.SIGTERM, _sigint_handler)
 HARTREE_TO_KCAL     = 627.5094740631   # factor de conversión
 EXPAND_BATCH_SIZE   = 3                # OPTs en paralelo (default; override con --total-cores)
 EXPAND_DFT_THRESHOLD = 3.0             # kcal/mol (default filtro post-OPT)
+
+
+# ─────────────────────────────────────────────
+#  AUTODETECCIÓN DE RECURSOS
+# ─────────────────────────────────────────────
+
+class ResourceProfile:
+    """
+    Detecta la topología real del sistema y calcula los parámetros de
+    recursos óptimos para cada etapa del pipeline ORCA.
+
+    Reglas de distribución por tipo de cálculo
+    ──────────────────────────────────────────
+    OPT  → escala mal con muchos cores (cuello de botella en comm. MPI).
+            En modo normal: usa TODOS los cores disponibles (un solo job).
+            En modo expand: se reparten entre batch_size jobs simultáneos.
+            El sweet-spot empírico para esta CPU es ≤ 6 cores por job;
+            más de eso y la eficiencia MPI cae por debajo del 70%.
+
+    NUMFREQ → paralelismo ideal: cada desplazamiento es un SCF independiente.
+              Usa TODOS los cores disponibles en un único job secuencial.
+              No hay comunicación MPI entre desplazamientos → escala lineal
+              hasta saturar el ancho de banda de memoria (~12 cores).
+
+    SP   → cálculo puro de SCF con base grande (def2-TZVPD). Escala bien
+           hasta ~8 cores; por encima los beneficios son marginales.
+           En modo normal: usa todos los disponibles (≤ MAX_SP_NPROCS).
+           En modo expand: se reparte entre jobs paralelos igual que OPT.
+
+    TDDFT → igual que SP pero con mayor consumo de RAM por NRoots.
+            Se aplica un factor RAM_PENALTY_TDDFT sobre el maxcore calculado
+            para evitar OOM. Siempre se corre secuencial (1 job a la vez).
+
+    ADC2  → muy costoso en memoria (transformación integral 4-índice).
+            Se limita explícitamente a NPROCS_ADC2_MAX cores y se asigna
+            RAM generosa por core.
+
+    maxcore (MB/core) se calcula como:
+        floor(RAM_usable_MB / total_cores_activos / SAFETY)
+    donde RAM_usable_MB = RAM_total × 0.85 (margen para SO y buffers).
+
+    Parámetros ajustables al inicio de la clase:
+        SAFETY_FACTOR          — fracción de RAM reservada para el SO
+        MAX_OPT_NPROCS_PER_JOB — límite de cores/job en OPT paralelo
+        MAX_SP_NPROCS          — límite de cores en SP secuencial
+        RAM_PENALTY_TDDFT      — divisor extra de maxcore para TDDFT
+        NPROCS_ADC2_MAX        — máximo cores para ADC2
+        MAXCORE_ADC2_MIN       — mínimo MB/core para ADC2
+    """
+
+    # ── Parámetros de política (ajustar aquí si cambia el hardware) ──────
+    SAFETY_FACTOR          = 0.85   # fracción de RAM que puede usar ORCA
+    MAX_OPT_NPROCS_PER_JOB = 6     # sweet-spot empírico para OPT wB97X-D3/SVP
+    MAX_SP_NPROCS          = 8     # SP escala hasta ~8 cores con def2-TZVPD
+    RAM_PENALTY_TDDFT      = 1.4   # TDDFT consume ~40% más RAM que SP por NRoots
+    NPROCS_ADC2_MAX        = 4     # ADC2: más cores no ayudan, solo gastan RAM
+    MAXCORE_ADC2_MIN       = 5000  # MB/core mínimo para ADC2 (transformación 4-índice)
+
+    def __init__(
+        self,
+        total_cores : int,
+        ram_mb      : int,
+        batch_size  : int = 1,
+    ) -> None:
+        """
+        Args:
+            total_cores  : CPUs lógicas disponibles (de os.cpu_count() o --cores).
+            ram_mb       : RAM total en MB (de psutil o estimada).
+            batch_size   : jobs simultáneos en modo expand (default 1 = modo normal).
+        """
+        self.total_cores = total_cores
+        self.ram_mb      = ram_mb
+        self.batch_size  = batch_size
+        self._compute()
+
+    # ── Interfaz pública ────────────────────────────────────────────────
+
+    @classmethod
+    def detect(cls, batch_size: int = 1) -> "ResourceProfile":
+        """
+        Construye un ResourceProfile leyendo la topología real del sistema.
+
+        Usa psutil para la RAM (más fiable que /proc/meminfo en algunos
+        kernels). Si psutil no está disponible, estima 28 GB (valor
+        conservador para el ThinkPad T14 Gen5 con 32 GB).
+        """
+        total_cores = os.cpu_count() or 4
+
+        try:
+            import psutil
+            ram_mb = psutil.virtual_memory().total // (1024 * 1024)
+        except ImportError:
+            # Fallback: leer /proc/meminfo directamente
+            try:
+                with open("/proc/meminfo") as f:
+                    for line in f:
+                        if line.startswith("MemTotal"):
+                            ram_mb = int(line.split()[1]) // 1024
+                            break
+                    else:
+                        ram_mb = 28_000
+            except OSError:
+                ram_mb = 28_000
+
+        return cls(total_cores=total_cores, ram_mb=ram_mb, batch_size=batch_size)
+
+    @classmethod
+    def detect_with_batch(cls, total_cores: int, batch_size: int, ram_mb: int = 0) -> "ResourceProfile":
+        """
+        Variante para modo expand: recibe total_cores explícito (de --cores)
+        y batch_size (de --parallel); recalcula el perfil de recursos.
+        """
+        if ram_mb <= 0:
+            try:
+                import psutil
+                ram_mb = psutil.virtual_memory().total // (1024 * 1024)
+            except (ImportError, Exception):
+                try:
+                    with open("/proc/meminfo") as f:
+                        for line in f:
+                            if line.startswith("MemTotal"):
+                                ram_mb = int(line.split()[1]) // 1024
+                                break
+                        else:
+                            ram_mb = 28_000
+                except OSError:
+                    ram_mb = 28_000
+
+        return cls(total_cores=total_cores, ram_mb=ram_mb, batch_size=batch_size)
+
+    def summary(self) -> str:
+        """Devuelve un bloque de texto legible para el log de arranque."""
+        ram_opt    = self.nprocs_opt    * self.maxcore_opt    / 1024
+        ram_nf     = self.nprocs_numfreq * self.maxcore_numfreq / 1024
+        ram_sp     = self.nprocs_sp     * self.maxcore_sp     / 1024
+        ram_tddft  = self.nprocs_tddft  * self.maxcore_tddft  / 1024
+        ram_adc2   = self.nprocs_adc2   * self.maxcore_adc2   / 1024
+        ram_total  = self.ram_mb / 1024
+        ram_usable = ram_total * self.SAFETY_FACTOR
+
+        if self.batch_size > 1:
+            expand_info = (
+                f"\n  Expand batch    : {self.batch_size} jobs × {self.nprocs_opt} cores "
+                f"= {self.batch_size * self.nprocs_opt} cores/lote"
+                f"\n                    RAM/lote ≈ {self.batch_size * ram_opt:.1f} GB"
+            )
+        else:
+            expand_info = ""
+
+        return (
+            f"  Sistema         : {self.total_cores} CPUs lógicas  "
+            f"RAM {ram_total:.0f} GB total / {ram_usable:.0f} GB usable\n"
+            f"  OPT/job         : {self.nprocs_opt} cores / {self.maxcore_opt} MB  "
+            f"→ {ram_opt:.1f} GB\n"
+            f"  SP/job          : {self.nprocs_sp} cores / {self.maxcore_sp} MB  "
+            f"→ {ram_sp:.1f} GB\n"
+            f"  TDDFT/job       : {self.nprocs_tddft} cores / {self.maxcore_tddft} MB  "
+            f"→ {ram_tddft:.1f} GB  (×{self.RAM_PENALTY_TDDFT} RAM penalty)\n"
+            f"  NumFreq/job     : {self.nprocs_numfreq} cores / {self.maxcore_numfreq} MB  "
+            f"→ {ram_nf:.1f} GB  (escala lineal)\n"
+            f"  ADC2/job        : {self.nprocs_adc2} cores / {self.maxcore_adc2} MB  "
+            f"→ {ram_adc2:.1f} GB{expand_info}"
+        )
+
+    # ── Cálculo interno ──────────────────────────────────────────────────
+
+    def _compute(self) -> None:
+        """Calcula todos los parámetros de recursos según las reglas de política."""
+        c   = self.total_cores
+        p   = self.batch_size
+        ram = int(self.ram_mb * self.SAFETY_FACTOR)
+
+        # ── OPT ──────────────────────────────────────────────────────────
+        # En modo normal (p=1): todos los cores, limitado al sweet-spot.
+        # En modo expand (p>1): se reparten entre p jobs simultáneos.
+        if p <= 1:
+            self.nprocs_opt = min(c, self.MAX_OPT_NPROCS_PER_JOB)
+        else:
+            raw = max(1, c // p)
+            self.nprocs_opt = min(raw, self.MAX_OPT_NPROCS_PER_JOB)
+
+        active_opt_cores = self.nprocs_opt * p
+        self.maxcore_opt = max(500, ram // max(active_opt_cores, 1))
+
+        # ── NUMFREQ ──────────────────────────────────────────────────────
+        # Siempre secuencial (1 job), usa todos los cores disponibles.
+        # No hay límite de sweet-spot: paralelismo perfecto entre desplazamientos.
+        self.nprocs_numfreq  = c
+        self.maxcore_numfreq = max(500, ram // max(c, 1))
+
+        # ── SP ───────────────────────────────────────────────────────────
+        # Secuencial (1 job); escala hasta MAX_SP_NPROCS con def2-TZVPD.
+        # En modo expand p>1 se comporta igual que OPT (se puede paralelizar
+        # igual que expand-OPT si stage_sp se llama con batch_size>1).
+        if p <= 1:
+            self.nprocs_sp = min(c, self.MAX_SP_NPROCS)
+        else:
+            raw = max(1, c // p)
+            self.nprocs_sp = min(raw, self.MAX_SP_NPROCS)
+
+        active_sp_cores = self.nprocs_sp * max(p, 1)
+        self.maxcore_sp = max(500, ram // max(active_sp_cores, 1))
+
+        # ── TDDFT ────────────────────────────────────────────────────────
+        # Siempre 1 job (secuencial); mismo nprocs que SP pero maxcore reducido
+        # por RAM_PENALTY_TDDFT para acomodar los vectores de excitación (NRoots 20).
+        self.nprocs_tddft  = self.nprocs_sp
+        raw_maxcore_tddft  = max(500, ram // max(self.nprocs_tddft, 1))
+        self.maxcore_tddft = max(500, int(raw_maxcore_tddft / self.RAM_PENALTY_TDDFT))
+
+        # ── ADC2 ─────────────────────────────────────────────────────────
+        # Costoso en memoria; se limita a NPROCS_ADC2_MAX y se prioriza RAM/core.
+        self.nprocs_adc2  = min(c, self.NPROCS_ADC2_MAX)
+        self.maxcore_adc2 = max(
+            self.MAXCORE_ADC2_MIN,
+            ram // max(self.nprocs_adc2, 1),
+        )
 
 
 # ─────────────────────────────────────────────
@@ -1926,81 +2146,61 @@ Ejemplos (modo expansión conformacional):
             "Corre --nroot como paso independiente sobre un run ya completado."
         )
 
-    # ── Resolver recursos: --cores (simple) vs flags avanzados ───────────────
-    # RAM total en MB asumida (ajusta si tienes diferente; 28 GB dejan margen al OS)
-    MAX_RAM_MB = 28_000
-
-    # Partir de los defaults globales
-    nprocs         = NPROCS
-    maxcore        = MAXCORE
-    nprocs_numfreq = NPROCS_NUMFREQ
-    maxcore_nf     = MAXCORE_NUMFREQ
-    nprocs_per_expand_job = nprocs  # para log posterior
+    # ── Resolver recursos: autodetección + flags CLI ──────────────────────────
+    #
+    # Lógica de precedencia (mayor a menor):
+    #   1. Flags avanzados explícitos (--nprocs, --maxcore, --nprocs-numfreq, ...)
+    #   2. --cores N  → ResourceProfile.detect_with_batch(N, --parallel)
+    #   3. Sin --cores → ResourceProfile.detect()  (lee topología real del sistema)
+    #
+    # ResourceProfile calcula por etapa:
+    #   OPT     : min(nprocs_per_job, MAX_OPT_NPROCS_PER_JOB)  — no escala bien > 6
+    #   NUMFREQ : todos los cores disponibles — escala perfecto (desplazamientos independientes)
+    #   SP      : min(cores, MAX_SP_NPROCS)  — escala hasta ~8 con def2-TZVPD
+    #   TDDFT   : igual que SP pero maxcore reducido (×RAM_PENALTY_TDDFT) por NRoots
+    #   ADC2    : fijo ≤ NPROCS_ADC2_MAX + RAM generosa por core
 
     if args.cores is not None:
-        # Modo simple: distribuir cores automáticamente.
-        # NumFreq siempre usa nprocs_numfreq (default 6), no el mismo valor
-        # que OPT/SP/TDDFT — escala mejor porque cada desplazamiento es un
-        # SCF independiente. Si --cores < 6, se limita a lo disponible.
-        c = args.cores
+        rp = ResourceProfile.detect_with_batch(
+            total_cores = args.cores,
+            batch_size  = args.parallel if args.expand_crest else 1,
+        )
+    else:
+        rp = ResourceProfile.detect(
+            batch_size = args.parallel if args.expand_crest else 1,
+        )
 
-        if args.expand_crest:
-            # 'p' es el número de tareas simultáneas (batch size)
-            p = args.parallel
-            # nprocs define cuántos cores tiene cada tarea individual en el lote
-            nprocs_per_expand_job = max(1, c // p)
-            total_parallel_cores = p * nprocs_per_expand_job
+    # Extraer valores del perfil autodetectado
+    nprocs                = rp.nprocs_opt
+    maxcore               = rp.maxcore_opt
+    nprocs_numfreq        = rp.nprocs_numfreq
+    maxcore_nf            = rp.maxcore_numfreq
+    nprocs_per_expand_job = rp.nprocs_opt     # alias para log posterior
 
-            # FIX: propagar nprocs_per_expand_job al global nprocs para que los
-            # stages secuenciales (TDDFT, NUMFREQ) usen el mismo valor por job
-            # que los stages paralelos (expand-OPT, SP). Sin esta línea, NPROCS
-            # quedaba en el default del módulo (4) aunque se pasara --cores 12.
-            nprocs = nprocs_per_expand_job
-
-            # maxcore se calcula para no saturar la RAM total dividiendo por los cores totales activos
-            maxcore = max(500, (MAX_RAM_MB * 85 // 100) // max(total_parallel_cores, 1))
-
-            # NumFreq y TD-DFT NO se ven afectados por el paralelismo de lotes 'p'
-            # Se mantienen usando su propia lógica de cores disponibles
-            nprocs_numfreq = min(c, nprocs_numfreq)
-            maxcore_nf = max(500, (MAX_RAM_MB * 85 // 100) // max(nprocs_numfreq, 1))
-        else:
-            # Modo no-expand: Un solo proceso usa los cores disponibles
-            nprocs = c
-            maxcore = max(500, (MAX_RAM_MB * 85 // 100) // max(nprocs, 1))
-
-            nprocs_numfreq = min(c, nprocs_numfreq)
-            maxcore_nf = max(500, (MAX_RAM_MB * 85 // 100) // max(nprocs_numfreq, 1))
-
-    # Sobreescritura por flags manuales
+    # Sobreescritura por flags manuales (mayor precedencia)
     if args.nprocs is not None:
         nprocs = args.nprocs
+        nprocs_per_expand_job = args.nprocs
     if args.maxcore is not None:
         maxcore = args.maxcore
     if args.nprocs_numfreq is not None:
         nprocs_numfreq = args.nprocs_numfreq
     if args.maxcore_numfreq is not None:
         maxcore_nf = args.maxcore_numfreq
-        log.info("=" * 60)
 
-
-    # Validación básica de RAM
-    ram_opt = nprocs * maxcore / 1024
-    ram_nf  = nprocs_numfreq * maxcore_nf / 1024
-    if ram_opt > MAX_RAM_MB / 1024:
-        print(f"ADVERTENCIA: OPT/SP/TDDFT requieren ~{ram_opt:.1f} GB "
-              f"(> {MAX_RAM_MB/1024:.0f} GB asumidos). Considera reducir --nprocs o --maxcore.",
-              file=sys.stderr)
-    if ram_nf > MAX_RAM_MB / 1024:
-        print(f"ADVERTENCIA: NumFreq requiere ~{ram_nf:.1f} GB "
-              f"(> {MAX_RAM_MB/1024:.0f} GB asumidos). Considera reducir --nprocs-numfreq.",
-              file=sys.stderr)
+    # Valores derivados para TDDFT y ADC2 (no expuestos en CLI; vienen siempre del perfil)
+    nprocs_tddft  = rp.nprocs_tddft
+    maxcore_tddft = rp.maxcore_tddft
+    nprocs_adc2   = rp.nprocs_adc2
+    maxcore_adc2  = rp.maxcore_adc2
 
     # Actualizar globales (usados en las funciones stage_*)
     NPROCS          = nprocs
     MAXCORE         = maxcore
     NPROCS_NUMFREQ  = nprocs_numfreq
     MAXCORE_NUMFREQ = maxcore_nf
+    NPROCS_ADC2     = nprocs_adc2
+    MAXCORE_ADC2    = maxcore_adc2
     OMP_ENV         = build_omp_env(NPROCS)
 
     if args.status:
