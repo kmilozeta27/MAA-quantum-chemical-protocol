@@ -1,50 +1,42 @@
 # MAA-quantum-chemical-protocol
-Pipeline computacional sistemático para la caracterización estructural y electrónica de mycosporine-like amino acids (MAAs), diseñado para reemplazar inputs geométricos no validados (PubChem 2D, minimización por campo de fuerza) en estudios de docking molecular y bioactividad por estructuras quantum-mecánicamente optimizadas, con estado de protonación termodinámicamente asignado y muestreo conformacional en fase solución.
+A systematic computational pipeline for the structural and electronic characterization of mycosporine-like amino acids (MAAs), designed to replace unvalidated geometry inputs (PubChem 2D, force-field minimization)—typically used in molecular docking and bioactivity studies—with quantum-mechanically optimized structures featuring thermodynamically assigned protonation states and solution-phase conformational sampling.
  
-Proyecto desarrollado para FAE 2026 (Feria Antártica Escolar / INACH), con manuscrito en preparación para *Marine Drugs*.
+Project developed for FAE 2026 (Antarctic School Fair / INACH), with a manuscript currently in preparation for *Marine Drugs*.
  
-## Motivación
+## Motivation
  
-Los estudios de docking molecular publicados que postulan a las MAAs como inhibidores de ACE2 y otros blancos farmacológicos humanos parten de estructuras 2D sin optimización cuántica, sin estado de protonación validado termodinámicamente y sin análisis conformacional en solución. Esto es relevante porque trabajo experimental previo (titulaciones UV-Vis combinadas con cálculos RI-CC2/TZVP) estableció que la especie absorbente a pH fisiológico es la forma protonada y estabilizada por zwitterión del cromóforo, no el núcleo neutro. Este proyecto aborda ese vacío metodológico aplicando un protocolo validado de química cuántica a M-Gly:Val (mycosporine-glycine:valine), con foco adicional en el contexto antártico (274 K, alta exposición UV-B).
+Published molecular docking studies proposing MAAs as inhibitors of ACE2 and other human pharmacological targets rely on 2D structures lacking quantum optimization, thermodynamic validation of protonation states, and solution-phase conformational analysis. This is significant because prior experimental work (UV-Vis titrations combined with RI-CC2/TZVP calculations) established that the species absorbing at physiological pH is the protonated, zwitterion-stabilized form of the chromophore, rather than the neutral core (Matsuyama et al., 2015). This project addresses this methodological gap by applying a validated quantum chemistry protocol to M-Gly:Val (mycosporine-glycine:valine), with an additional focus on the Antarctic context (274 K, high UV-B exposure) and to other relevant MAAs such as shinorine, palythine, mycosporine-glycine and prophyra-334.
  
-## Protocolo
+## Protocol
  
-Pipeline de cinco etapas, orquestado en Python:
+Five-stage pipeline, orchestrated in Python:
  
-1. **CREST** (iMTD-GC / GFN2-xTB / ALPB-agua) — muestreo conformacional
-2. **OPT** — optimización de geometría DFT (ωB97X-D3/def2-SVP, CPCM agua)
-3. **NumFreq** — verificación por frecuencias vibracionales numéricas
-4. **SP** — energía de punto simple (ωB97X-D3/def2-TZVPD, CPCM agua)
-5. **TDDFT** — propiedades electrónicas en estado excitado (transiciones, NTO, ESP, HOMO-LUMO)
-Adicionalmente: ciclos termodinámicos de pKa para asignación de estado de protonación a pH fisiológico, y análisis de población de Boltzmann a 298.15 K y 274 K (este último relevante para el contexto antártico).
+1. **CREST** (iMTD-GC / GFN2-xTB / ALPB-water) — conformational sampling
+2. **CENSO** (pre-screening, screening and optimization) — conformational energetic sorting
+3. **OPT** — DFT geometry optimization (ωB97X-D3/def2-SVP, CPCM water)
+4. **NumFreq** — verification via numerical vibrational frequencies
+5. **SP** — single-point energy (ωB97X-D3/def2-TZVPD, CPCM water)
+6. **TDDFT** — excited-state electronic properties (transitions, NTO, ESP, HOMO-LUMO)
+7. **ADC2** (def2-SVP, gas-phase) — calibration of the TD-DFT results (systematic overstimations and blue-shift)
+Additionally: pKa thermodynamic cycles for protonation state assignment at physiological pH, and Boltzmann population analysis at 298.15 K and 274 K (the latter relevant to the Antarctic context).
  
-### Stack de software
+**Nivel de teoría:** ωB97X-D3 · ACD2 · def2-SVP (optimización/frecuencias) · def2-TZVPD (SP/TD-DFT/ACD2) · CPCM(agua) implícito · Gas-Phase (ACD2) · RIJCOSX · TightSCF
  
-| Componente | Versión |
-|---|---|
-| ORCA | 6.1.1 |
-| CREST | 3.0.2 |
-| xTB | 6.7.1 |
-| Multiwfn | 2026.6.2 |
- 
-**Nivel de teoría:** ωB97X-D3 · def2-SVP (optimización/frecuencias) · def2-TZVPD (SP/TD-DFT) · CPCM(agua) implícito · RIJCOSX · TightSCF
- 
-## Resultados destacados (M-Gly:Val)
- 
-## Estructura del repositorio
+## Repo structure
  
 ```
 .
-├── pipeline.py              # Orquestador principal (CREST → OPT → NumFreq → SP → TDDFT)
-├── results_collector.py     # Recolección y consolidación de resultados
-├── MGLYVAL/                 # Directorio de trabajo del compuesto de referencia
-└── runs/                    # Archivos CREST y ORCA (.inp, .out, .xyz)
+├── pipeline.py              # Orchestrator script (CREST → CENSO → OPT → NumFreq → SP → TDDFT → ACD2)
+├── protonation_cycle.py     # Theoretical pKa calculations and determination of the relevant protonation state
+├── results_collector.py     # Collection and consolidation of results across all explored states
+├── MGLYVAL/                 # Work directory for the subject of study (M-Gly:Val)
+└── runs/                    # Relevant Files (.inp, .out, .xyz)
 ```
 
-## Estado del proyecto
+## Project state
  
-En desarrollo activo. El manuscrito asociado se encuentra en revisión interna (estructura IMRAD, validación de hipótesis y nomenclatura en curso).
+In active development.
  
-## Autoría
+## Authorship
  
-Camilo Zúñiga Jara, en colaboración con Dr. Ricardo Veloso (UFRO) y Dr. Desmond Macleod (UAutónoma).
+Camilo Zúñiga Jara, in collaboration with Dr. Ricardo Veloso (UFRO) and Dr. Desmond Macleod (UAutónoma).
