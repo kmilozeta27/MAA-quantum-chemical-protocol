@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 pipeline.py — Pipeline ORCA automatizado para cálculos conformacionales
-Flujo: CREST → Opt → NumFreq → SP → TDDFT
+Flujo: CREST → Opt → NumFreq → SP → TDDFT → ADC2 (validación, confórmero dominante)
 
 Uso (modo normal):
     python pipeline.py --mol molecules/mol_A.xyz --charge -1
@@ -58,6 +58,8 @@ NPROCS_NUMFREQ  = 6      # NumFreq usa más cores: cada desplazamiento es un SCF
                           # independiente → escala bien. Ajustable con --nprocs-numfreq.
 MAXCORE         = 3500
 MAXCORE_NUMFREQ = 2300   # memoria por core para NumFreq (6 cores × 2300 MB ≈ 13.8 GB)
+NPROCS_ADC2     = 4      # ADC2 (RI-CC2-like, vía MDCI) — costoso en memoria, pocos cores
+MAXCORE_ADC2    = 5500   # MB/core para ADC2 (4 cores × 5500 MB ≈ 21.5 GB)
 CREST_TIMEOUT_HOURS = 16.0          # timeout CREST (horas)
 CENSO_TIMEOUT_HOURS = 4.0           # timeout CENSO pre-screening (horas) — barato, no debería tardar
 
@@ -91,7 +93,7 @@ def build_omp_env(nprocs: int) -> dict:
 # Alias global mantenido para compatibilidad con run_orca(env=None)
 OMP_ENV: dict = build_omp_env(NPROCS)
 
-STEPS = ["crest", "opt", "numfreq", "sp", "tddft"]
+STEPS = ["crest", "opt", "numfreq", "sp", "tddft", "adc2"]
 
 # ─────────────────────────────────────────────
 #  GESTIÓN DE SEÑALES / CTRL-C
@@ -325,6 +327,25 @@ end
 * xyzfile {CHARGE} {MULT} sp_opt.xyz
 """
 
+TEMPLATE_ADC2 = """\
+! ADC2 def2-SVP def2-SVP/C RIJCOSX TightSCF
+%scf
+  MaxIter 500
+end
+%maxcore {MAXCORE_ADC2}
+%pal
+  nprocs {NPROCS_ADC2}
+end
+%mdci
+  nroots 1
+  trafotype trafo_ri
+  maxiter 50
+  MaxCore {MAXCORE_ADC2}
+end
+
+* xyzfile {CHARGE} {MULT} adc2_geom.xyz
+"""
+
 
 def get_template(step: str) -> str:
     """Devuelve el template inline. Si existe un .tmpl en templates/, lo prioriza."""
@@ -338,6 +359,7 @@ def get_template(step: str) -> str:
         "sp":              TEMPLATE_SP,
         "sp_nroot":        TEMPLATE_SP_NROOT,
         "tddft":           TEMPLATE_TDDFT,
+        "adc2":            TEMPLATE_ADC2,
     }
     return mapping[step]
 
@@ -1092,6 +1114,101 @@ def stage_sp_nroot(mol_dir: Path, charge: int, log: logging.Logger,
 
 
 # ─────────────────────────────────────────────
+#  ETAPA ADC2  (séptima etapa, obligatoria)
+# ─────────────────────────────────────────────
+
+def stage_adc2(mol_dir: Path, charge: int, log: logging.Logger) -> Optional[Path]:
+    """
+    Etapa 07_adc2: validación ADC2 (NRoots 1) sobre un único confórmero —
+    el dominante, definido como el de menor energía SP (FINAL SINGLE POINT
+    ENERGY en 04_sp/conf_*/sp.out).
+
+    La geometría usada es la misma que TDDFT: sp_opt.xyz copiada en
+    05_tddft/<conf_id>/ (idéntica a opt_opt.xyz de 02_opt/numfreq, pero se
+    reutiliza la copia ya validada en esa etapa para evitar resolver de nuevo
+    el archivo de origen).
+
+    Requiere que 04_sp/ y 05_tddft/<conf_id>/ ya existan para el confórmero
+    elegido. Si 05_tddft no tiene la copia (p.ej. corrida con --start previo
+    a tddft incompleta), aborta esa etapa con error explicado.
+
+    Devuelve el directorio 07_adc2/<conf_id>/ si el cálculo terminó bien,
+    o None si falló o no se pudo seleccionar confórmero.
+    """
+    sp_root = mol_dir / "04_sp"
+    if not sp_root.exists():
+        log.error("[ADC2] No existe 04_sp/ — corre primero la etapa SP.")
+        return None
+
+    # ── Seleccionar confórmero dominante: menor energía SP ───────
+    energies: list[tuple[float, Path]] = []
+    for conf_dir in sorted(sp_root.glob("conf_*")):
+        out_file = conf_dir / "sp.out"
+        if not check_success(out_file):
+            continue
+        e = extract_sp_energy(out_file)
+        if e is not None:
+            energies.append((e, conf_dir))
+        else:
+            log.warning(f"[ADC2] {conf_dir.name}: SP completado pero sin energía "
+                        f"parseable — excluido")
+
+    if not energies:
+        log.error("[ADC2] Ningún confórmero SP exitoso con energía válida. Abortando etapa.")
+        return None
+
+    energies.sort(key=lambda x: x[0])
+    e_min, sp_dir = energies[0]
+    conf_id = sp_dir.name
+
+    log.info(f"[ADC2] {len(energies)} conf(s) SP disponibles — "
+             f"confórmero dominante: {conf_id} (E_SP = {e_min:.10f} Ha)")
+    if len(energies) > 1:
+        runner_up = energies[1]
+        dE = (runner_up[0] - e_min) * HARTREE_TO_KCAL
+        log.info(f"[ADC2] siguiente más estable: {runner_up[1].name} "
+                 f"(ΔE = +{dE:.4f} kcal/mol respecto al dominante)")
+
+    # ── Localizar geometría: misma que usó TDDFT (sp_opt.xyz) ────
+    tddft_dir = mol_dir / "05_tddft" / conf_id
+    geom_src  = tddft_dir / "sp_opt.xyz"
+    if not geom_src.exists():
+        log.error(
+            f"[ADC2] No se encontró {geom_src} — el confórmero dominante "
+            f"({conf_id}) necesita haber pasado por TDDFT primero (la geometría "
+            f"de ADC2 se toma de ahí). Corre la etapa TDDFT para este confórmero."
+        )
+        return None
+
+    # ── Preparar y correr ADC2 ────────────────────────────────────
+    adc2_root = mol_dir / "07_adc2"
+    adc2_dir  = adc2_root / conf_id
+    adc2_dir.mkdir(parents=True, exist_ok=True)
+
+    out_file = adc2_dir / "adc2.out"
+    inp_file = adc2_dir / "adc2.inp"
+
+    if not check_success(out_file):
+        if not safe_copy(geom_src, adc2_dir / "adc2_geom.xyz"):
+            log.error(f"[ADC2] {conf_id}: error copiando geometría — abortando etapa.")
+            return None
+        template = get_template("adc2")
+        inp_text = template.format(
+            CHARGE=charge, MULT=MULT,
+            NPROCS_ADC2=NPROCS_ADC2, MAXCORE_ADC2=MAXCORE_ADC2,
+        )
+        inp_file.write_text(inp_text)
+
+    ok = run_orca(inp_file, out_file, log)
+    if ok:
+        log.info(f"[ADC2] {conf_id} completado ✓ → {adc2_dir}")
+        return adc2_dir
+
+    log.error(f"[ADC2] {conf_id} falló.")
+    return None
+
+
+# ─────────────────────────────────────────────
 #  EXPANSIÓN CONFORMACIONAL (--expand-crest)
 # ─────────────────────────────────────────────
 
@@ -1590,7 +1707,7 @@ def print_status():
         if not mol_dir.is_dir():
             continue
         print(f"\n  📁 {mol_dir.name}")
-        for step_num in ["01_crest", "02_opt", "03_numfreq", "04_sp", "05_tddft", "06_sp_nroot"]:
+        for step_num in ["01_crest", "02_opt", "03_numfreq", "04_sp", "05_tddft", "06_sp_nroot", "07_adc2"]:
             step_dir = mol_dir / step_num
             if not step_dir.exists():
                 print(f"     {step_num:12s}  —  no iniciado")
@@ -1625,7 +1742,7 @@ def print_status():
 def main():
     global NPROCS, MAXCORE, NPROCS_NUMFREQ, MAXCORE_NUMFREQ, OMP_ENV
     parser = argparse.ArgumentParser(
-        description="Pipeline ORCA: CREST → Opt → NumFreq → SP → TDDFT",
+        description="Pipeline ORCA: CREST → Opt → NumFreq → SP → TDDFT → ADC2",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Ejemplos (modo normal):
@@ -2133,6 +2250,16 @@ Ejemplos (modo expansión conformacional):
         else:
             log.info("[EXPAND] TDDFT no incluido en esta ejecución")
 
+        # ── ADC2 (obligatoria, confórmero dominante por E_SP) ────
+        if start_idx <= STEPS.index("adc2"):
+            adc2_dir = stage_adc2(mol_dir, args.charge, log)
+            if adc2_dir is None:
+                log.warning("[EXPAND] No se pudo completar la validación ADC2.")
+            else:
+                log.info(f"[EXPAND] ADC2 completado ✓ → {adc2_dir}")
+        else:
+            log.info("[EXPAND] ADC2 no incluido en esta ejecución")
+
         log.info("=" * 60)
         log.info("PIPELINE (EXPAND) FINALIZADO")
         log.info(f"Resultados en: {mol_dir.resolve()}")
@@ -2210,6 +2337,16 @@ Ejemplos (modo expansión conformacional):
             log.info(f"[TDDFT] {len(tddft_dirs)} espectros calculados ✓")
     else:
         log.info("[TDDFT] no incluido en esta ejecución")
+
+    # ── Etapa 6: ADC2 (obligatoria, confórmero dominante por E_SP) ──
+    if start_idx <= STEPS.index("adc2"):
+        adc2_dir = stage_adc2(mol_dir, args.charge, log)
+        if adc2_dir is None:
+            log.warning("[ADC2] No se pudo completar la validación ADC2.")
+        else:
+            log.info(f"[ADC2] validación completada ✓ → {adc2_dir}")
+    else:
+        log.info("[ADC2] no incluido en esta ejecución")
 
     log.info("=" * 60)
     log.info("PIPELINE FINALIZADO")
