@@ -974,28 +974,71 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
 
     elapsed = (time.time() - t0) / 60
 
-    # Nombre exacto del output puede variar entre instalaciones/versiones;
-    # se revisan los candidatos más probables antes de rendirse.
-    for candidate in ["censo_ensemble_sorted.xyz", "censo_ensemble.xyz",
-                      "crest_conformers.xyz.sorted"]:
-        p = censo_dir / candidate
-        if p.exists() and p.stat().st_size > 0:
-            if not safe_copy(p, output_xyz):
-                log.warning(f"[CENSO] no se pudo normalizar {p.name} → {output_xyz.name} "
-                            f"— usando ensemble CREST sin filtrar")
-                return conformers_xyz
-            try:
-                n = len(read(str(output_xyz), index=":"))
-            except Exception:
-                n = "?"
-            log.info(f"[CENSO]  ✓  pre-screening terminó en {elapsed:.1f} min — "
-                     f"{n} confórmero(s) sobreviven ({p.name})")
-            return output_xyz
+    # ── Diagnóstico temprano: parsear censo.log para errores de config ──────
+    censo_log_path = censo_dir / "censo.log"
+    _censo_log_snippet = ""
+    if censo_log_path.exists():
+        try:
+            _tail = censo_log_path.read_text(errors="replace").splitlines()
+            # Buscar indicadores de error de configuración de CENSO 3.x
+            _error_lines = [l for l in _tail if any(kw in l for kw in (
+                "validation error", "Path for", "is required", "is not set",
+                "UserWarning", "No context found",
+            ))]
+            if _error_lines:
+                _censo_log_snippet = " | ".join(_error_lines[-4:])
+                log.warning(
+                    f"[CENSO]  ✗  CENSO terminó con errores de configuración "
+                    f"(returncode={returncode}) — posible causa: ~/.censo2rc incompleto "
+                    f"o falta 'tm'/'orca' en [paths]. Detalle: {_censo_log_snippet}"
+                )
+        except Exception:
+            pass
 
-    log.warning(f"[CENSO]  ✗  no se encontró un ensemble filtrado reconocible "
-                f"(returncode={returncode}) en {censo_dir} — revisa {censo_dir / 'censo.log'} "
-                f"a mano (el nombre del archivo puede no coincidir con los candidatos "
-                f"esperados). Usando ensemble CREST sin filtrar.")
+    # ── Búsqueda robusta de output: nombres fijos + glob de respaldo ─────────
+    # CENSO 2/3 puede escribir en censo_dir directamente o en subdirectorios
+    # (CENSO/, prescreening/, etc.) con nombres que varían entre versiones.
+    _fixed_candidates = [
+        "censo_ensemble_sorted.xyz",
+        "censo_ensemble.xyz",
+        "crest_conformers_sorted.xyz",
+        "crest_conformers.xyz.sorted",
+    ]
+    # Candidatos fijos primero (orden de prioridad)
+    _candidate_paths = [censo_dir / c for c in _fixed_candidates]
+    # Luego cualquier .xyz en subdirectorios que no sea el input copiado
+    _candidate_paths += sorted(
+        (p for p in censo_dir.rglob("*.xyz")
+         if p != local_input and p.name != output_xyz.name),
+        key=lambda p: p.stat().st_mtime if p.exists() else 0,
+        reverse=True,  # el más reciente primero
+    )
+
+    for p in _candidate_paths:
+        if not p.exists() or p.stat().st_size == 0:
+            continue
+        if p == local_input:
+            continue  # ignorar el input que copiamos nosotros
+        if not safe_copy(p, output_xyz):
+            log.warning(f"[CENSO] no se pudo normalizar {p.name} → {output_xyz.name} "
+                        f"— usando ensemble CREST sin filtrar")
+            return conformers_xyz
+        try:
+            n = len(read(str(output_xyz), index=":"))
+        except Exception:
+            n = "?"
+        log.info(f"[CENSO]  ✓  pre-screening terminó en {elapsed:.1f} min — "
+                 f"{n} confórmero(s) sobreviven ({p.relative_to(censo_dir)})")
+        return output_xyz
+
+    # Si llegamos aquí, CENSO no produjo ningún ensemble utilizable
+    if not _censo_log_snippet:
+        # No hubo error de config detectado → informar genéricamente
+        log.warning(
+            f"[CENSO]  ✗  no se encontró un ensemble filtrado reconocible "
+            f"(returncode={returncode}) en {censo_dir} — revisa {censo_log_path} "
+            f"a mano. Usando ensemble CREST sin filtrar."
+        )
     return conformers_xyz
 
 
