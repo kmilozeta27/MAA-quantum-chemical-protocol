@@ -29,7 +29,8 @@ Uso (modo multi-temperatura, --multitemp):
     #
     # Equivale al comando que usaría CENSO directamente:
     #   censo -i A.xyz --charge -1 --multitemp --trange 274 298 24
-    #         --temperature 298.15 --solvent h2o --prog xtb --gfnv gfn2
+    #         --temperature 298.15 --solvent h2o
+    #         (prog/func se leen de ~/.censo2rc; --prog eliminado en CENSO 2.x)
     #
     # Con todos los defaults (equivalente al comando de arriba):
     python pipeline.py --mol molecules/mol_A.xyz --charge -1 --multitemp
@@ -83,8 +84,8 @@ CENSO_BIN  = Path("censo")          # asumido en PATH (env sciencebitch); ajusta
 WORK_ROOT  = Path("runs")           # directorio de salida
 TMPL_DIR   = Path("templates")
 MULT       = 1                      # multiplicidad siempre 1
-CREST_TIMEOUT_HOURS = 16.0          # timeout CREST (horas)
-CENSO_TIMEOUT_HOURS = 0.5           # timeout CENSO pre-screening (horas) — xTB es rápido (~2-5 min para 579 confs)
+CREST_TIMEOUT_HOURS = 24.0          # timeout CREST (horas)
+CENSO_TIMEOUT_HOURS = 24.0          # timeout CENSO pre-screening (horas)
 
 # Los defaults de recursos (NPROCS, MAXCORE, etc.) se inicializan más abajo
 # por ResourceProfile.detect() tras leer la topología real del sistema.
@@ -748,7 +749,7 @@ def resolve_opt_xyz(opt_dir: Path) -> Optional[Path]:
 # ─────────────────────────────────────────────
 
 def run_orca(inp_file: Path, out_file: Path, log: logging.Logger,
-             timeout_hours: float = 16.0,
+             timeout_hours: float = 24.0,
              env: Optional[dict] = None,
              cpu_list: Optional[list[int]] = None) -> bool:
     """
@@ -981,8 +982,8 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
         "-c", str(charge),
         "-u", "0",                  # MULT global siempre 1 → singlete, capa cerrada
         "--solvent", "water",
-        "--prog", "xtb",            # forzar GFN2-xTB para pre-screening (rápido, ~2-5 min)
-                                    # sin esto CENSO lee ~/.censo2rc y puede usar orca → 4+ h
+        # prog/func/basis se leen de ~/.censo2rc ([prescreening] prog=xtb, func=gfn2, smgsolv=alpb)
+        # --prog fue eliminado en CENSO 2.x; ya no se pasa por CLI
         "--maxcores", str(NPROCS_CREST),
         "-T", f"{temperature:.2f}",             # temperatura configurable (default 274.15 K = 1°C Antártico)
     ]
