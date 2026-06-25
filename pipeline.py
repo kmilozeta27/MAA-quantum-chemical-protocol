@@ -16,6 +16,28 @@ Uso (modo normal):
     python pipeline.py --mol molecules/mol_A.xyz --charge -1 --nroot --nroot-top 3  # top-3
     python pipeline.py --status                  # ver estado de todos los runs
 
+Uso (temperatura personalizada):
+    python pipeline.py --mol molecules/mol_A.xyz --charge -1 --temperature 298.15
+    # → CENSO corre a 298.15 K (default cuando no se usa --multitemp)
+
+Uso (modo multi-temperatura, --multitemp):
+    # Análisis Boltzmann a múltiples temperaturas. CENSO corre N veces —
+    # una por temperatura — guardando cada ensemble en un subdirectorio
+    # separado (01b_censo_prescreen/T<temp>K/). El pipeline selecciona los
+    # confórmeros para OPT usando el ensemble de --temperature (default 298.15 K).
+    # --trange es OPCIONAL: default = 274 298 24 (24 puntos, 274 K … 298 K).
+    #
+    # Equivale al comando que usaría CENSO directamente:
+    #   censo -i A.xyz --charge -1 --multitemp --trange 274 298 24
+    #         --temperature 298.15 --solvent h2o --prog xtb --gfnv gfn2
+    #
+    # Con todos los defaults (equivalente al comando de arriba):
+    python pipeline.py --mol molecules/mol_A.xyz --charge -1 --multitemp
+    #
+    # Con trange explícito:
+    python pipeline.py --mol molecules/mol_A.xyz --charge -1 \\
+        --multitemp --trange 274 298 24 --temperature 298.15
+
 Nota: --start crest y --start opt son equivalentes al inicio (ambos requieren
       que CREST+CENSO corran). Solo usar --start opt/numfreq/sp/tddft/adc2
       para retomar un pipeline con CREST+CENSO ya completados.
@@ -62,7 +84,7 @@ WORK_ROOT  = Path("runs")           # directorio de salida
 TMPL_DIR   = Path("templates")
 MULT       = 1                      # multiplicidad siempre 1
 CREST_TIMEOUT_HOURS = 16.0          # timeout CREST (horas)
-CENSO_TIMEOUT_HOURS = 4.0           # timeout CENSO pre-screening (horas) — barato, no debería tardar
+CENSO_TIMEOUT_HOURS = 0.5           # timeout CENSO pre-screening (horas) — xTB es rápido (~2-5 min para 579 confs)
 
 # Los defaults de recursos (NPROCS, MAXCORE, etc.) se inicializan más abajo
 # por ResourceProfile.detect() tras leer la topología real del sistema.
@@ -907,7 +929,9 @@ def stage_crest(mol_xyz: Path, mol_dir: Path, charge: int,
 
 
 def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
-                           charge: int, log: logging.Logger) -> Path:
+                           charge: int, log: logging.Logger,
+                           temperature: float = 274.15,
+                           subdir: Optional[str] = None) -> Path:
     """
     Etapa 01b_censo: pre-screening DFT liviano con CENSO antes del OPT
     costoso (ωB97X-D3/def2-SVP). Descarta confórmeros de alta energía con
@@ -918,10 +942,21 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
     reconocible, se devuelve conformers_xyz sin tocar y el pipeline
     sigue exactamente como antes (no bloquea nada).
 
+    Args:
+        conformers_xyz : ruta al ensemble CREST (multi-XYZ).
+        mol_dir        : directorio raíz del run (runs/<mol_name>/).
+        charge         : carga formal de la molécula.
+        log            : logger del pipeline.
+        temperature    : temperatura para CENSO en K (default 274.15 = 1 °C Antártico).
+        subdir         : si se especifica, CENSO corre en 01b_censo_prescreen/<subdir>/
+                         (usado en modo --multitemp para aislar cada temperatura).
+                         Si es None, usa 01b_censo_prescreen/ directamente.
+
     Devuelve la ruta al ensemble filtrado (multi-XYZ), o conformers_xyz
     original si el pre-screening no se pudo aplicar.
     """
-    censo_dir = mol_dir / "01b_censo_prescreen"
+    base_censo_dir = mol_dir / "01b_censo_prescreen"
+    censo_dir = (base_censo_dir / subdir) if subdir else base_censo_dir
     censo_dir.mkdir(parents=True, exist_ok=True)
 
     output_xyz = censo_dir / "censo_ensemble_sorted.xyz"
@@ -946,11 +981,14 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
         "-c", str(charge),
         "-u", "0",                  # MULT global siempre 1 → singlete, capa cerrada
         "--solvent", "water",
+        "--prog", "xtb",            # forzar GFN2-xTB para pre-screening (rápido, ~2-5 min)
+                                    # sin esto CENSO lee ~/.censo2rc y puede usar orca → 4+ h
         "--maxcores", str(NPROCS_CREST),
-        "-T", "274.15",             # temperatura Antártica (1°C)
+        "-T", f"{temperature:.2f}",             # temperatura configurable (default 274.15 K = 1°C Antártico)
     ]
 
-    log.info(f"[CENSO]  ▶  lanzando pre-screening sobre {conformers_xyz.name} (carga={charge})")
+    log.info(f"[CENSO]  ▶  lanzando pre-screening sobre {conformers_xyz.name} "
+             f"(carga={charge}, T={temperature:.2f} K)")
     t0 = time.time()
     try:
         with open(censo_dir / "censo.log", "w") as flog:
@@ -1040,6 +1078,95 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
             f"a mano. Usando ensemble CREST sin filtrar."
         )
     return conformers_xyz
+
+
+# ─────────────────────────────────────────────
+#  CENSO MULTI-TEMPERATURA
+# ─────────────────────────────────────────────
+
+def stage_censo_multitemp(
+    conformers_xyz: Path,
+    mol_dir: Path,
+    charge: int,
+    log: logging.Logger,
+    temperatures: list[float],
+) -> dict[float, Path]:
+    """
+    Corre stage_censo_prescreen() para cada temperatura en `temperatures`.
+
+    Cada temperatura produce su propio subdirectorio dentro de
+    01b_censo_prescreen/:
+
+        01b_censo_prescreen/
+        └── T274.15K/
+        │   ├── censo.log
+        │   └── censo_ensemble_sorted.xyz
+        └── T283.00K/
+            ├── censo.log
+            └── censo_ensemble_sorted.xyz
+        ...
+
+    El nombre del subdirectorio tiene formato "T{temp:.2f}K" redondeado
+    a 2 decimales (ej. "T274.15K", "T298.00K").
+
+    Devuelve un dict {temperatura_K → ruta_ensemble}. Si CENSO falla para
+    una temperatura se registra la ruta del ensemble CREST sin filtrar
+    (fail-open, consistente con stage_censo_prescreen()).
+
+    Los resultados se guardan además en:
+        01b_censo_prescreen/multitemp_summary.json
+    para facilitar análisis posterior con results_collector.py.
+    """
+    base_censo_dir = mol_dir / "01b_censo_prescreen"
+    base_censo_dir.mkdir(parents=True, exist_ok=True)
+
+    results: dict[float, Path] = {}
+
+    log.info(
+        f"[CENSO-MULTITEMP]  ▶  {len(temperatures)} temperaturas: "
+        f"{temperatures[0]:.2f} K … {temperatures[-1]:.2f} K"
+    )
+
+    for temp in temperatures:
+        subdir_name = f"T{temp:.2f}K"
+        log.info(f"[CENSO-MULTITEMP]  ── T = {temp:.2f} K ({subdir_name})")
+
+        result_xyz = stage_censo_prescreen(
+            conformers_xyz=conformers_xyz,
+            mol_dir=mol_dir,
+            charge=charge,
+            log=log,
+            temperature=temp,
+            subdir=subdir_name,
+        )
+        results[temp] = result_xyz
+
+    # ── Resumen JSON ─────────────────────────────────────────────────────────
+    summary_path = base_censo_dir / "multitemp_summary.json"
+    summary_data = {
+        "temperatures_K": temperatures,
+        "results": {
+            f"{temp:.2f}": str(path)
+            for temp, path in results.items()
+        },
+        "n_temperatures": len(temperatures),
+        "ensemble_input": str(conformers_xyz),
+    }
+    try:
+        with open(summary_path, "w") as f:
+            json.dump(summary_data, f, indent=2)
+        log.info(f"[CENSO-MULTITEMP]  ✓  resumen guardado en {summary_path.name}")
+    except OSError as e:
+        log.warning(f"[CENSO-MULTITEMP]  ⚠  no se pudo guardar resumen JSON: {e}")
+
+    n_ok = sum(1 for p in results.values() if p != conformers_xyz)
+    log.info(
+        f"[CENSO-MULTITEMP]  ✓  completado — {n_ok}/{len(temperatures)} "
+        f"temperaturas con ensemble filtrado, "
+        f"{len(temperatures) - n_ok} usando CREST sin filtrar (fail-open)"
+    )
+
+    return results
 
 
 # ─────────────────────────────────────────────
@@ -2398,7 +2525,85 @@ Ejemplos (modo expansión conformacional):
         ),
     )
 
+    # ── Modo multi-temperatura (CENSO) ─────────────────────────────────────
+    parser.add_argument(
+        "--multitemp", action="store_true",
+        help=(
+            "Modo multi-temperatura: corre CENSO pre-screening a múltiples "
+            "temperaturas definidas por --trange T_ini T_fin N_puntos. "
+            "Cada temperatura produce su propio ensemble en "
+            "01b_censo_prescreen/T<temp>K/. "
+            "--trange es opcional (default: 274 298 24). "
+            "Compatible con modo normal y --expand-crest."
+        ),
+    )
+    parser.add_argument(
+        "--trange", type=float, nargs=3, metavar=("T_INI", "T_FIN", "N"),
+        default=None,
+        help=(
+            "Rango de temperaturas para --multitemp. "
+            "Formato: T_INI T_FIN N  (en K, N = número de puntos, incluye extremos). "
+            "Default cuando --multitemp está activo: 274 298 24 "
+            "(24 puntos equiespaciados de 274 K a 298 K). "
+            "Si N=1, se usa solo T_INI."
+        ),
+    )
+    parser.add_argument(
+        "--temperature", type=float, default=298.15, metavar="T",
+        help=(
+            "Temperatura de referencia para CENSO: "
+            "en modo normal (sin --multitemp) es la única temperatura usada; "
+            "en modo --multitemp es la temperatura cuyo ensemble CENSO se usa "
+            "para seleccionar los confórmeros que pasan a OPT. "
+            "En K. Default: 298.15 (25 °C)."
+        ),
+    )
+
     args = parser.parse_args()
+
+    # ── Validar --multitemp / --trange ───────────────────────────────────────
+    if args.trange is not None and not args.multitemp:
+        sys.exit(
+            "ERROR: --trange solo tiene efecto junto con --multitemp."
+        )
+    if args.multitemp and args.nroot:
+        sys.exit(
+            "ERROR: --multitemp es incompatible con --nroot. "
+            "Corre --nroot como paso independiente sobre un run ya completado."
+        )
+
+    # Construir lista de temperaturas
+    # En modo --multitemp: --trange es opcional; default = 274 298 24
+    # En modo normal: temperatura única = --temperature (default 298.15)
+    if args.multitemp:
+        t_ini, t_fin, n_pts = args.trange if args.trange is not None else (274.0, 298.0, 24)
+        n_pts = int(round(n_pts))
+        if n_pts < 1:
+            sys.exit("ERROR: --trange N debe ser ≥ 1.")
+        if n_pts == 1:
+            censo_temperatures = [t_ini]
+        else:
+            import numpy as _np
+            censo_temperatures = list(_np.linspace(t_ini, t_fin, n_pts))
+        # Validar que --temperature cae dentro del rango generado
+        ref_temp = args.temperature
+        temp_set = {round(t, 8) for t in censo_temperatures}
+        # Buscar la temperatura más cercana en el rango generado
+        closest = min(censo_temperatures, key=lambda t: abs(t - ref_temp))
+        if abs(closest - ref_temp) > 1e-4:
+            # La temperatura de referencia no está exactamente en el linspace;
+            # añadirla al rango para que CENSO la calcule igualmente.
+            censo_temperatures = sorted(set(censo_temperatures + [ref_temp]))
+            import warnings as _w
+            _w.warn(
+                f"--temperature {ref_temp} K no coincide exactamente con ningún "
+                f"punto de --trange; se añade al rango. "
+                f"Punto más cercano era {closest:.4f} K (Δ={abs(closest - ref_temp):.4f} K).",
+                stacklevel=1,
+            )
+    else:
+        # Modo normal: temperatura única
+        censo_temperatures = [args.temperature]
 
     if args.skipnumfreq and args.expand_crest:
         sys.exit(
@@ -2514,6 +2719,17 @@ Ejemplos (modo expansión conformacional):
     log.info(f"Flujo: CREST → CENSO (prescreen) → OPT (nconf auto) → NumFreq → SP → TDDFT → ADC2")
     log.info(f"Inicio desde etapa: {args.start.upper()}")
     log.info(f"ORCA: {ORCA_BIN}")
+    # ── Temperatura / Multitemp ──────────────────────────────────────────────
+    if args.multitemp:
+        t_ini_str = f"{censo_temperatures[0]:.2f} K"
+        t_fin_str = f"{censo_temperatures[-1]:.2f} K"
+        log.info(
+            f"Temperatura CENSO      : MULTITEMP — {len(censo_temperatures)} puntos "
+            f"[{t_ini_str} … {t_fin_str}]  "
+            f"(OPT usa T={args.temperature:.2f} K como referencia)"
+        )
+    else:
+        log.info(f"Temperatura CENSO      : {censo_temperatures[0]:.2f} K")
     log.info(f"Recursos CREST/CENSO   : {nprocs_crest} cores  (xTB --T, escala lineal)")
     log.info(f"Recursos OPT           : {opt_batch_size}×{nprocs} cores / {maxcore} MB  "
              f"→ {nprocs * maxcore / 1024:.1f} GB/job")
@@ -2782,8 +2998,38 @@ Ejemplos (modo expansión conformacional):
     # Corre entre CREST y OPT. Fail-open: si CENSO no está disponible
     # o falla, el pipeline continúa con el ensemble CREST sin filtrar.
     # En retoma (start > opt) se omite si ya existe el ensemble filtrado.
+    #
+    # Modo --multitemp: corre CENSO para cada temperatura en censo_temperatures
+    # y guarda los ensembles en subdirectorios separados (T<temp>K/).
+    # El pipeline continúa con el ensemble de --temperature (default 298.15 K)
+    # para seleccionar los confórmeros que pasan a OPT; los demás ensembles
+    # quedan disponibles para análisis Boltzmann multi-temperatura con
+    # results_collector.py.
     if start_idx <= STEPS.index("opt"):
-        conformers_xyz = stage_censo_prescreen(conformers_xyz, mol_dir, args.charge, log)
+        if args.multitemp:
+            multitemp_results = stage_censo_multitemp(
+                conformers_xyz=conformers_xyz,
+                mol_dir=mol_dir,
+                charge=args.charge,
+                log=log,
+                temperatures=censo_temperatures,
+            )
+            # Seleccionar el ensemble cuya temperatura coincide con --temperature.
+            # Como censo_temperatures puede contener floats de linspace con
+            # imprecisión numérica, buscamos el punto más cercano.
+            ref_temp = args.temperature
+            opt_temp = min(multitemp_results.keys(), key=lambda t: abs(t - ref_temp))
+            conformers_xyz = multitemp_results[opt_temp]
+            log.info(
+                f"[MULTITEMP] ensemble de referencia para OPT: "
+                f"T={opt_temp:.2f} K (--temperature={ref_temp:.2f} K) "
+                f"→ {conformers_xyz}"
+            )
+        else:
+            conformers_xyz = stage_censo_prescreen(
+                conformers_xyz, mol_dir, args.charge, log,
+                temperature=censo_temperatures[0],
+            )
 
     # ── Etapa 2: OPT ────────────────────────────────────────────
     # El número de confórmeros se determina automáticamente en función
