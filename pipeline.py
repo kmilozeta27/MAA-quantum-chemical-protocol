@@ -967,6 +967,37 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
         log.info(f"[CENSO]  ↩  pre-screening ya completado — saltando ({output_xyz.name})")
         return output_xyz
 
+    # ── Intento de recuperación desde 1_SCREENING.out existente ─────────────
+    # Si CENSO ya corrió manualmente (o en un run previo) y dejó el archivo
+    # de resultados del pre-screening, parsear directamente en vez de
+    # relanzar CENSO (que puede no estar en PATH o estar en otro entorno).
+    # Busca en las ubicaciones más habituales que CENSO 2.x / 3.x produce.
+    _screening_candidates = [
+        censo_dir / "1_SCREENING.out",
+        censo_dir / "CENSO" / "1_SCREENING.out",
+        censo_dir / "prescreening" / "1_SCREENING.out",
+    ]
+    for _sc in _screening_candidates:
+        _conf_ids = parse_censo_screening_out(_sc)
+        if _conf_ids:
+            log.info(
+                f"[CENSO]  📄  encontrado {_sc.relative_to(censo_dir)} "
+                f"con {len(_conf_ids)} conf(s) — reconstruyendo ensemble "
+                f"filtrado sin relanzar CENSO"
+            )
+            if extract_conformers_by_id(conformers_xyz, _conf_ids, output_xyz, log):
+                log.info(
+                    f"[CENSO]  ✓  ensemble reconstruido desde {_sc.name} "
+                    f"→ {output_xyz.name} ({len(_conf_ids)} conf(s))"
+                )
+                return output_xyz
+            log.warning(
+                f"[CENSO]  ⚠  no se pudo reconstruir desde {_sc.name} "
+                f"— continuando con intento de relanzar CENSO"
+            )
+            break
+    # ─────────────────────────────────────────────────────────────────────────
+
     # CENSO escribe en cwd; copiar el ensemble de entrada ahí y referenciarlo
     # por nombre relativo evita ambigüedad sobre rutas absolutas en -i.
     local_input = censo_dir / conformers_xyz.name
@@ -1079,6 +1110,122 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
             f"a mano. Usando ensemble CREST sin filtrar."
         )
     return conformers_xyz
+
+
+# ─────────────────────────────────────────────
+#  PARSEO DE 1_SCREENING.out DE CENSO
+# ─────────────────────────────────────────────
+
+def parse_censo_screening_out(screening_out: Path) -> list[str] | None:
+    """
+    Parsea el archivo 1_SCREENING.out de CENSO y devuelve la lista de
+    identificadores de confórmeros que sobrevivieron el pre-screening,
+    ordenados por Gtot (más estable primero).
+
+    Formato esperado (CENSO 2.x / 3.x):
+        CONF#      E (DFT)   ΔGsolv   GmRRHO   Gtot   ΔGtot   Boltzmann weight
+        CONF7     ...                           ...    0.00      41.71
+        CONF290   ...                           ...    0.11      34.76
+        ...
+
+    Devuelve lista de strings tipo ["CONF7", "CONF290", ...] o None si
+    no se pudo parsear ninguna línea de datos.
+    """
+    if not screening_out.exists():
+        return None
+
+    conf_ids: list[tuple[float, str]] = []  # (Gtot, conf_id)
+
+    try:
+        lines = screening_out.read_text(errors="replace").splitlines()
+    except Exception:
+        return None
+
+    for line in lines:
+        line = line.strip()
+        # Línea de datos: empieza con CONF seguido de dígitos
+        m = re.match(
+            r'^(CONF\d+)\s+'           # CONF#
+            r'[\-\d.]+\s+'             # E (DFT)
+            r'[\-\d.]+\s+'             # ΔGsolv
+            r'[\-\d.]+\s+'             # GmRRHO
+            r'([\-\d.]+)\s+'           # Gtot  ← usamos este para ordenar
+            r'([\-\d.]+)\s+'           # ΔGtot
+            r'[\d.]+',                 # Boltzmann weight
+            line,
+        )
+        if m:
+            conf_id = m.group(1)       # "CONF7"
+            gtot    = float(m.group(2))
+            conf_ids.append((gtot, conf_id))
+
+    if not conf_ids:
+        return None
+
+    # Ordenar por Gtot (ya vienen ordenados en el .out, pero por seguridad)
+    conf_ids.sort(key=lambda x: x[0])
+    return [cid for _, cid in conf_ids]
+
+
+def extract_conformers_by_id(
+    source_xyz: Path,
+    conf_ids: list[str],
+    output_xyz: Path,
+    log: logging.Logger,
+) -> bool:
+    """
+    Extrae del multi-XYZ de CREST los frames cuyo comentario contiene
+    uno de los identificadores en conf_ids (e.g. "CONF7"), y los escribe
+    en output_xyz en el mismo orden que conf_ids.
+
+    CREST numera los frames secuencialmente en el comentario de cada bloque
+    XYZ (ej: "CONF7  -1218.034197"). Busca el primer token del comentario
+    como clave.
+
+    Devuelve True si se escribió al menos un confórmero.
+    """
+    try:
+        all_frames = read(str(source_xyz), index=":")
+        if not isinstance(all_frames, list):
+            all_frames = [all_frames]
+    except Exception as e:
+        log.warning(f"[CENSO] no se pudo leer {source_xyz}: {e}")
+        return False
+
+    # Construir índice: conf_id → atoms
+    frame_index: dict[str, object] = {}
+    for atoms in all_frames:
+        comment = (
+            atoms.info.get("comment", "")
+            or atoms.info.get("description", "")
+        )
+        token = str(comment).split()[0] if comment else ""
+        if token.startswith("CONF"):
+            frame_index[token] = atoms
+
+    selected = []
+    missing  = []
+    for cid in conf_ids:
+        if cid in frame_index:
+            selected.append(frame_index[cid])
+        else:
+            missing.append(cid)
+
+    if missing:
+        log.warning(
+            f"[CENSO]  ⚠  {len(missing)} conf(s) del screening no encontrados "
+            f"en {source_xyz.name}: {missing[:5]}{'…' if len(missing) > 5 else ''}"
+        )
+
+    if not selected:
+        return False
+
+    try:
+        write(str(output_xyz), selected)
+        return True
+    except Exception as e:
+        log.warning(f"[CENSO] error escribiendo ensemble filtrado: {e}")
+        return False
 
 
 # ─────────────────────────────────────────────
