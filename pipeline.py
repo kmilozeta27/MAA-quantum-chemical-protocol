@@ -929,6 +929,203 @@ def stage_crest(mol_xyz: Path, mol_dir: Path, charge: int,
         return None
 
 
+# ─────────────────────────────────────────────
+#  RECUPERACIÓN DE PRESCREENING PARCIAL
+# ─────────────────────────────────────────────
+
+def _parse_prescreening_orca_sp(outfile: Path) -> Optional[float]:
+    """
+    Replica OrcaProc._sp de CENSO: busca 'FINAL SINGLE POINT ENERGY'
+    en sp/sp.out y exige que el archivo contenga 'ORCA TERMINATED NORMALLY'.
+    """
+    if not outfile.exists():
+        return None
+    try:
+        text = outfile.read_text(errors="ignore")
+    except OSError:
+        return None
+    if "ORCA TERMINATED NORMALLY" not in text:
+        return None
+    for line in text.splitlines():
+        if "FINAL SINGLE POINT ENERGY" in line:
+            try:
+                return float(line.split()[-1])
+            except (ValueError, IndexError):
+                return None
+    return None
+
+
+def _parse_prescreening_xtb_energy(outfile: Path) -> Optional[float]:
+    """
+    Replica XtbProc._sp de CENSO: busca '| TOTAL ENERGY' y devuelve
+    el token[3] (energía xTB en Hartree).
+    """
+    if not outfile.exists():
+        return None
+    try:
+        text = outfile.read_text(errors="ignore")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if "| TOTAL ENERGY" in line:
+            try:
+                return float(line.split()[3])
+            except (ValueError, IndexError):
+                return None
+    return None
+
+
+def _censo_prescreen_diagnose_dir(censo_dir: Path, log: logging.Logger) -> dict:
+    """
+    Inspecciona censo_dir (01b_censo_prescreen/) y devuelve un dict con
+    el estado de los cálculos de prescreening:
+
+        {
+          "conf_dirs"  : [Path, ...],   # carpetas CONF* encontradas
+          "n_total"    : int,
+          "n_sp_ok"    : int,           # con sp/sp.out + TERMINATED NORMALLY
+          "n_gsolv_ok" : int,           # con xtb_gsolv/ completos
+          "n_full"     : int,           # con los tres archivos correctos
+          "can_recover": bool,          # True si n_full == n_total > 0
+        }
+
+    No lanza excepciones; si no hay carpetas CONF* devuelve todo en cero.
+    """
+    conf_dirs = sorted(
+        [d for d in censo_dir.iterdir() if d.is_dir() and d.name.startswith("CONF")]
+        if censo_dir.is_dir() else [],
+        key=lambda d: int(re.search(r"\d+", d.name).group())
+                      if re.search(r"\d+", d.name) else 0,
+    )
+    n_total    = len(conf_dirs)
+    n_sp_ok    = 0
+    n_gsolv_ok = 0
+    n_full     = 0
+
+    for cd in conf_dirs:
+        sp_ok  = _parse_prescreening_orca_sp(cd / "sp" / "sp.out") is not None
+        gas_ok = _parse_prescreening_xtb_energy(cd / "xtb_gsolv" / "gas.out") is not None
+        sol_ok = _parse_prescreening_xtb_energy(cd / "xtb_gsolv" / "solv.out") is not None
+        if sp_ok:
+            n_sp_ok += 1
+        if gas_ok and sol_ok:
+            n_gsolv_ok += 1
+        if sp_ok and gas_ok and sol_ok:
+            n_full += 1
+
+    can_recover = (n_full == n_total > 0)
+
+    log.debug(
+        f"[CENSO-RECOVER]  diagnóstico {censo_dir.name}: "
+        f"{n_total} CONF dirs | sp_ok={n_sp_ok} | gsolv_ok={n_gsolv_ok} | "
+        f"full={n_full} | can_recover={can_recover}"
+    )
+    return {
+        "conf_dirs"  : conf_dirs,
+        "n_total"    : n_total,
+        "n_sp_ok"    : n_sp_ok,
+        "n_gsolv_ok" : n_gsolv_ok,
+        "n_full"     : n_full,
+        "can_recover": can_recover,
+    }
+
+
+def _censo_prescreen_recover(
+    censo_dir: Path,
+    log: logging.Logger,
+) -> Optional[Path]:
+    """
+    Reconstruye 0_PRESCREENING_recovered.json desde los .out ya calculados
+    en censo_dir (01b_censo_prescreen/), sin relanzar nada.
+
+    Reproduce exactamente la estructura que espera EnsembleData.read_output
+    de CENSO 3.0.x:
+        {
+          "part_name": "prescreening",
+          "data": {
+            "CONF1": {"energy": ..., "gsolv": ..., "grrho": 0.0, "gtot": ...},
+            ...
+          }
+        }
+
+    Devuelve la ruta al JSON si tuvo éxito con ≥1 confórmero, o None si
+    hay confórmeros sin datos suficientes (en ese caso el llamador debe
+    eliminar la carpeta y relanzar CENSO desde cero).
+
+    Diferencia frente al script standalone recover_prescreening.py:
+    • No escribe a stdout ni llama sys.exit(); usa el logger del pipeline.
+    • Devuelve None en vez de sys.exit() cuando faltan datos.
+    • Escribe 0_PRESCREENING_recovered.json junto al censo.log existente.
+    """
+    diag = _censo_prescreen_diagnose_dir(censo_dir, log)
+
+    if diag["n_total"] == 0:
+        log.debug("[CENSO-RECOVER]  no hay carpetas CONF* — nada que recuperar")
+        return None
+
+    data: dict[str, dict] = {}
+    missing: list[str]    = []
+
+    for cd in diag["conf_dirs"]:
+        name = cd.name
+
+        energy = _parse_prescreening_orca_sp(cd / "sp" / "sp.out")
+        if energy is None:
+            missing.append(name)
+            log.debug(f"[CENSO-RECOVER]  {name}: sp.out ausente o incompleto")
+            continue
+
+        energy_gas  = _parse_prescreening_xtb_energy(cd / "xtb_gsolv" / "gas.out")
+        energy_solv = _parse_prescreening_xtb_energy(cd / "xtb_gsolv" / "solv.out")
+
+        if energy_gas is None or energy_solv is None:
+            faltante = "gas.out" if energy_gas is None else "solv.out"
+            missing.append(name)
+            log.debug(f"[CENSO-RECOVER]  {name}: {faltante} ausente o sin parsear")
+            continue
+
+        gsolv = energy_solv - energy_gas
+        grrho = 0.0
+        gtot  = energy + gsolv + grrho
+
+        data[name] = {
+            "energy": energy,
+            "gsolv" : gsolv,
+            "grrho" : grrho,
+            "gtot"  : gtot,
+        }
+
+    if missing:
+        log.warning(
+            f"[CENSO-RECOVER]  {len(missing)}/{diag['n_total']} confórmeros "
+            f"sin datos completos: {', '.join(missing[:10])}"
+            f"{'…' if len(missing) > 10 else ''}"
+        )
+        # CENSO exige el set COMPLETO en --reload; si faltan datos no podemos usar recovery.
+        return None
+
+    if not data:
+        log.warning("[CENSO-RECOVER]  ningún confórmero recuperable")
+        return None
+
+    recovered_json = censo_dir / "0_PRESCREENING_recovered.json"
+    dump = {
+        "part_name": "prescreening",
+        "data"     : data,
+    }
+    try:
+        recovered_json.write_text(json.dumps(dump, indent=4))
+    except OSError as e:
+        log.error(f"[CENSO-RECOVER]  no se pudo escribir {recovered_json}: {e}")
+        return None
+
+    log.info(
+        f"[CENSO-RECOVER]  ✓  JSON reconstruido → {recovered_json.name} "
+        f"({len(data)} confórmeros)"
+    )
+    return recovered_json
+
+
 def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
                            charge: int, log: logging.Logger,
                            temperature: float = 274.15,
@@ -966,6 +1163,133 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
     if output_xyz.exists() and output_xyz.stat().st_size > 0:
         log.info(f"[CENSO]  ↩  pre-screening ya completado — saltando ({output_xyz.name})")
         return output_xyz
+
+    # ── Recuperación de carpeta parcial de CENSO (prescreening interrumpido) ──
+    # Si existe la carpeta 01b_censo_prescreen/ con carpetas CONF* internas
+    # (generadas por un run de CENSO interrumpido), intentamos reconstruir
+    # 0_PRESCREENING_recovered.json y relanzar CENSO con --reload en lugar
+    # de correr todo desde cero.
+    #
+    # Flujo:
+    #   1. Detectar si hay carpetas CONF* en censo_dir.
+    #   2. Si hay un 0_PRESCREENING_recovered.json previo, reutilizarlo
+    #      directamente (permite reintentos tras un --reload que falló).
+    #   3. Diagnosticar si los .out de todas las CONF* son parseables.
+    #   4a. Si SÍ → reconstruir JSON y relanzar con --reload.
+    #   4b. Si NO (datos incompletos) → borrar carpetas corruptas y dejar
+    #       que CENSO corra desde cero más abajo.
+    #
+    # Nota: la carpeta censo_dir en sí se conserva (contiene el censo.log
+    # original y el crest_conformers.xyz copiado); solo se eliminan las
+    # subcarpetas CONF* que impiden a CENSO correr limpio.
+    _diag = _censo_prescreen_diagnose_dir(censo_dir, log)
+    if _diag["n_total"] > 0:
+        log.info(
+            f"[CENSO]  ⚙  carpeta previa detectada con {_diag['n_total']} "
+            f"CONF dirs (sp_ok={_diag['n_sp_ok']}, gsolv_ok={_diag['n_gsolv_ok']}, "
+            f"completos={_diag['n_full']})"
+        )
+
+        # ── ¿Ya existe un JSON de recovery de una ejecución anterior? ──────
+        _prev_json = censo_dir / "0_PRESCREENING_recovered.json"
+        if _prev_json.exists() and _prev_json.stat().st_size > 0:
+            log.info(
+                f"[CENSO]  ♻  reutilizando {_prev_json.name} existente "
+                f"— relanzando CENSO con --reload"
+            )
+            _recovered_json: Optional[Path] = _prev_json
+        elif _diag["can_recover"]:
+            # Todos los confórmeros tienen datos completos → reconstruir
+            log.info(
+                f"[CENSO]  🔧  todos los .out son parseables "
+                f"— reconstruyendo {censo_dir.name}/0_PRESCREENING_recovered.json"
+            )
+            _recovered_json = _censo_prescreen_recover(censo_dir, log)
+        else:
+            # Datos incompletos → el recovery no es posible; limpiar y relanzar
+            _recovered_json = None
+
+        if _recovered_json is not None:
+            # ── Relanzar CENSO con --reload sobre el JSON reconstruido ──────
+            local_input = censo_dir / conformers_xyz.name
+            if not safe_copy(conformers_xyz, local_input):
+                log.warning(
+                    f"[CENSO-RECOVER]  no se pudo copiar {conformers_xyz.name} "
+                    f"— abortando recovery, relanzando limpio"
+                )
+            else:
+                cmd_reload = [
+                    str(CENSO_BIN),
+                    "--prescreening",
+                    "-i", local_input.name,
+                    "-c", str(charge),
+                    "-u", "0",
+                    "--solvent", "water",
+                    "--maxcores", str(NPROCS_CREST),
+                    "-T", f"{temperature:.2f}",
+                    "--reload", str(_recovered_json),
+                ]
+                log.info(
+                    f"[CENSO-RECOVER]  ▶  relanzando CENSO con --reload "
+                    f"({_recovered_json.name})"
+                )
+                try:
+                    with open(censo_dir / "censo_recover.log", "w") as _flog:
+                        _proc = subprocess.run(
+                            cmd_reload,
+                            stdout=_flog, stderr=subprocess.STDOUT,
+                            cwd=censo_dir, env=build_omp_env(NPROCS_CREST),
+                            timeout=CENSO_TIMEOUT_HOURS * 3600,
+                        )
+                    # Buscar el ensemble de salida (mismo esquema que abajo)
+                    _fixed = [
+                        "censo_ensemble_sorted.xyz",
+                        "censo_ensemble.xyz",
+                        "crest_conformers_sorted.xyz",
+                        "crest_conformers.xyz.sorted",
+                    ]
+                    for _name in _fixed:
+                        _p = censo_dir / _name
+                        if _p.exists() and _p.stat().st_size > 0 and _p != local_input:
+                            if not safe_copy(_p, output_xyz):
+                                break
+                            try:
+                                _n = len(read(str(output_xyz), index=":"))
+                            except Exception:
+                                _n = "?"
+                            log.info(
+                                f"[CENSO-RECOVER]  ✓  ensemble recuperado con --reload "
+                                f"→ {output_xyz.name} ({_n} conf(s))"
+                            )
+                            return output_xyz
+                    # No encontró ensemble → recovery falló; continuar al lanzamiento limpio
+                    log.warning(
+                        f"[CENSO-RECOVER]  ⚠  --reload no produjo un ensemble "
+                        f"reconocible (returncode={_proc.returncode}) — "
+                        f"revisa censo_recover.log. Se limpiará la carpeta y CENSO "
+                        f"correrá desde cero."
+                    )
+                except subprocess.TimeoutExpired:
+                    log.error("[CENSO-RECOVER]  ✗  TIMEOUT en --reload")
+                except Exception as _e:
+                    log.error(f"[CENSO-RECOVER]  ✗  error en --reload: {_e}")
+
+        # ── Limpieza de subcarpetas CONF* corruptas / no recuperables ───────
+        # Solo se borran las carpetas CONF* individuales; el directorio
+        # censo_dir (y archivos sueltos como censo.log, JSON, input XYZ)
+        # se conservan para diagnóstico.
+        log.warning(
+            f"[CENSO]  🗑  eliminando {len(_diag['conf_dirs'])} subcarpetas "
+            f"CONF* corruptas/incompletas en {censo_dir.name}/ para relanzar "
+            f"CENSO desde cero"
+        )
+        for _cd in _diag["conf_dirs"]:
+            try:
+                shutil.rmtree(_cd)
+                log.debug(f"[CENSO]  rm -rf {_cd.name}")
+            except OSError as _e:
+                log.warning(f"[CENSO]  no se pudo eliminar {_cd.name}: {_e}")
+        log.info("[CENSO]  ✓  limpieza completada — relanzando CENSO limpio")
 
     # ── Intento de recuperación desde 1_SCREENING.out existente ─────────────
     # Si CENSO ya corrió manualmente (o en un run previo) y dejó el archivo
