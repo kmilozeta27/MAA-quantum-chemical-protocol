@@ -985,11 +985,35 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
                 f"con {len(_conf_ids)} conf(s) — reconstruyendo ensemble "
                 f"filtrado sin relanzar CENSO"
             )
-            if extract_conformers_by_id(conformers_xyz, _conf_ids, output_xyz, log):
-                log.info(
-                    f"[CENSO]  ✓  ensemble reconstruido desde {_sc.name} "
-                    f"→ {output_xyz.name} ({len(_conf_ids)} conf(s))"
+            # Fuentes de geometría en orden de prioridad:
+            #   1. conformers_xyz original de CREST (comentarios = solo energía)
+            #   2. 1_SCREENING.xyz generado por CENSO (comentarios = CONF#)
+            #      CENSO renombra los frames con CONF# al leerlos; es el único
+            #      archivo que contiene los tokens CONF# como comentario XYZ.
+            _geom_sources = [conformers_xyz]
+            for _screening_xyz_candidate in [
+                _sc.parent / "1_SCREENING.xyz",
+                _sc.parent.parent / "1_SCREENING.xyz",
+            ]:
+                if _screening_xyz_candidate.exists() and _screening_xyz_candidate.stat().st_size > 0:
+                    _geom_sources.append(_screening_xyz_candidate)
+
+            _rebuilt = False
+            for _geom_src in _geom_sources:
+                if extract_conformers_by_id(_geom_src, _conf_ids, output_xyz, log):
+                    log.info(
+                        f"[CENSO]  ✓  ensemble reconstruido desde {_sc.name} "
+                        f"(geometrías: {_geom_src.name}) "
+                        f"→ {output_xyz.name} ({len(_conf_ids)} conf(s))"
+                    )
+                    _rebuilt = True
+                    break
+                log.debug(
+                    f"[CENSO]  fuente {_geom_src.name} no contiene los CONF# — "
+                    f"probando siguiente fuente de geometrías"
                 )
+
+            if _rebuilt:
                 return output_xyz
             log.warning(
                 f"[CENSO]  ⚠  no se pudo reconstruir desde {_sc.name} "
