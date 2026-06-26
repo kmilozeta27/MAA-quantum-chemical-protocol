@@ -1217,15 +1217,36 @@ def extract_conformers_by_id(
         return False
 
     # Construir índice: conf_id → atoms
+    # ASE solo popula atoms.info para formato extXYZ (key=value en comentario).
+    # Para XYZ simples (comentario = "CONF7" o "-76.301"), atoms.info queda
+    # vacío y hay que leer el comentario directamente del archivo de texto.
     frame_index: dict[str, object] = {}
-    for atoms in all_frames:
-        comment = (
-            atoms.info.get("comment", "")
-            or atoms.info.get("description", "")
-        )
-        token = str(comment).split()[0] if comment else ""
-        if token.startswith("CONF"):
-            frame_index[token] = atoms
+    try:
+        _raw_lines = source_xyz.read_text(errors="replace").splitlines()
+        _n_atoms   = len(all_frames[0]) if all_frames else 0
+        _fi = 0   # índice en all_frames
+        _li = 0   # índice en _raw_lines
+        while _li < len(_raw_lines) and _fi < len(all_frames):
+            _line = _raw_lines[_li].strip()
+            if _line.isdigit() and int(_line) == _n_atoms:
+                _comment = _raw_lines[_li + 1].strip() if _li + 1 < len(_raw_lines) else ""
+                _token   = _comment.split()[0] if _comment.split() else ""
+                if _token.startswith("CONF"):
+                    frame_index[_token] = all_frames[_fi]
+                _fi += 1
+                _li += _n_atoms + 2
+            else:
+                _li += 1
+    except Exception:
+        # Fallback: intentar con atoms.info (funciona si es extXYZ)
+        for atoms in all_frames:
+            comment = (
+                atoms.info.get("comment", "")
+                or atoms.info.get("description", "")
+            )
+            token = str(comment).split()[0] if comment else ""
+            if token.startswith("CONF"):
+                frame_index[token] = atoms
 
     selected = []
     missing  = []
@@ -1342,6 +1363,165 @@ def stage_censo_multitemp(
 
 
 # ─────────────────────────────────────────────
+#  FILTRO BOLTZMANN POST-CENSO
+# ─────────────────────────────────────────────
+
+def parse_boltzmann_weights(screening_out: Path) -> dict[str, float]:
+    """
+    Parsea los pesos de Boltzmann de 1_SCREENING.out de CENSO.
+
+    Devuelve dict {conf_id → peso%} (ej. {"CONF7": 41.71, "CONF290": 34.76}).
+    Devuelve dict vacío si el archivo no existe o no se pudo parsear.
+    """
+    if not screening_out.exists():
+        return {}
+    result: dict[str, float] = {}
+    try:
+        for line in screening_out.read_text(errors="replace").splitlines():
+            line = line.strip()
+            m = re.match(
+                r'^(CONF\d+)\s+'
+                r'[\-\d.]+\s+'   # E(DFT)
+                r'[\-\d.]+\s+'   # ΔGsolv
+                r'[\-\d.]+\s+'   # GmRRHO
+                r'[\-\d.]+\s+'   # Gtot
+                r'[\-\d.]+\s+'   # ΔGtot
+                r'([\d.]+)',        # Boltzmann weight %
+                line,
+            )
+            if m:
+                result[m.group(1)] = float(m.group(2))
+    except Exception:
+        return {}
+    return result
+
+
+def select_nconf_boltzmann(
+    conformers_xyz: Path,
+    screening_out:  Path,
+    log:            logging.Logger,
+    threshold:      float = 5.0,
+    nconf_min:      int   = 3,          # = NCONF_MIN (definido más abajo)
+) -> tuple[int, list[str]]:
+    """
+    Selecciona confórmeros del ensemble post-CENSO con peso Boltzmann ≥ threshold%.
+
+    Lee los pesos de Boltzmann de 1_SCREENING.out (calculados por CENSO sobre
+    geometrías GFN2-xTB), filtra por umbral y devuelve (nconf, conf_ids).
+
+    El ensemble censo_ensemble_sorted.xyz puede tener comentarios en formato
+    extXYZ ("CONF7=T") o plain ("CONF7"); se extrae el token CONF# en ambos casos.
+
+    Args:
+        conformers_xyz : ruta al ensemble post-CENSO (censo_ensemble_sorted.xyz).
+        screening_out  : ruta al 1_SCREENING.out con los pesos Boltzmann.
+        log            : logger del pipeline.
+        threshold      : porcentaje mínimo (default 5.0 → ≥5%).
+        nconf_min      : mínimo de confórmeros garantizado (default NCONF_MIN=3).
+
+    Returns:
+        (nconf, conf_ids) donde conf_ids es la lista ordenada por peso Boltzmann
+        descendente. Si no se puede aplicar el filtro, devuelve (0, []) para que
+        el llamador caiga en el modo automático.
+    """
+    # ── Leer pesos Boltzmann ─────────────────────────────────────────────────
+    weights = parse_boltzmann_weights(screening_out)
+    if not weights:
+        log.warning(
+            f"[NCONF-BOLTZMANN] no se pudo leer {screening_out.name} "
+            f"— cayendo en select_nconf_auto"
+        )
+        return 0, []
+
+    # ── Extraer CONF# del ensemble XYZ ──────────────────────────────────────
+    # Soporta comentarios extXYZ ("Properties=... CONF7=T pbc=...") y
+    # plain ("CONF7" o "CONF7  -1218.03").
+    xyz_conf_ids: list[str] = []
+    try:
+        _lines   = conformers_xyz.read_text(errors="replace").splitlines()
+        _n_atoms = None
+        _li      = 0
+        while _li < len(_lines):
+            _l = _lines[_li].strip()
+            if _l.isdigit():
+                _nat = int(_l)
+                if _n_atoms is None:
+                    _n_atoms = _nat
+                if _nat == _n_atoms and _li + 1 < len(_lines):
+                    _comment = _lines[_li + 1].strip()
+                    # extXYZ: CONF7=T
+                    _m = re.search(r'(CONF\d+)=', _comment)
+                    if _m:
+                        xyz_conf_ids.append(_m.group(1))
+                    else:
+                        # plain: primer token que empiece con CONF
+                        for _tok in _comment.split():
+                            if _tok.startswith("CONF"):
+                                xyz_conf_ids.append(_tok)
+                                break
+                    _li += _nat + 2
+                    continue
+            _li += 1
+    except Exception as e:
+        log.warning(
+            f"[NCONF-BOLTZMANN] no se pudo leer {conformers_xyz.name}: {e} "
+            f"— cayendo en select_nconf_auto"
+        )
+        return 0, []
+
+    if not xyz_conf_ids:
+        log.warning(
+            f"[NCONF-BOLTZMANN] no se encontraron tokens CONF# en "
+            f"{conformers_xyz.name} — cayendo en select_nconf_auto"
+        )
+        return 0, []
+
+    # ── Filtrar por umbral Boltzmann ─────────────────────────────────────────
+    above  = [(cid, weights[cid]) for cid in xyz_conf_ids if weights.get(cid, 0.0) >= threshold]
+    below  = [(cid, weights[cid]) for cid in xyz_conf_ids if 0 < weights.get(cid, 0.0) < threshold]
+    no_wt  = [cid for cid in xyz_conf_ids if cid not in weights]
+
+    # Ordenar por peso descendente
+    above.sort(key=lambda x: -x[1])
+
+    # Garantizar nconf_min: si el umbral deja < nconf_min, completar con los
+    # mejores por debajo del umbral hasta llegar a nconf_min.
+    selected = [cid for cid, _ in above]
+    if len(selected) < nconf_min:
+        below.sort(key=lambda x: -x[1])
+        extras = [cid for cid, _ in below[: nconf_min - len(selected)]]
+        selected += extras
+        log.warning(
+            f"[NCONF-BOLTZMANN] solo {len(above)} conf(s) ≥ {threshold}% — "
+            f"añadiendo {len(extras)} conf(s) extra para garantizar "
+            f"nconf_min={nconf_min}: {extras}"
+        )
+
+    nconf = len(selected)
+
+    # ── Log resumen ──────────────────────────────────────────────────────────
+    above_str = ", ".join(
+        f"{cid}({weights[cid]:.1f}%)" for cid, _ in above
+    )
+    log.info(
+        f"[NCONF-BOLTZMANN] umbral={threshold}% → "
+        f"{len(above)} conf(s) seleccionados: {above_str}"
+    )
+    if below:
+        log.info(
+            f"[NCONF-BOLTZMANN] {len(below)} conf(s) por debajo del umbral "
+            f"(mayor: {below[0][0]} {below[0][1]:.2f}%) — descartados"
+        )
+    if no_wt:
+        log.warning(
+            f"[NCONF-BOLTZMANN] {len(no_wt)} conf(s) sin peso en "
+            f"{screening_out.name}: {no_wt} — descartados"
+        )
+    log.info(f"[NCONF-BOLTZMANN] → nconf={nconf} (nconf_min={nconf_min})")
+    return nconf, selected
+
+
+# ─────────────────────────────────────────────
 #  AUTO-SELECCIÓN DE CONFÓRMEROS PARA OPT
 # ─────────────────────────────────────────────
 
@@ -1400,27 +1580,51 @@ def select_nconf_auto(conformers_xyz: Path, log: logging.Logger) -> int:
         return nconf
 
     # ── Extraer energías del comentario de cada frame ────────────────────────
-    # CREST/CENSO escriben la energía en Hartree en el segundo campo del
-    # comentario (línea 2 de cada bloque XYZ). ASE la guarda en info["energy"]
-    # o en el comentario bruto ("comment" / "description").
+    # CREST escribe la energía en Hartree en la línea de comentario (línea 2
+    # de cada bloque XYZ). ASE solo la expone en atoms.info para formato
+    # extXYZ (key=value); para XYZ simples hay que leer el texto directamente.
+    #
+    # El ensemble post-CENSO (censo_ensemble_sorted.xyz) tiene comentarios
+    # "CONF7", "CONF1", etc. (sin valor numérico): en ese caso no se pueden
+    # extraer energías y n_avail se usa como proxy (ver rama else abajo).
     energies_hartree: list[float] = []
-    for atoms in all_conf:
-        # Primero intentar el campo de energía nativo de ASE
-        e = atoms.info.get("energy") or atoms.info.get("Energy")
-        if e is None:
-            # Intentar parsear el comentario directamente
-            comment = atoms.info.get("comment", "") or atoms.info.get("description", "")
-            for token in str(comment).split():
+    try:
+        _raw_lines = conformers_xyz.read_text(errors="replace").splitlines()
+        _n_at = len(all_conf[0]) if all_conf else 0
+        _fi = 0
+        _li = 0
+        while _li < len(_raw_lines) and _fi < len(all_conf):
+            _l = _raw_lines[_li].strip()
+            if _l.isdigit() and int(_l) == _n_at:
+                _comment = _raw_lines[_li + 1].strip() if _li + 1 < len(_raw_lines) else ""
+                # Buscar primer token numérico en el comentario
+                for _tok in _comment.split():
+                    try:
+                        energies_hartree.append(float(_tok))
+                        break
+                    except ValueError:
+                        continue
+                _fi += 1
+                _li += _n_at + 2
+            else:
+                _li += 1
+    except Exception:
+        # Fallback: atoms.info (funciona para extXYZ)
+        for atoms in all_conf:
+            e = atoms.info.get("energy") or atoms.info.get("Energy")
+            if e is None:
+                comment = atoms.info.get("comment", "") or atoms.info.get("description", "")
+                for token in str(comment).split():
+                    try:
+                        e = float(token)
+                        break
+                    except ValueError:
+                        continue
+            if e is not None:
                 try:
-                    e = float(token)
-                    break
-                except ValueError:
-                    continue
-        if e is not None:
-            try:
-                energies_hartree.append(float(e))
-            except (TypeError, ValueError):
-                pass
+                    energies_hartree.append(float(e))
+                except (TypeError, ValueError):
+                    pass
 
     # ── Calcular spread y decidir nconf ─────────────────────────────────────
     if len(energies_hartree) >= 2:
@@ -1446,24 +1650,41 @@ def select_nconf_auto(conformers_xyz: Path, log: logging.Logger) -> int:
             f"→ nconf={nconf} (límites: [{NCONF_MIN}, {NCONF_MAX}])"
         )
     else:
-        # Sin energías legibles: heurística solo por tamaño del ensemble
-        # Escala logarítmica suave entre NCONF_MIN y NCONF_MAX
+        # Sin energías legibles: si el ensemble ya es suficientemente pequeño
+        # (viene de CENSO pre-screening), tomar el máximo permitido o todos.
+        # Heurística logarítmica solo para ensembles grandes sin energías.
         import math
-        ratio = math.log(n_avail) / math.log(100)  # 100 conf ≈ nconf_max
-        nconf = int(NCONF_MIN + (NCONF_MAX - NCONF_MIN) * min(ratio, 1.0))
-        log.warning(
-            f"[NCONF-AUTO] {n_avail} confórmeros disponibles — energías no legibles; "
-            f"usando heurística de tamaño → nconf={nconf}"
-        )
+        if n_avail <= NCONF_MAX * 2:
+            # Ensemble post-CENSO sin energías numéricas (comentarios = CONF#):
+            # tomar min(n_avail, NCONF_MAX) — no tiene sentido restringir más.
+            nconf = min(n_avail, NCONF_MAX)
+            log.warning(
+                f"[NCONF-AUTO] {n_avail} confórmeros disponibles — energías no legibles "
+                f"(ensemble post-CENSO); tomando nconf={nconf} (min(n_avail, NCONF_MAX))"
+            )
+        else:
+            ratio = math.log(n_avail) / math.log(100)  # 100 conf ≈ nconf_max
+            nconf = int(NCONF_MIN + (NCONF_MAX - NCONF_MIN) * min(ratio, 1.0))
+            log.warning(
+                f"[NCONF-AUTO] {n_avail} confórmeros disponibles — energías no legibles; "
+                f"usando heurística de tamaño → nconf={nconf}"
+            )
 
     return max(NCONF_MIN, min(NCONF_MAX, nconf))
 
 
 def stage_opt(conformers_xyz: Path, mol_dir: Path,
-              charge: int, nconf: int, log: logging.Logger) -> list[Path]:
+              charge: int, nconf: int, log: logging.Logger,
+              conf_ids: Optional[list[str]] = None) -> list[Path]:
     """
     Etapa 02_opt: optimización DFT de cada confórmero.
-    `nconf` ya viene calculado por select_nconf_auto().
+    `nconf` viene de select_nconf_auto() o select_nconf_boltzmann().
+
+    Args:
+        conf_ids : lista explícita de CONF# a optimizar (modo --boltzmann-threshold).
+                   Si se especifica, se ignora nconf y se seleccionan los frames
+                   correspondientes del ensemble. Si es None, se toman los primeros
+                   nconf frames (comportamiento clásico).
 
     Corre OPT_BATCH_SIZE confórmeros en paralelo (ThreadPoolExecutor),
     cada uno con NPROCS cores y MAXCORE MB. El paralelismo entre confórmeros
@@ -1471,12 +1692,50 @@ def stage_opt(conformers_xyz: Path, mol_dir: Path,
 
     Devuelve lista de directorios exitosos.
     """
-    log.info(f"[OPT] optimizando {nconf} confórmeros (seleccionados automáticamente)")
-    try:
-        conformers = read_conformers(conformers_xyz, nconf)
-    except RuntimeError as e:
-        log.error(f"[OPT] no se pudo leer {conformers_xyz}: {e}")
-        return []
+    if conf_ids:
+        # Modo Boltzmann: extraer frames por CONF# desde el ensemble
+        # Soporta comentarios extXYZ ("CONF7=T") y plain ("CONF7")
+        _selection_mode = f"Boltzmann ({len(conf_ids)} conf(s): {', '.join(conf_ids)})"
+        log.info(f"[OPT] optimizando {len(conf_ids)} confórmeros ({_selection_mode})")
+        try:
+            _all = read(str(conformers_xyz), index=":")
+            if not isinstance(_all, list):
+                _all = [_all]
+        except Exception as e:
+            log.error(f"[OPT] no se pudo leer {conformers_xyz}: {e}")
+            return []
+        # Construir índice CONF# → atoms (igual que extract_conformers_by_id)
+        _frame_idx: dict[str, object] = {}
+        try:
+            _raw = conformers_xyz.read_text(errors="replace").splitlines()
+            _nat = len(_all[0]) if _all else 0
+            _fi, _li = 0, 0
+            while _li < len(_raw) and _fi < len(_all):
+                _l = _raw[_li].strip()
+                if _l.isdigit() and int(_l) == _nat:
+                    _comment = _raw[_li + 1].strip() if _li + 1 < len(_raw) else ""
+                    _m = re.search(r"(CONF\d+)=", _comment)
+                    _tok = _m.group(1) if _m else (_comment.split()[0] if _comment.split() else "")
+                    if _tok.startswith("CONF"):
+                        _frame_idx[_tok] = _all[_fi]
+                    _fi += 1
+                    _li += _nat + 2
+                else:
+                    _li += 1
+        except Exception:
+            pass
+        conformers = [_frame_idx[cid] for cid in conf_ids if cid in _frame_idx]
+        _missing = [cid for cid in conf_ids if cid not in _frame_idx]
+        if _missing:
+            log.warning(f"[OPT] CONF# no encontrados en ensemble: {_missing}")
+    else:
+        # Modo clásico: primeros nconf frames
+        log.info(f"[OPT] optimizando {nconf} confórmeros (seleccionados automáticamente)")
+        try:
+            conformers = read_conformers(conformers_xyz, nconf)
+        except RuntimeError as e:
+            log.error(f"[OPT] no se pudo leer {conformers_xyz}: {e}")
+            return []
 
     if not conformers:
         log.error("[OPT] el archivo de confórmeros está vacío")
@@ -2731,6 +2990,18 @@ Ejemplos (modo expansión conformacional):
         ),
     )
 
+    parser.add_argument(
+        "--boltzmann-threshold", type=float, default=5.0, metavar="PCT",
+        help=(
+            "Umbral de peso Boltzmann (%%) para seleccionar confórmeros que pasan "
+            "a OPT. Requiere que CENSO haya generado 1_SCREENING.out con los pesos. "
+            "Ejemplo: --boltzmann-threshold 5.0 selecciona confs con peso ≥ 5%% "
+            "(típicamente CONF7=41.7%%, CONF290=34.8%%, CONF81=5.9%% para SB). "
+            "Si no se especifica, se usa select_nconf_auto (comportamiento por defecto). "
+            "Si el umbral deja < NCONF_MIN confórmeros, se completan automáticamente."
+        ),
+    )
+
     args = parser.parse_args()
 
     # ── Validar --multitemp / --trange ───────────────────────────────────────
@@ -3204,11 +3475,45 @@ Ejemplos (modo expansión conformacional):
             )
 
     # ── Etapa 2: OPT ────────────────────────────────────────────
-    # El número de confórmeros se determina automáticamente en función
-    # del panorama conformacional del ensemble post-CENSO (mín 3, máx 20).
+    # El número de confórmeros se determina según el modo activo:
+    #   --boltzmann-threshold PCT : toma confs con peso Boltzmann ≥ PCT%
+    #                               (requiere 1_SCREENING.out de CENSO)
+    #   modo automático (default) : select_nconf_auto basado en spread de energías
     if start_idx <= STEPS.index("opt"):
-        nconf = select_nconf_auto(conformers_xyz, log)
-        opt_dirs = stage_opt(conformers_xyz, mol_dir, args.charge, nconf, log)
+        boltz_conf_ids: list[str] = []
+        if args.boltzmann_threshold is not None:
+            # Buscar 1_SCREENING.out en las ubicaciones estándar de CENSO
+            _censo_prescreen_dir = mol_dir / "01b_censo_prescreen"
+            _screening_candidates = [
+                _censo_prescreen_dir / "1_SCREENING.out",
+                _censo_prescreen_dir / "CENSO" / "1_SCREENING.out",
+                _censo_prescreen_dir / "prescreening" / "1_SCREENING.out",
+            ]
+            _screening_out = next(
+                (p for p in _screening_candidates if p.exists()), None
+            )
+            if _screening_out:
+                nconf, boltz_conf_ids = select_nconf_boltzmann(
+                    conformers_xyz, _screening_out, log,
+                    threshold=args.boltzmann_threshold,
+                )
+            else:
+                log.debug(
+                    f"[NCONF-BOLTZMANN] 1_SCREENING.out no disponible en "
+                    f"{_censo_prescreen_dir} — usando select_nconf_auto"
+                )
+                nconf = 0
+
+            if nconf == 0:
+                nconf = select_nconf_auto(conformers_xyz, log)
+                boltz_conf_ids = []
+        else:
+            nconf = select_nconf_auto(conformers_xyz, log)
+
+        opt_dirs = stage_opt(
+            conformers_xyz, mol_dir, args.charge, nconf, log,
+            conf_ids=boltz_conf_ids if boltz_conf_ids else None,
+        )
         if not opt_dirs:
             log.error("Ningún confórmero optimizado correctamente. Abortando.")
             sys.exit(1)
