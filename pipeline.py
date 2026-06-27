@@ -1289,6 +1289,7 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
                 cmd_reload = [
                     str(CENSO_BIN),
                     "--prescreening",
+                    "--screening",   # FIX: misma corrección que en el cmd normal
                     "-i", local_input.name,
                     "-c", str(charge),
                     "-u", "0",
@@ -1425,6 +1426,9 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
     cmd = [
         str(CENSO_BIN),
         "--prescreening",
+        "--screening",               # FIX: faltaba — sin esto CENSO 3.x corre
+                                      # SOLO prescreening y nunca llega a
+                                      # screening (1_SCREENING.out nunca existe).
         "-i", local_input.name,
         "-c", str(charge),
         "-u", "0",                  # MULT global siempre 1 → singlete, capa cerrada
@@ -1481,9 +1485,51 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
         except Exception:
             pass
 
+    # ── Reconstrucción preferente desde el .out con energías (Gtot) ─────────
+    # CENSO escribe las energías reales (Gtot/ΔGtot/Boltzmann weight) en
+    # archivos .out (1_SCREENING.out si corrió screening, o 0_PRESCREENING.out
+    # si solo corrió prescreening). Los .xyz que CENSO deja (censo_ensemble_*.xyz,
+    # 1_SCREENING.xyz, etc.) tienen comentarios "CONF7" SIN energía numérica,
+    # por lo que select_nconf_auto() no puede leerlas si se usan directamente.
+    # Por eso, antes de copiar cualquier .xyz crudo, intentamos reconstruir el
+    # ensemble vía parse_censo_screening_out() + extract_conformers_by_id(),
+    # que sí preserva el orden por Gtot y permite recuperar energías después.
+    _post_out_candidates = [
+        censo_dir / "1_SCREENING.out",
+        censo_dir / "CENSO" / "1_SCREENING.out",
+        censo_dir / "prescreening" / "1_SCREENING.out",
+        censo_dir / "0_PRESCREENING.out",
+        censo_dir / "CENSO" / "0_PRESCREENING.out",
+        censo_dir / "prescreening" / "0_PRESCREENING.out",
+    ]
+    for _po in _post_out_candidates:
+        _conf_ids = parse_censo_screening_out(_po)
+        if not _conf_ids:
+            continue
+        _geom_sources = [conformers_xyz]
+        for _xyz_name in ("1_SCREENING.xyz", "0_PRESCREENING.xyz"):
+            for _cand in (_po.parent / _xyz_name, _po.parent.parent / _xyz_name):
+                if _cand.exists() and _cand.stat().st_size > 0:
+                    _geom_sources.append(_cand)
+        for _geom_src in _geom_sources:
+            if extract_conformers_by_id(_geom_src, _conf_ids, output_xyz, log):
+                log.info(
+                    f"[CENSO]  ✓  pre-screening terminó en {elapsed:.1f} min — "
+                    f"{len(_conf_ids)} confórmero(s) sobreviven, ensemble "
+                    f"reconstruido desde {_po.relative_to(censo_dir)} "
+                    f"(geometrías: {_geom_src.name}, ordenado por Gtot)"
+                )
+                return output_xyz
+        log.debug(
+            f"[CENSO]  {_po.name} parseado pero no se pudo reconstruir "
+            f"geometría — probando candidatos .xyz crudos"
+        )
+
     # ── Búsqueda robusta de output: nombres fijos + glob de respaldo ─────────
     # CENSO 2/3 puede escribir en censo_dir directamente o en subdirectorios
     # (CENSO/, prescreening/, etc.) con nombres que varían entre versiones.
+    # NOTA: este fallback se usa solo si no había .out con energías parseables
+    # arriba; estos .xyz traen comentarios "CONF#" sin energía numérica.
     _fixed_candidates = [
         "censo_ensemble_sorted.xyz",
         "censo_ensemble.xyz",
