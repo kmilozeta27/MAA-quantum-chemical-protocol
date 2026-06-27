@@ -42,18 +42,6 @@ Uso (modo multi-temperatura, --multitemp):
 Nota: --start crest y --start opt son equivalentes al inicio (ambos requieren
       que CREST+CENSO corran). Solo usar --start opt/numfreq/sp/tddft/adc2
       para retomar un pipeline con CREST+CENSO ya completados.
-
-Uso (modo expansión conformacional, --expand-crest):
-    Diseñado para casos como el estado B donde la inversión energética GFN2→DFT
-    exige explorar más confórmeros más allá de los primeros N ya calculados.
-    El flujo es: extrae confs CREST[skip:skip+window] → OPT en paralelo (lotes
-    de 3 × 4 cores) → filtro ΔE(DFT) < threshold kcal/mol → NUMFREQ → SP → TDDFT.
-
-    python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest
-    python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest \\
-        --crest-skip 3 --crest-window 17 --dft-threshold 3.0 --parallel 3
-    python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest \\
-        --start numfreq   # salta expand-OPT, retoma desde NUMFREQ
 """
 
 import argparse
@@ -382,12 +370,10 @@ signal.signal(signal.SIGINT,  _sigint_handler)
 signal.signal(signal.SIGTERM, _sigint_handler)
 
 # ─────────────────────────────────────────────
-#  CONSTANTES FÍSICAS / MODO EXPAND
+#  CONSTANTES FÍSICAS
 # ─────────────────────────────────────────────
 
 HARTREE_TO_KCAL     = 627.5094740631   # factor de conversión
-EXPAND_BATCH_SIZE   = 3                # OPTs en paralelo (default; override con --total-cores)
-EXPAND_DFT_THRESHOLD = 3.0             # kcal/mol (default filtro post-OPT)
 
 
 # ─────────────────────────────────────────────
@@ -438,8 +424,8 @@ class ResourceProfile:
         SAFETY_FACTOR          — fracción de RAM reservada para el SO
         MAX_CREST_NPROCS       — límite de cores para CREST/CENSO (xTB)
         MAX_NUMFREQ_NPROCS     — límite de cores para NUMFREQ
-        MAX_OPT_NPROCS_PER_JOB — cores/job en OPT (modo normal y expand)
-        OPT_BATCH_SIZE         — jobs paralelos en OPT modo normal
+        MAX_OPT_NPROCS_PER_JOB — cores/job en OPT
+        OPT_BATCH_SIZE         — jobs paralelos en OPT
         MAX_SP_NPROCS          — cores/job en SP
         SP_BATCH_SIZE          — jobs paralelos en SP modo normal
         TDDFT_NPROCS_PER_JOB   — cores/job en TDDFT
@@ -473,7 +459,7 @@ class ResourceProfile:
         Args:
             total_cores  : CPUs lógicas disponibles (de os.cpu_count() o --cores).
             ram_mb       : RAM total en MB (de psutil o estimada).
-            batch_size   : jobs simultáneos en modo expand (default 1 = modo normal).
+            batch_size   : jobs simultáneos por lote (default 1).
         """
         self.total_cores = total_cores
         self.ram_mb      = ram_mb
@@ -514,7 +500,7 @@ class ResourceProfile:
     @classmethod
     def detect_with_batch(cls, total_cores: int, batch_size: int, ram_mb: int = 0) -> "ResourceProfile":
         """
-        Variante para modo expand: recibe total_cores explícito (de --cores)
+        Variante que recibe total_cores explícito (de --cores)
         y batch_size (de --parallel); recalcula el perfil de recursos.
         """
         if ram_mb <= 0:
@@ -548,15 +534,6 @@ class ResourceProfile:
         opt_batch  = self.batch_size if self.batch_size > 1 else self.OPT_BATCH_SIZE
         sp_batch   = self.batch_size if self.batch_size > 1 else self.SP_BATCH_SIZE
 
-        if self.batch_size > 1:
-            expand_info = (
-                f"\n  Expand batch    : {self.batch_size} jobs × {self.nprocs_opt} cores "
-                f"= {self.batch_size * self.nprocs_opt} cores/lote"
-                f"\n                    RAM/lote ≈ {self.batch_size * ram_opt:.1f} GB"
-            )
-        else:
-            expand_info = ""
-
         return (
             f"  Sistema         : {self.total_cores} CPUs lógicas  "
             f"RAM {ram_total:.0f} GB total / {ram_usable:.0f} GB usable\n"
@@ -570,7 +547,7 @@ class ResourceProfile:
             f"  NumFreq         : 1 job × {self.nprocs_numfreq} cores / {self.maxcore_numfreq} MB  "
             f"→ {ram_nf:.1f} GB  (escala lineal)\n"
             f"  ADC2            : 1 job × {self.nprocs_adc2} cores / {self.maxcore_adc2} MB  "
-            f"→ {ram_adc2:.1f} GB{expand_info}"
+            f"→ {ram_adc2:.1f} GB"
         )
 
     # ── Cálculo interno ──────────────────────────────────────────────────
@@ -589,8 +566,7 @@ class ResourceProfile:
         self.nprocs_crest = min(c, self.MAX_CREST_NPROCS)
 
         # ── OPT ──────────────────────────────────────────────────────────
-        # Modo normal: siempre OPT_BATCH_SIZE jobs × MAX_OPT_NPROCS_PER_JOB cores.
-        # Modo expand (p>1): batch_size viene de --parallel; mismo límite por job.
+        # Siempre OPT_BATCH_SIZE jobs × MAX_OPT_NPROCS_PER_JOB cores.
         effective_opt_batch = p if p > 1 else self.OPT_BATCH_SIZE
         if p <= 1:
             self.nprocs_opt = min(c // max(self.OPT_BATCH_SIZE, 1),
@@ -607,8 +583,7 @@ class ResourceProfile:
         self.maxcore_numfreq = max(500, ram // max(self.nprocs_numfreq, 1))
 
         # ── SP ───────────────────────────────────────────────────────────
-        # Modo normal: siempre SP_BATCH_SIZE jobs × MAX_SP_NPROCS cores.
-        # Modo expand (p>1): mismo esquema que OPT.
+        # Siempre SP_BATCH_SIZE jobs × MAX_SP_NPROCS cores.
         if p <= 1:
             self.nprocs_sp = min(c // max(self.SP_BATCH_SIZE, 1),
                                  self.MAX_SP_NPROCS)
@@ -2411,7 +2386,7 @@ def _extract_conf_ids_from_xyz(source_xyz: Path) -> dict[int, str]:
     Soporta comentarios extXYZ ("CONF7=T ...") y plain ("CONF7  -1218.034197").
     Si un frame no tiene token CONF# en el comentario, se omite del dict.
 
-    Usado por stage_opt y stage_expand_opt para propagar la identificación
+    Usado por stage_opt para propagar la identificación
     CREST original (CONF39, CONF29, etc.) a los directorios de trabajo ORCA,
     evitando el re-etiquetado conf_001, conf_002, ... que borra la trazabilidad.
     """
@@ -2671,7 +2646,7 @@ def stage_sp(freq_dirs: list[Path], mol_dir: Path,
     Devuelve directorios sp exitosos.
 
     batch_size=0  → usa SP_BATCH_SIZE global (modo normal: 3 jobs × 4 cores).
-    batch_size>0  → valor explícito (usado por --expand-crest con --parallel N).
+    batch_size>0  → valor explícito (usado con --parallel N).
     nprocs_per_job / maxcore_per_job sobreescriben los globals NPROCS / MAXCORE
     para cada worker paralelo; si son None se usan los globals vigentes.
     """
@@ -3122,44 +3097,10 @@ def stage_adc2(
     return None
 
 
+
 # ─────────────────────────────────────────────
-#  EXPANSIÓN CONFORMACIONAL (--expand-crest)
+#  STATUS GLOBAL
 # ─────────────────────────────────────────────
-
-def find_opt_minimum(mol_dir: Path, log: logging.Logger) -> Optional[float]:
-    """
-    Escanea runs/<mol>/02_opt/conf_*/opt.out para encontrar la energía DFT
-    mínima entre los confórmeros ya optimizados.
-
-    Se usa como referencia E_ref en el filtro de expansión; si no hay opts
-    previos exitosos devuelve None (el mínimo se determinará sobre el lote nuevo).
-    """
-    opt_root = mol_dir / "02_opt"
-    if not opt_root.exists():
-        return None
-
-    min_e  : Optional[float] = None
-    min_id : Optional[str]   = None
-
-    for conf_dir in sorted(opt_root.glob("conf_*")):
-        out_file = conf_dir / "opt.out"
-        if not check_success(out_file):
-            continue
-        e = extract_sp_energy(out_file)
-        if e is not None and (min_e is None or e < min_e):
-            min_e  = e
-            min_id = conf_dir.name
-
-    if min_e is not None:
-        log.info(f"[EXPAND] Mínimo DFT de opts previos: {min_id}  "
-                 f"E = {min_e:.10f} Ha")
-    else:
-        log.info("[EXPAND] Sin opts previos con energía válida — "
-                 "se usará el mínimo dinámico del lote actual")
-    return min_e
-
-
-def _opt_worker(task: dict) -> dict:
     """
     Worker para un único OPT, diseñado para ejecutarse en un hilo de
     ThreadPoolExecutor.  ORCA corre como subproceso externo (libera el GIL),
@@ -3169,9 +3110,9 @@ def _opt_worker(task: dict) -> dict:
         conf_id, conf_dir, atoms, charge, template, nprocs, maxcore, log
     Opcional:
         cpu_list: list[int] de CPUs lógicas exclusivas para este worker,
-                  asignado por el orquestador del lote (stage_expand_opt)
-                  vía assign_cpu_lists() para evitar que OpenMPI distribuya
-                  mal los procesos entre workers concurrentes.
+                  asignado por el orquestador del lote vía assign_cpu_lists()
+                  para evitar que OpenMPI distribuya mal los procesos entre
+                  workers concurrentes.
 
     Devuelve:
         dict con conf_id, conf_dir, energy (Ha o None), success, elapsed (min)
@@ -3210,7 +3151,7 @@ def _opt_worker(task: dict) -> dict:
     energy: Optional[float] = None
     if success:
         if resolve_opt_xyz(conf_dir) is None:
-            log.warning(f"[EXPAND] {conf_id}: ORCA OK pero sin geometría optimizada")
+            log.warning(f"[OPT] {conf_id}: ORCA OK pero sin geometría optimizada")
             success = False
         else:
             energy = extract_sp_energy(out_file)
@@ -3388,223 +3329,6 @@ def _check_cpu_budget(batch_size: int, nprocs_per_job: int, log: logging.Logger)
         )
 
 
-def stage_expand_opt(
-    conformers_xyz : Path,
-    mol_dir        : Path,
-    charge         : int,
-    skip           : int,
-    window         : int,
-    dft_threshold  : float,
-    batch_size     : int,
-    nprocs_per_job : int,
-    maxcore_per_job: int,
-    log            : logging.Logger,
-) -> list[Path]:
-    """
-    Expansión conformacional desde CREST con OPT en paralelo y filtro ΔE DFT.
-
-    Flujo detallado:
-      1. Lee CREST conformers en el rango [skip : skip+window] (índices 0-based).
-      2. Optimiza en lotes de `batch_size` con ThreadPoolExecutor.
-         Cada OPT usa `nprocs_per_job` cores  →  batch_size × nprocs_per_job cores
-         en paralelo. Los lotes son secuenciales; dentro de cada lote los OPTs
-         corren simultáneamente.
-      3. Determina E_ref = mínimo DFT global (opts previos ∪ lote actual).
-      4. Descarta confórmeros con ΔE = E - E_ref > dft_threshold kcal/mol.
-      5. Escribe trazabilidad en mol_dir/expand_discarded.log.
-
-    Args:
-        conformers_xyz  : ruta a 01_crest/crest_conformers.xyz
-        mol_dir         : directorio raíz runs/<mol>/
-        charge          : carga formal
-        skip            : confórmeros CREST ya procesados (se omiten)
-        window          : cuántos confórmeros adicionales intentar
-        dft_threshold   : umbral ΔE en kcal/mol (recomendado 3.0)
-        batch_size      : OPTs simultáneos por lote
-        nprocs_per_job  : cores por job OPT (viene de --nprocs o calculado por --cores)
-        maxcore_per_job : MB/core por job OPT
-        log             : logger del pipeline principal
-
-    Returns:
-        Lista de directorios 02_opt/conf##/ (CONF# CREST en minúsculas) que
-        pasan el filtro, listos para continuar en stage_numfreq.
-    """
-    log.info("=" * 60)
-    log.info(f"[EXPAND] skip={skip}  window={window}  "
-             f"threshold={dft_threshold} kcal/mol  "
-             f"batch={batch_size} × {nprocs_per_job} cores = "
-             f"{batch_size * nprocs_per_job} cores/lote")
-
-    # ── Leer el multi-XYZ de CREST ──────────────────────────────
-    try:
-        all_confs = read(str(conformers_xyz), index=":")
-        if not isinstance(all_confs, list):
-            all_confs = [all_confs]
-    except Exception as exc:
-        log.error(f"[EXPAND] No se pudo leer {conformers_xyz}: {exc}")
-        return []
-
-    total = len(all_confs)
-    log.info(f"[EXPAND] Total confórmeros en CREST: {total}")
-
-    end_idx   = min(skip + window, total)
-    new_confs = all_confs[skip:end_idx]
-
-    if not new_confs:
-        log.warning(f"[EXPAND] Rango [{skip}:{end_idx}] vacío — nada que procesar")
-        return []
-
-    # Extraer CONF# del XYZ para el rango [skip:end_idx]
-    _all_xyz_ids = _extract_conf_ids_from_xyz(conformers_xyz)
-    _expand_labels = [
-        _all_xyz_ids.get(skip + rel, f"CONF{skip + rel + 1}")
-        for rel in range(len(new_confs))
-    ]
-    log.info(f"[EXPAND] Procesando CREST[{skip}:{end_idx}] → "
-             f"IDs: {', '.join(_expand_labels)}  ({len(new_confs)} estructuras)")
-
-    # ── Referencia energética de opts previos ────────────────────
-    e_ref = find_opt_minimum(mol_dir, log)
-
-    # ── Armar lista de tareas ────────────────────────────────────
-    template  = get_template("opt")
-    _check_cpu_budget(batch_size, nprocs_per_job, log)
-    tasks_all = [
-        {
-            "conf_id":  f"conf_{crest_lbl[4:]}",      # CONF39 → conf_39
-            "conf_dir": mol_dir / "02_opt" / f"conf_{crest_lbl[4:]}",
-            "atoms":    atoms,
-            "charge":   charge,
-            "template": template,
-            "nprocs":   nprocs_per_job,
-            "maxcore":  maxcore_per_job,
-            "log":      log,
-        }
-        for crest_lbl, atoms in zip(_expand_labels, new_confs)
-    ]
-
-    n_lotes = -(-len(tasks_all) // batch_size)   # ceiling division
-    log.info(f"[EXPAND] {len(tasks_all)} OPTs en {n_lotes} lote(s) de ≤{batch_size} "
-             f"(CPUs disponibles: {os.cpu_count()})")
-    log.info(f"[EXPAND] Cores por OPT: {nprocs_per_job}  "
-             f"Cores en paralelo por lote: {batch_size * nprocs_per_job}  "
-             f"RAM por lote ≈ {batch_size * nprocs_per_job * maxcore_per_job / 1024:.1f} GB")
-
-    # ── Lotes paralelos ──────────────────────────────────────────
-    opt_results: list[dict] = []
-
-    for b_start in range(0, len(tasks_all), batch_size):
-        batch    = tasks_all[b_start : b_start + batch_size]
-        lote_num = b_start // batch_size + 1
-        ids      = [t["conf_id"] for t in batch]
-
-        # Cores exclusivos por worker dentro de ESTE lote (no solapan entre
-        # sí; se reasignan en cada lote ya que los lotes son secuenciales).
-        cpu_lists = assign_cpu_lists(len(batch), nprocs_per_job)
-        for t, cl in zip(batch, cpu_lists):
-            t["cpu_list"] = cl
-
-        log.info(f"[EXPAND] ── Lote {lote_num}/{n_lotes}: {ids}  "
-                 f"(cores: {[','.join(map(str, cl)) for cl in cpu_lists]})")
-
-        with ThreadPoolExecutor(max_workers=len(batch)) as pool:
-            futures = {pool.submit(_opt_worker, t): t["conf_id"] for t in batch}
-            try:
-                for fut in as_completed(futures):
-                    res = fut.result()
-                    opt_results.append(res)
-                    tag = "✓" if res["success"] else "✗"
-                    e_s = f"{res['energy']:.10f} Ha" if res["energy"] is not None else "—"
-                    log.info(f"[EXPAND]   {tag} {res['conf_id']}  "
-                             f"E = {e_s}  ({res['elapsed']:.1f} min)")
-            except KeyboardInterrupt:
-                log.warning("[EXPAND] Ctrl-C — cancelando lote, esperando workers…")
-                pool.shutdown(wait=False, cancel_futures=True)
-                _kill_active_procs()
-                sys.exit(130)
-
-    # ── Actualizar E_ref con el mínimo del lote actual ───────────
-    ok_new = [r for r in opt_results if r["success"] and r["energy"] is not None]
-
-    if ok_new:
-        e_min_new = min(r["energy"] for r in ok_new)
-        if e_ref is None or e_min_new < e_ref:
-            e_ref = e_min_new
-            log.info(f"[EXPAND] Nuevo mínimo DFT global (lote actual): "
-                     f"{e_ref:.10f} Ha")
-
-    if e_ref is None:
-        log.error("[EXPAND] No se pudo determinar E_ref — imposible aplicar filtro")
-        return []
-
-    # ── Filtro ΔE < dft_threshold ────────────────────────────────
-    log.info(f"[EXPAND] Filtro ΔE < {dft_threshold} kcal/mol  "
-             f"(E_ref = {e_ref:.10f} Ha)")
-
-    passing  : list[Path] = []
-    discarded: list[str]  = []
-
-    for r in sorted(ok_new, key=lambda x: x["energy"]):  # type: ignore[return-value]
-        dE = (r["energy"] - e_ref) * HARTREE_TO_KCAL     # type: ignore[operator]
-        if dE <= dft_threshold:
-            log.info(f"[EXPAND]   ✓  {r['conf_id']}  ΔE = {dE:+.4f} kcal/mol → PASA")
-            passing.append(r["conf_dir"])
-        else:
-            log.info(f"[EXPAND]   ✗  {r['conf_id']}  ΔE = {dE:+.4f} kcal/mol → DESCARTADO")
-            discarded.append(r["conf_id"])
-
-    failed = [r["conf_id"] for r in opt_results if not r["success"]]
-
-    log.info(f"[EXPAND] ─────────────────────────────────────────────")
-    log.info(f"[EXPAND]   OPTs intentados : {len(opt_results)}")
-    log.info(f"[EXPAND]   Fallidos OPT     : {len(failed)}  "
-             f"{'  '.join(failed) if failed else '—'}")
-    log.info(f"[EXPAND]   Pasan filtro     : {len(passing)}")
-    log.info(f"[EXPAND]   Descartados      : {len(discarded)}  "
-             f"{'  '.join(discarded) if discarded else '—'}")
-    log.info(f"[EXPAND] ─────────────────────────────────────────────")
-
-    # ── Trazabilidad en disco (texto legible) ─────────────────────
-    discard_log = mol_dir / "expand_discarded.log"
-    e_ref_str = f"{e_ref:.10f} Ha" if e_ref is not None else "N/A"
-    with open(discard_log, "a") as flog:
-        flog.write(
-            f"\n# {datetime.datetime.now().isoformat()}"
-            f"  threshold={dft_threshold} kcal/mol"
-            f"  E_ref={e_ref_str}\n"
-        )
-        for r in sorted(opt_results, key=lambda x: x["conf_id"]):
-            if r["energy"] is not None and e_ref is not None:
-                dE      = (r["energy"] - e_ref) * HARTREE_TO_KCAL
-                verdict = "PASA" if dE <= dft_threshold else "DESCARTADO"
-            else:
-                dE      = float("nan")
-                verdict = "FALLO_OPT"
-            flog.write(
-                f"  {r['conf_id']}  E={r['energy']}  "
-                f"dE={dE:.4f} kcal/mol  {verdict}\n"
-            )
-
-    # ── Trazabilidad en disco (JSON estructurado, fuente de verdad) ─
-    # Esto es lo que lee la recuperación de --start posteriores a opt,
-    # para no tener que adivinar ni re-derivar qué confs pasaron el
-    # filtro ΔE a partir de qué carpetas quedaron físicamente en 02_opt/.
-    filter_result_path = mol_dir / "expand_filter_result.json"
-    filter_result = {
-        "timestamp":     datetime.datetime.now().isoformat(),
-        "skip":          skip,
-        "window":        window,
-        "dft_threshold": dft_threshold,
-        "e_ref_ha":      e_ref,
-        "passing":       sorted(p.name for p in passing),
-        "discarded":     sorted(discarded),
-        "failed_opt":    sorted(failed),
-    }
-    with open(filter_result_path, "w") as fjson:
-        json.dump(filter_result, fjson, indent=2)
-    log.info(f"[EXPAND] Resultado del filtro guardado en {filter_result_path}")
-
-    return passing
 
 
 # ─────────────────────────────────────────────
@@ -3690,22 +3414,6 @@ Ejemplos (modo normal):
 
   # Ver estado de todos los runs
   python pipeline.py --status
-
-Ejemplos (modo expansión conformacional):
-  # Expande B: 12 cores totales → 3 OPTs simultáneos × 4 cores cada uno
-  python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest --cores 12
-
-  # Control explícito: 2 OPTs simultáneos × 6 cores c/u (= 12 cores)
-  python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest \\
-      --cores 12 --parallel 2
-
-  # Ventana y threshold personalizados
-  python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest \\
-      --cores 12 --crest-skip 3 --crest-window 17 --dft-threshold 3.0
-
-  # Retomar desde NUMFREQ (expand-OPT ya hecho)
-  python pipeline.py --mol molecules/mol_B.xyz --charge -1 --expand-crest \\
-      --cores 8 --start numfreq
         """,
     )
     parser.add_argument("--mol",    type=Path, help="ruta al .xyz de entrada")
@@ -3718,8 +3426,8 @@ Ejemplos (modo expansión conformacional):
     parser.add_argument(
         "--skipnumfreq", action="store_true",
         help=(
-            "Salta NUMFREQ y pasa directo de OPT a SP/TDDFT (modo normal, "
-            "no aplica a --expand-crest). Usa la geometría de 02_opt/ "
+            "Salta NUMFREQ y pasa directo de OPT a SP/TDDFT. "
+            "Usa la geometría de 02_opt/ "
             "directamente como input de SP, sin correcciones térmicas de NumFreq."
         ),
     )
@@ -3734,15 +3442,9 @@ Ejemplos (modo expansión conformacional):
         "--cores", type=int, default=None, metavar="N",
         help=(
             "Cores TOTALES disponibles para el pipeline. El script los distribuye\n"
-            "automáticamente:\n"
-            "  • Modo normal  → todos los cores van a cada job secuencial\n"
-            "                   (OPT / NumFreq / SP / TDDFT)\n"
-            "  • Modo expand  → se reparten entre --parallel jobs en paralelo.\n"
-            "                   Con --parallel P: nprocs_por_job = cores // P\n"
-            "                   (el resto de cores se ignora para no saturar RAM).\n"
+            "automáticamente entre etapas (OPT / NumFreq / SP / TDDFT).\n"
             "  maxcore se recalcula como (RAM_total_MB × 0.85) // cores,\n"
-            "  con RAM_total_MB = 28000 por defecto (ajustar en MAX_RAM_MB).\n"
-            "  Ejemplo: --cores 12 --parallel 3  →  4 cores × 3 OPTs paralelos."
+            "  con RAM_total_MB = 28000 por defecto (ajustar en MAX_RAM_MB)."
         ),
     )
     res_group.add_argument(
@@ -3771,37 +3473,6 @@ Ejemplos (modo expansión conformacional):
         help=f"(avanzado) MB/core para NumFreq. Default: {MAXCORE_NUMFREQ}.",
     )
 
-    # ── Modo expansión conformacional ──────────────────────────────────────
-    parser.add_argument(
-        "--expand-crest", action="store_true",
-        help=(
-            "Modo expansión: extrae confórmeros adicionales de CREST "
-            "(más allá de los ya procesados), los optimiza en paralelo "
-            "y continúa los que pasan el filtro ΔE por NUMFREQ → SP → TDDFT. "
-            "Requiere que CREST ya haya completado (01_crest/ debe existir)."
-        ),
-    )
-    parser.add_argument(
-        "--crest-skip", type=int, default=3, metavar="N",
-        help="confórmeros CREST ya procesados a omitir (default: 3)",
-    )
-    parser.add_argument(
-        "--crest-window", type=int, default=17, metavar="N",
-        help="confórmeros adicionales a intentar (default: 17, i.e. conf_4…20)",
-    )
-    parser.add_argument(
-        "--dft-threshold", type=float, default=EXPAND_DFT_THRESHOLD, metavar="X",
-        help=f"umbral ΔE(DFT) en kcal/mol para el filtro post-OPT "
-             f"(default: {EXPAND_DFT_THRESHOLD})",
-    )
-    parser.add_argument(
-        "--parallel", type=int, default=EXPAND_BATCH_SIZE, metavar="N",
-        help=(
-            f"Número de cálculos simultáneos por lote en modo expand (default: {EXPAND_BATCH_SIZE}). "
-            f"Con --cores C, cada proceso usará C // N cores."
-        ),
-    )
-
     # ── Modo SP + NRoots 1 ─────────────────────────────────────────────────
     parser.add_argument(
         "--nroot", action="store_true",
@@ -3809,7 +3480,7 @@ Ejemplos (modo expansión conformacional):
             "Modo SP+NRoots 1: calcula un SP con TD-DFT mínimo (NRoots 1) "
             "sobre los mejores confórmeros según energía DFT de OPT (02_opt/). "
             "Los inputs se escriben en 06_sp_nroot/<conf_id>/sp_nroot.inp. "
-            "Requiere que OPT haya completado. Incompatible con --expand-crest."
+            "Requiere que OPT haya completado."
         ),
     )
     parser.add_argument(
@@ -3828,8 +3499,7 @@ Ejemplos (modo expansión conformacional):
             "temperaturas definidas por --trange T_ini T_fin N_puntos. "
             "Cada temperatura produce su propio ensemble en "
             "01b_censo_prescreen/T<temp>K/. "
-            "--trange es opcional (default: 274 298 24). "
-            "Compatible con modo normal y --expand-crest."
+            "--trange es opcional (default: 274 298 24)."
         ),
     )
     parser.add_argument(
@@ -3878,8 +3548,6 @@ Ejemplos (modo expansión conformacional):
             "ERROR: --multitemp es incompatible con --nroot. "
             "Corre --nroot como paso independiente sobre un run ya completado."
         )
-
-    # Construir lista de temperaturas
     # En modo --multitemp: --trange es opcional; default = 274 298 24
     # En modo normal: temperatura única = --temperature (default 298.15)
     if args.multitemp:
@@ -3912,21 +3580,11 @@ Ejemplos (modo expansión conformacional):
         # Modo normal: temperatura única
         censo_temperatures = [args.temperature]
 
-    if args.skipnumfreq and args.expand_crest:
-        sys.exit(
-            "ERROR: --skipnumfreq no aplica en modo --expand-crest "
-            "(usa --start numfreq/sp/tddft para saltar etapas ahí)."
-        )
     if args.skipnumfreq and args.start in ("numfreq", "sp", "tddft"):
         sys.exit(
             f"ERROR: --skipnumfreq es incompatible con --start {args.start}. "
             f"--skipnumfreq ya implica saltar NUMFREQ desde OPT; usa solo "
             f"--start opt (o --start crest) junto con --skipnumfreq."
-        )
-    if args.nroot and args.expand_crest:
-        sys.exit(
-            "ERROR: --nroot es incompatible con --expand-crest. "
-            "Corre --nroot como paso independiente sobre un run ya completado."
         )
 
     # ── Resolver recursos: autodetección + flags CLI ──────────────────────────
@@ -3946,25 +3604,21 @@ Ejemplos (modo expansión conformacional):
     if args.cores is not None:
         rp = ResourceProfile.detect_with_batch(
             total_cores = args.cores,
-            batch_size  = args.parallel if args.expand_crest else 1,
+            batch_size  = 1,
         )
     else:
-        rp = ResourceProfile.detect(
-            batch_size = args.parallel if args.expand_crest else 1,
-        )
+        rp = ResourceProfile.detect(batch_size=1)
 
     # Extraer valores del perfil autodetectado
-    nprocs_crest          = rp.nprocs_crest
-    nprocs                = rp.nprocs_opt
-    maxcore               = rp.maxcore_opt
-    nprocs_numfreq        = rp.nprocs_numfreq
-    maxcore_nf            = rp.maxcore_numfreq
-    nprocs_per_expand_job = rp.nprocs_opt     # alias para log posterior
+    nprocs_crest   = rp.nprocs_crest
+    nprocs         = rp.nprocs_opt
+    maxcore        = rp.maxcore_opt
+    nprocs_numfreq = rp.nprocs_numfreq
+    maxcore_nf     = rp.maxcore_numfreq
 
     # Sobreescritura por flags manuales (mayor precedencia)
     if args.nprocs is not None:
         nprocs = args.nprocs
-        nprocs_per_expand_job = args.nprocs
     if args.maxcore is not None:
         maxcore = args.maxcore
     if args.nprocs_numfreq is not None:
@@ -4046,11 +3700,6 @@ Ejemplos (modo expansión conformacional):
              f"→ {nprocs_tddft * maxcore_tddft / 1024:.1f} GB/job  (NRoots 15)")
     log.info(f"Recursos NumFreq       : 1×{nprocs_numfreq} cores / {maxcore_nf} MB  "
              f"→ {nprocs_numfreq * maxcore_nf / 1024:.1f} GB")
-    if args.expand_crest:
-        total_expand_cores = args.parallel * nprocs_per_expand_job
-        total_expand_ram   = total_expand_cores * maxcore / 1024
-        log.info(f"Expand batch           : {args.parallel} × {nprocs_per_expand_job} = "
-                 f"{total_expand_cores} cores en paralelo / RAM estimada ≈ {total_expand_ram:.1f} GB")
     log.info("=" * 60)
 
     # ── Verificación temprana de binarios requeridos ─────────────────────
@@ -4078,211 +3727,6 @@ Ejemplos (modo expansión conformacional):
         log.info(f"Resultados en: {(mol_dir / '06_sp_nroot').resolve()}")
         log.info("=" * 60)
         return
-
-    # ════════════════════════════════════════════════════════════
-    #  MODO EXPANSIÓN CONFORMACIONAL  (--expand-crest)
-    # ════════════════════════════════════════════════════════════
-    if args.expand_crest:
-        log.info("MODO: Expansión conformacional (--expand-crest)")
-        log.info(f"skip={args.crest_skip}  window={args.crest_window}  "
-                 f"threshold={args.dft_threshold} kcal/mol  "
-                 f"paralelo={args.parallel}")
-
-        conformers_xyz = mol_dir / "01_crest" / "crest_conformers.xyz"
-        if not conformers_xyz.exists():
-            sys.exit(
-                f"ERROR: no existe {conformers_xyz}\n"
-                f"       --expand-crest requiere que CREST haya completado "
-                f"previamente (corre primero sin --expand-crest)."
-            )
-
-        # ── expand-OPT: lotes paralelos + filtro ────────────────
-        if start_idx <= STEPS.index("opt"):
-            # Obtenemos el nombre de la etapa actual para decidir qué función llamar
-            current_stage = STEPS[start_idx]
-
-            # Si estamos en expand-OPT, usamos la lógica de batching
-            if current_stage == "opt":
-                output_dirs = stage_expand_opt(
-                    conformers_xyz=conformers_xyz,
-                    mol_dir=mol_dir,
-                    charge=args.charge,
-                    skip=args.crest_skip,
-                    window=args.crest_window,
-                    dft_threshold=args.dft_threshold,
-                    batch_size=args.parallel,
-                    nprocs_per_job=nprocs_per_expand_job,
-                    maxcore_per_job=maxcore,
-                    log=log,
-                )
-
-                if not output_dirs:
-                    log.error(f"[EXPAND-OPT] Ningún confórmero nuevo pasó el filtro — abortando.")
-                    sys.exit(1)
-                expand_opt_dirs = output_dirs
-
-            else:
-                # Recuperar SOLO los confs que pasaron el filtro ΔE.
-                # Fuente de verdad: expand_filter_result.json, escrito por
-                # stage_expand_opt() en la corrida que hizo el OPT+filtro.
-                # NO se reconstruye por índice de carpeta — eso ignoraría el
-                # filtro ΔE y arrastraría confs ya DESCARTADOs (bug histórico).
-                opt_root = mol_dir / "02_opt"
-                if not opt_root.exists():
-                    sys.exit(
-                        f"ERROR: no existe {opt_root}\n"
-                        f"       Con --start {args.start} se esperan OPTs previos "
-                        f"en 02_opt/."
-                    )
-
-                filter_result_path = mol_dir / "expand_filter_result.json"
-                if not filter_result_path.exists():
-                    sys.exit(
-                        f"ERROR: no existe {filter_result_path}\n"
-                        f"       --expand-crest --start {args.start} necesita el "
-                        f"resultado del filtro ΔE de una corrida previa de "
-                        f"stage_expand_opt (etapa OPT). Sin ese archivo no hay "
-                        f"forma segura de saber qué confórmeros pasaron el "
-                        f"filtro vs. cuáles fueron DESCARTADOs.\n"
-                        f"       Corre primero con --start opt (o sin --start) "
-                        f"para regenerar {filter_result_path.name}, o, si lo "
-                        f"perdiste pero conservas el log, reconstrúyelo a mano "
-                        f"a partir de expand_discarded.log."
-                    )
-
-                with open(filter_result_path) as fjson:
-                    filter_result = json.load(fjson)
-
-                passing_names = filter_result.get("passing", [])
-                if not passing_names:
-                    sys.exit(
-                        f"[EXPAND] {filter_result_path} no registra ningún "
-                        f"confórmero PASA — nada que hacer."
-                    )
-
-                expand_opt_dirs = sorted(
-                    opt_root / name for name in passing_names
-                    if (opt_root / name).is_dir()
-                )
-                missing = [n for n in passing_names if not (opt_root / n).is_dir()]
-                if missing:
-                    log.warning(
-                        f"[EXPAND] {len(missing)} conf(s) marcados PASA en "
-                        f"{filter_result_path.name} pero sin carpeta en 02_opt/: "
-                        f"{'  '.join(missing)}"
-                    )
-                if not expand_opt_dirs:
-                    sys.exit(
-                        f"[EXPAND] Ningún directorio de 02_opt/ coincide con los "
-                        f"confs PASA registrados en {filter_result_path.name}."
-                    )
-
-                log.info(
-                    f"[EXPAND] OPT saltado — {len(expand_opt_dirs)} dir(s) "
-                    f"recuperados de 02_opt/ según filtro ΔE registrado "
-                    f"({filter_result_path.name}): "
-                    f"{'  '.join(d.name for d in expand_opt_dirs)}"
-                )
-        else:
-            # Saltamos OPT directamente (start_idx > opt): cargar resultados del filtro
-            opt_root = mol_dir / "02_opt"
-            if not opt_root.exists():
-                sys.exit(
-                    f"ERROR: no existe {opt_root}\n"
-                    f"       Con --start {args.start} se esperan OPTs previos en 02_opt/."
-                )
-
-            filter_result_path = mol_dir / "expand_filter_result.json"
-            if not filter_result_path.exists():
-                sys.exit(
-                    f"ERROR: no existe {filter_result_path}\n"
-                    f"       --expand-crest --start {args.start} necesita el resultado "
-                    f"del filtro ΔE de una corrida previa. Corre primero con --start opt."
-                )
-
-            with open(filter_result_path) as fjson:
-                filter_result = json.load(fjson)
-
-            passing_names = filter_result.get("passing", [])
-            if not passing_names:
-                sys.exit(
-                    f"[EXPAND] {filter_result_path} no registra ningún confórmero PASA."
-                )
-
-            expand_opt_dirs = sorted(
-                opt_root / name for name in passing_names
-                if (opt_root / name).is_dir()
-            )
-            if not expand_opt_dirs:
-                sys.exit(
-                    f"[EXPAND] Ningún directorio de 02_opt/ coincide con los confs PASA."
-                )
-
-            log.info(
-                f"[EXPAND] OPT saltado — {len(expand_opt_dirs)} dir(s) recuperados "
-                f"según filtro ΔE: {'  '.join(d.name for d in expand_opt_dirs)}"
-            )
-
-        # ── NUMFREQ (solo nuevos confs) ──────────────────────────
-        if start_idx <= STEPS.index("numfreq"):
-            freq_dirs = stage_numfreq(expand_opt_dirs, mol_dir, args.charge, log)
-            if not freq_dirs:
-                log.error("[EXPAND] Ningún NUMFREQ completado. Abortando.")
-                sys.exit(1)
-        else:
-            opt_names = {d.name for d in expand_opt_dirs}
-            freq_root = mol_dir / "03_numfreq"
-            freq_dirs = (
-                sorted(d for d in freq_root.glob("conf_*") if d.name in opt_names)
-                if freq_root.exists() else []
-            )
-            log.info(f"[EXPAND] NUMFREQ saltado — "
-                     f"{len(freq_dirs)} dir(s) recuperados de 03_numfreq/")
-
-        # ── SP ───────────────────────────────────────────────────
-        if start_idx <= STEPS.index("sp"):
-            sp_dirs = stage_sp(freq_dirs, mol_dir, args.charge, log,
-                               batch_size=args.parallel,
-                               nprocs_per_job=nprocs_per_expand_job,
-                               maxcore_per_job=maxcore)
-            if not sp_dirs:
-                log.error("[EXPAND] Ningún SP completado. Abortando.")
-                sys.exit(1)
-        else:
-            freq_names = {d.name for d in freq_dirs}
-            sp_root = mol_dir / "04_sp"
-            sp_dirs = (
-                sorted(d for d in sp_root.glob("conf_*") if d.name in freq_names)
-                if sp_root.exists() else []
-            )
-            log.info(f"[EXPAND] SP saltado — "
-                     f"{len(sp_dirs)} dir(s) recuperados de 04_sp/")
-
-        # ── TDDFT ────────────────────────────────────────────────
-        if start_idx <= STEPS.index("tddft"):
-            tddft_dirs = stage_tddft(sp_dirs, mol_dir, args.charge, log)
-            if not tddft_dirs:
-                log.warning("[EXPAND] Ningún TDDFT completado.")
-            else:
-                log.info(f"[EXPAND] {len(tddft_dirs)} espectros TD-DFT calculados ✓")
-        else:
-            log.info("[EXPAND] TDDFT no incluido en esta ejecución")
-
-        # ── ADC2 (obligatoria, confórmero dominante por E_SP) ────
-        if start_idx <= STEPS.index("adc2"):
-            adc2_dir = stage_adc2(mol_dir, args.charge, log, mol_name=mol_name)
-            if adc2_dir is None:
-                log.warning("[EXPAND] No se pudo completar la validación ADC2.")
-            else:
-                log.info(f"[EXPAND] ADC2 completado ✓ → {adc2_dir}")
-        else:
-            log.info("[EXPAND] ADC2 no incluido en esta ejecución")
-
-        log.info("=" * 60)
-        log.info("PIPELINE (EXPAND) FINALIZADO")
-        log.info(f"Resultados en: {mol_dir.resolve()}")
-        log.info("=" * 60)
-        return   # no continuar al flujo normal
 
     # ════════════════════════════════════════════════════════════
     #  MODO NORMAL
