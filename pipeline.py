@@ -205,6 +205,45 @@ OMP_ENV: dict = build_omp_env(NPROCS)
 STEPS = ["crest", "opt", "numfreq", "sp", "tddft", "adc2"]
 
 # ─────────────────────────────────────────────
+#  NOHUP — lanzamiento inmune a HUP
+# ─────────────────────────────────────────────
+
+# Controla si todos los subprocesos de cómputo (CREST, CENSO, ORCA)
+# se lanzan con `nohup`. Cuando está activo, el proceso hijo ignora
+# SIGHUP y sobrevive al cierre del terminal o a una desconexión SSH.
+#
+# Valor por defecto: True (comportamiento recomendado para cálculos largos).
+#
+# Cómo cambiarlo sin tocar el código:
+#   — En el futuro se leerá desde environment.yml o pipeline_config.local.yml.
+#     Por ahora, la única forma de desactivarlo es poner USE_NOHUP = False
+#     aquí, o sobreescribir la variable antes de importar el módulo.
+#
+# Implementación:
+#   _apply_nohup(cmd) antepone ["nohup"] al comando si USE_NOHUP es True.
+#   Para subprocess.Popen (ORCA) se combina con start_new_session=True para
+#   asegurar que el proceso hijo quede en su propio grupo de procesos y no
+#   reciba SIGHUP del terminal padre.
+USE_NOHUP: bool = True
+
+
+def _apply_nohup(cmd: list[str]) -> list[str]:
+    """
+    Antepone 'nohup' al comando si USE_NOHUP está activo.
+
+    Ejemplo:
+        ["orca", "calc.inp"]  →  ["nohup", "orca", "calc.inp"]
+
+    No modifica el comando si USE_NOHUP es False, lo que permite
+    recuperar el comportamiento anterior sin tocar las llamadas a
+    subprocess en el resto del script.
+    """
+    if USE_NOHUP:
+        return ["nohup"] + cmd
+    return cmd
+
+
+# ─────────────────────────────────────────────
 #  GESTIÓN DE SEÑALES / CTRL-C
 # ─────────────────────────────────────────────
 
@@ -854,22 +893,30 @@ def run_orca(inp_file: Path, out_file: Path, log: logging.Logger,
     if cpu_list:
         cpu_str = ",".join(str(c) for c in cpu_list)
         cmd = ["taskset", "-c", cpu_str] + cmd
-        log.info(f"  ▶  lanzando ORCA: {inp_file.name}  (cores {cpu_str})")
+        log.info(f"  ▶  lanzando ORCA: {inp_file.name}  (cores {cpu_str})"
+                 + ("  [nohup]" if USE_NOHUP else ""))
     else:
-        log.info(f"  ▶  lanzando ORCA: {inp_file.name}")
+        log.info(f"  ▶  lanzando ORCA: {inp_file.name}"
+                 + ("  [nohup]" if USE_NOHUP else ""))
 
     t0       = time.time()
     timeout  = timeout_hours * 3600
     proc_env = env if env is not None else build_omp_env(NPROCS)
 
+    # start_new_session=True coloca el proceso en un nuevo grupo de procesos,
+    # evitando que reciba SIGHUP al cerrarse el terminal padre — complementa
+    # el nohup del comando cuando USE_NOHUP es True.  Con USE_NOHUP=False se
+    # mantiene el comportamiento original: Ctrl-C propaga al grupo y
+    # _sigint_handler puede terminar los jobs sin wait() pendiente.
     try:
         with open(out_file, "w") as fout:
             proc = subprocess.Popen(
-                cmd,
+                _apply_nohup(cmd),
                 stdout=fout,
                 stderr=subprocess.STDOUT,
                 cwd=inp_file.parent,
                 env=proc_env,
+                start_new_session=USE_NOHUP,
             )
 
         # Registrar para que _sigint_handler pueda matar el proceso
@@ -940,7 +987,8 @@ def stage_crest(mol_xyz: Path, mol_dir: Path, charge: int,
 
     safe_copy(mol_xyz, input_xyz)
 
-    log.info(f"[CREST] lanzando sobre {mol_xyz.name}  (carga={charge})")
+    log.info(f"[CREST] lanzando sobre {mol_xyz.name}  (carga={charge})"
+             + ("  [nohup]" if USE_NOHUP else ""))
     cmd = [
         str(CREST_BIN),
         str(input_xyz.name),
@@ -955,12 +1003,13 @@ def stage_crest(mol_xyz: Path, mol_dir: Path, charge: int,
     try:
         with open(crest_dir / "crest.log", "w") as flog:
             proc = subprocess.run(
-                cmd,
+                _apply_nohup(cmd),
                 stdout=flog,
                 stderr=subprocess.STDOUT,
                 cwd=crest_dir,
                 env=build_omp_env(NPROCS_CREST),
                 timeout=CREST_TIMEOUT_HOURS * 3600,
+                start_new_session=USE_NOHUP,
             )
         returncode = proc.returncode
     except subprocess.TimeoutExpired:
@@ -1368,14 +1417,16 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
                 log.info(
                     f"[CENSO-RECOVER]  ▶  relanzando CENSO con --reload "
                     f"({_recovered_json.name})"
+                    + ("  [nohup]" if USE_NOHUP else "")
                 )
                 try:
                     with open(censo_dir / "censo_recover.log", "w") as _flog:
                         _proc = subprocess.run(
-                            cmd_reload,
+                            _apply_nohup(cmd_reload),
                             stdout=_flog, stderr=subprocess.STDOUT,
                             cwd=censo_dir, env=build_omp_env(NPROCS_CREST),
                             timeout=CENSO_TIMEOUT_HOURS * 3600,
+                            start_new_session=USE_NOHUP,
                         )
                     # Buscar el ensemble de salida (mismo esquema que abajo)
                     _fixed = [
@@ -1507,14 +1558,16 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
     ]
 
     log.info(f"[CENSO]  ▶  lanzando pre-screening sobre {conformers_xyz.name} "
-             f"(carga={charge}, T={temperature:.2f} K)")
+             f"(carga={charge}, T={temperature:.2f} K)"
+             + ("  [nohup]" if USE_NOHUP else ""))
     t0 = time.time()
     try:
         with open(censo_dir / "censo.log", "w") as flog:
             proc = subprocess.run(
-                cmd, stdout=flog, stderr=subprocess.STDOUT,
+                _apply_nohup(cmd), stdout=flog, stderr=subprocess.STDOUT,
                 cwd=censo_dir, env=build_omp_env(NPROCS_CREST),
                 timeout=CENSO_TIMEOUT_HOURS * 3600,
+                start_new_session=USE_NOHUP,
             )
         returncode = proc.returncode
     except subprocess.TimeoutExpired:
