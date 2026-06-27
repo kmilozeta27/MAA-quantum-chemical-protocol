@@ -18,8 +18,8 @@
 exp_lambda:
 
   # ── M-Gly:Val (Mycosporine-Glycine:Valine) ─────────────────────────────
-  # λmax experimental: ~335 nm  (UV-Vis en H2O, organismos antárticos)
-  # Ref: Shick & Dunlap 2002; Wada et al. 2015; dato propio pendiente pub.
+  # λmax experimental: ~335 nm
+  # Ref: - Karentz 1991 y Geraldes & Pinto 2021
   A:   335.0   # estado A — carboxilato libre (pKa ~3.5)
   B:   335.0   # estado B — amino protonado   (pKa ~8.2)
   C:   335.0   # estado C — dianión
@@ -27,8 +27,8 @@ exp_lambda:
   R:   335.0   # estado R — neutro tautómero
 
   # ── Shinorine ──────────────────────────────────────────────────────────
-  # λmax experimental: ~334 nm  (UV-Vis en H2O)
-  # Ref: Nakamura et al. 1982; Conde et al. 2000
+  # λmax experimental: ~334 nm
+  # Ref: Matsuyama 2015 y Geraldes & Pinto 2021
   SA:  334.0   # estado A
   SB:  334.0   # estado B
   SC:  334.0   # estado C
@@ -37,9 +37,30 @@ exp_lambda:
 
   # ── Porphyra-334 ───────────────────────────────────────────────────────
   # λmax experimental: ~334 nm
-  # Ref: Carreto et al. 1990
-  # PA:  334.0
-  # PR:  334.0
+  # Ref: Hatakeyama 2019 y Geraldes & Pinto 2021
+  PA:  334.0
+  PB:  334.0
+  PC:  334.0
+  PD:  334.0
+  PR:  334.0
+
+  # ── Palythine ───────────────────────────────────────────────────────
+  # λmax experimental: ~320 nm
+  # Ref: Sampedro 2011 y Geraldes & Pinto 2021
+  PA:  320.0
+  PB:  320.0
+  PC:  320.0
+  PD:  320.0
+  PR:  320.0
+
+  # ── M-Gly (Mycosporine-Glycine) ───────────────────────────────────────────────────────
+  # λmax experimental: ~334 nm
+  # Ref: Matsuyama 2015, Omidyan 2013 y Geraldes & Pinto 2021
+  PA:  310.0
+  PB:  310.0
+  PC:  310.0
+  PD:  310.0
+  PR:  310.0
 
   # ── Plantilla para molécula nueva ──────────────────────────────────────
   # NombreCarpeta: 000.0   # descripción, referencia
