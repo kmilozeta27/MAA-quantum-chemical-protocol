@@ -815,6 +815,76 @@ def extract_sp_energy(out_file: Path) -> Optional[float]:
     return None
 
 
+def extract_adc2_lambda(out_file: Path) -> Optional[tuple[float, float, float]]:
+    """
+    Extrae λmax (nm), E (eV) y fosc de un output ADC(2)/ORCA (nroots 1, S0→S1).
+
+    Busca el bloque "ABSORPTION SPECTRUM VIA TRANSITION ELECTRIC DIPOLE MOMENTS"
+    dentro de la sección "SPECTRUM FOR RIGHT TRANSITION MOMENTS" — que es el
+    referente estándar para ADC(2) en ORCA — y lee la primera fila de datos
+    (única raíz calculada, transición 0-1A → 1-1A).
+
+    Formato esperado de la línea de datos:
+        0-1A  ->  1-1A    <eV>   <cm-1>   <nm>   <fosc>   ...
+
+    Devuelve:
+        (lambda_nm, energy_eV, fosc)  si se encontraron los datos
+        None                          si no se pudo parsear
+
+    Notas:
+    - El output ADC(2) de ORCA incluye tres tablas (RIGHT, LEFT, LEFT-RIGHT).
+      Solo se extrae la tabla RIGHT (primera que aparece), ignorando las demás.
+    - Se toma la primera línea de datos encontrada: válido cuando nroots=1.
+    - El patrón de línea de cabecera es robusto a cambios menores de espaciado.
+    """
+    if not out_file.exists():
+        return None
+
+    # Patrón de la línea de datos: al menos 7 columnas separadas por espacios.
+    # Columnas: label_from -> label_to  eV  cm-1  nm  fosc  D2  DX  DY  DZ
+    # Ejemplo:
+    #   0-1A  ->  1-1A    3.464792   27945.4   357.8   0.394893694   4.65206  ...
+    _data_re = re.compile(
+        r"^\s*\S+\s+->\s+\S+"           # etiquetas (e.g. "0-1A  ->  1-1A")
+        r"\s+([\d.]+)"                   # grupo 1: energía en eV
+        r"\s+[\d.]+\s+([\d.]+)"         # cm-1 (ignorado), grupo 2: nm
+        r"\s+([\d.]+)"                   # grupo 3: fosc
+    )
+    _right_header = "SPECTRUM FOR RIGHT TRANSITION MOMENTS"
+    _abs_header   = "ABSORPTION SPECTRUM VIA TRANSITION ELECTRIC DIPOLE MOMENTS"
+
+    try:
+        text = out_file.read_text(errors="replace")
+    except OSError:
+        return None
+
+    # Localizar el bloque RIGHT (primera aparición) y buscar la tabla de absorción
+    right_pos = text.find(_right_header)
+    if right_pos == -1:
+        return None
+
+    # Dentro del bloque RIGHT buscar la línea de cabecera de la tabla
+    abs_pos = text.find(_abs_header, right_pos)
+    if abs_pos == -1:
+        return None
+
+    # Avanzar línea a línea desde la cabecera hasta la primera fila de datos
+    # (hay una línea de sub-cabecera con "(eV) (cm-1) ..." y la línea de "---")
+    segment = text[abs_pos:]
+    for line in segment.splitlines():
+        m = _data_re.match(line)
+        if m:
+            try:
+                energy_ev  = float(m.group(1))
+                lambda_nm  = float(m.group(2))
+                fosc       = float(m.group(3))
+                return (lambda_nm, energy_ev, fosc)
+            except ValueError:
+                return None
+
+    return None
+
+
 def safe_copy(src: Path, dst: Path) -> bool:
     """
     Copia src → dst solo si son archivos distintos.
@@ -2815,6 +2885,21 @@ def stage_adc2(mol_dir: Path, charge: int, log: logging.Logger) -> Optional[Path
     ok = run_orca(inp_file, out_file, log)
     if ok:
         log.info(f"[ADC2] {conf_id} completado ✓ → {adc2_dir}")
+
+        # ── Extraer λmax S0→S1 de la única raíz calculada ────────
+        result = extract_adc2_lambda(out_file)
+        if result is not None:
+            lambda_nm, energy_ev, fosc = result
+            log.info(
+                f"[ADC2] λmax(S0→S1) = {lambda_nm:.1f} nm  "
+                f"({energy_ev:.4f} eV)  fosc = {fosc:.6f}"
+            )
+        else:
+            log.warning(
+                f"[ADC2] {conf_id}: cálculo OK pero no se pudo extraer λmax "
+                f"del espectro RIGHT — revisar {out_file.name}"
+            )
+
         return adc2_dir
 
     log.error(f"[ADC2] {conf_id} falló.")
