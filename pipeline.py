@@ -1059,9 +1059,20 @@ def _censo_prescreen_diagnose_dir(censo_dir: Path, log: logging.Logger) -> dict:
 
     No lanza excepciones; si no hay carpetas CONF* devuelve todo en cero.
     """
+    # CENSO 3.x escribe las carpetas CONF* dentro de censo_dir/0_PRESCREENING/
+    # (ver censo.log: "...using XtbProc in 0_PRESCREENING/CONF141/xtb_gsolv...").
+    # Antes solo se miraba censo_dir directamente y nunca se encontraba nada
+    # que recuperar. Buscamos en censo_dir y, si existe, en censo_dir/0_PRESCREENING/.
+    _search_roots = [censo_dir]
+    _prescreen_subdir = censo_dir / "0_PRESCREENING"
+    if _prescreen_subdir.is_dir():
+        _search_roots.append(_prescreen_subdir)
+
     conf_dirs = sorted(
-        [d for d in censo_dir.iterdir() if d.is_dir() and d.name.startswith("CONF")]
-        if censo_dir.is_dir() else [],
+        {
+            d for root in _search_roots if root.is_dir()
+            for d in root.iterdir() if d.is_dir() and d.name.startswith("CONF")
+        },
         key=lambda d: int(re.search(r"\d+", d.name).group())
                       if re.search(r"\d+", d.name) else 0,
     )
@@ -1227,10 +1238,33 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
 
     output_xyz = censo_dir / "censo_ensemble_sorted.xyz"
 
-    # Skip si ya existe y no está vacío
-    if output_xyz.exists() and output_xyz.stat().st_size > 0:
-        log.info(f"[CENSO]  ↩  pre-screening ya completado — saltando ({output_xyz.name})")
+    # ── Verificación de que el ensemble proviene de SCREENING, no solo de
+    # prescreening. output_xyz es un nombre genérico que históricamente se
+    # llenaba con cualquier .xyz encontrado (incluido el de prescreening);
+    # ahora exigimos evidencia de que 1_SCREENING.out existe y es parseable
+    # antes de considerar el run completo. Si solo hay prescreening (p.ej.
+    # de un run anterior con --prescreening sin --screening), se trata como
+    # incompleto y se relanza CENSO con --screening incluido.
+    _screening_out_candidates = [
+        censo_dir / "1_SCREENING.out",
+        censo_dir / "CENSO" / "1_SCREENING.out",
+        censo_dir / "prescreening" / "1_SCREENING.out",
+    ]
+    _has_screening = any(
+        parse_censo_screening_out(_p) for _p in _screening_out_candidates
+    )
+
+    # Skip solo si el ensemble existe Y hay evidencia de screening real
+    if output_xyz.exists() and output_xyz.stat().st_size > 0 and _has_screening:
+        log.info(f"[CENSO]  ↩  screening ya completado — saltando ({output_xyz.name})")
         return output_xyz
+
+    if output_xyz.exists() and output_xyz.stat().st_size > 0 and not _has_screening:
+        log.warning(
+            f"[CENSO]  ⚠  {output_xyz.name} existe pero proviene solo de "
+            f"prescreening (no se encontró 1_SCREENING.out parseable) — "
+            f"se considera incompleto. Relanzando CENSO con --screening."
+        )
 
     # ── Recuperación de carpeta parcial de CENSO (prescreening interrumpido) ──
     # Si existe la carpeta 01b_censo_prescreen/ con carpetas CONF* internas
@@ -1273,6 +1307,39 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
                 f"— reconstruyendo {censo_dir.name}/0_PRESCREENING_recovered.json"
             )
             _recovered_json = _censo_prescreen_recover(censo_dir, log)
+        elif _diag["n_full"] > 0:
+            # Recovery parcial: algunos CONF* completos, otros no.
+            # CENSO --reload exige el set COMPLETO (no parcial), así que
+            # no podemos mezclar incompletos en el JSON. En vez de descartar
+            # los n_full ya calculados, borramos SOLO las carpetas incompletas
+            # y reconstruimos el JSON sobre el subconjunto consistente que
+            # queda (n_full == nuevo n_total). Los pocos incompletos se
+            # recalculan al relanzar CENSO limpio sobre el ensemble reducido.
+            _n_incomplete = _diag["n_total"] - _diag["n_full"]
+            log.warning(
+                f"[CENSO]  ⚙  {_diag['n_full']}/{_diag['n_total']} CONF dirs "
+                f"completas — eliminando {_n_incomplete} incompleta(s) y "
+                f"reconstruyendo recovery sobre el resto en vez de recalcular todo"
+            )
+            for _cd in _diag["conf_dirs"]:
+                sp_ok  = _parse_prescreening_orca_sp(_cd / "sp" / "sp.out") is not None
+                gas_ok = _parse_prescreening_xtb_energy(_cd / "xtb_gsolv" / "gas.out") is not None
+                sol_ok = _parse_prescreening_xtb_energy(_cd / "xtb_gsolv" / "solv.out") is not None
+                if not (sp_ok and gas_ok and sol_ok):
+                    try:
+                        shutil.rmtree(_cd)
+                        log.debug(f"[CENSO]  rm -rf {_cd.name} (incompleta)")
+                    except OSError as _e:
+                        log.warning(f"[CENSO]  no se pudo eliminar {_cd.name}: {_e}")
+            _diag = _censo_prescreen_diagnose_dir(censo_dir, log)
+            if _diag["can_recover"]:
+                _recovered_json = _censo_prescreen_recover(censo_dir, log)
+            else:
+                log.warning(
+                    "[CENSO]  ⚠  diagnóstico tras limpieza parcial sigue "
+                    "inconsistente — recovery no es posible"
+                )
+                _recovered_json = None
         else:
             # Datos incompletos → el recovery no es posible; limpiar y relanzar
             _recovered_json = None
