@@ -2679,6 +2679,580 @@ def export_gv_appendix(df_gv: pd.DataFrame, mol_name: str, fmt: str):
             print(f"  GoodVibes appendix XLSX → {xlsx_gv}")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  MÓDULO ADC(2) — extracción de λ_max y comparación con TD-DFT
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#  Fundamento:
+#  ADC(2) (Algebraic Diagrammatic Construction, segundo orden) es un método
+#  ab initio para estados excitados más preciso que TD-DFT pero también más
+#  costoso. La comparación sistemática entre λ_max(TD-DFT) y λ_max(ADC2)
+#  permite evaluar si el error del funcional es sistemático (desplazamiento
+#  constante) y si puede corregirse empíricamente aplicando un Δλ = λ_TDDFT - λ_ADC2
+#  uniforme al espectro UV-Vis calculado con TD-DFT.
+#
+#  Estructura de archivos esperada:
+#    runs/<mol>/07_adc2/conf_<id>/adc2.out
+#
+#  Por cada conformero se parsea UN root (nroots 1), extrayendo:
+#    - E_eV     : energía de excitación vertical (eV)
+#    - wl_nm    : longitud de onda (nm)
+#    - fosc     : fuerza de oscilador (del bloque LEFT-RIGHT, el más equilibrado)
+#
+#  Luego se calcula λ_max ADC2 Boltzmann-promediada al igual que en TDDFT y
+#  se compara estado a estado con λ_max TDDFT.
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+ADC2_SUBDIR = "07_adc2"   # subcarpeta dentro de runs/<mol>/
+
+
+def parse_adc2_excitations(adc2_out: Path) -> list[dict]:
+    """
+    Extrae la(s) excitación(es) del bloque ADC(2) de un output ORCA 6.
+
+    Busca el bloque "ABSORPTION SPECTRUM VIA TRANSITION ELECTRIC DIPOLE MOMENTS"
+    del espectro LEFT-RIGHT (el más equilibrado entre los tres que imprime ORCA
+    para ADC2: RIGHT, LEFT y LEFT-RIGHT). Si no encuentra el bloque LEFT-RIGHT,
+    usa el bloque RIGHT como fallback.
+
+    Formato de la línea de datos (ORCA 6):
+        0-1A  ->  1-1A    3.464792   27945.4   357.8   0.416153266   ...
+
+    Retorna lista de dicts con:
+        state      : int  — número de root (1, 2, …)
+        E_eV       : float — energía de excitación (eV)
+        E_cm1      : float — energía en cm⁻¹
+        wl_nm      : float — longitud de onda (nm)
+        fosc       : float — fuerza de oscilador (LEFT-RIGHT si disponible)
+        fosc_right : float — fuerza de oscilador RIGHT (siempre disponible)
+        fosc_left  : float — fuerza de oscilador LEFT (si disponible)
+        source     : str  — qué bloque se usó como fosc principal
+    """
+    if not adc2_out.exists():
+        return []
+
+    try:
+        text = adc2_out.read_text(errors="replace")
+    except OSError:
+        return []
+
+    lines = text.splitlines()
+
+    # Patrón para líneas de excitación del bloque de absorción:
+    # "  0-1A  ->  1-1A    3.464792   27945.4   357.8   0.416153266  ..."
+    pat_line = re.compile(
+        r"^\s*(\d+)-\S+\s*->\s*(\d+)-\S+\s+"   # initial_root -> final_root
+        r"([\d.]+)\s+"                           # E_eV
+        r"([\d.]+)\s+"                           # E_cm-1
+        r"([\d.]+)\s+"                           # wl_nm
+        r"([\d.]+)"                              # fosc
+    )
+
+    # Buscar los tres bloques de absorción que imprime ADC2.
+    # ORCA 6 los imprime en este orden: RIGHT, LEFT, LEFT-RIGHT.
+    # Cada bloque está precedido por su título y la cabecera de columnas.
+    block_tags = {
+        "right":      "SPECTRUM FOR RIGHT TRANSITION MOMENTS",
+        "left":       "SPECTRUM FOR LEFT TRANSITION MOMENTS",
+        "left_right": "SPECTRUM FOR LEFT-RIGHT TRANSITION MOMENTS",
+    }
+    # La línea de datos de absorción viene tras el separador "---" y la cabecera;
+    # marcamos el inicio del bloque con "ABSORPTION SPECTRUM VIA TRANSITION ELECTRIC"
+    abs_header = "ABSORPTION SPECTRUM VIA TRANSITION ELECTRIC DIPOLE MOMENTS"
+
+    # Recolectar excitaciones por tipo de bloque
+    collected: dict[str, list[dict]] = {"right": [], "left": [], "left_right": []}
+
+    current_block: Optional[str] = None
+    in_abs_block   = False
+
+    for line in lines:
+        # Detectar a qué bloque de momentos de transición entramos
+        for key, tag in block_tags.items():
+            if tag in line:
+                current_block = key
+                in_abs_block  = False
+                break
+
+        # Dentro del bloque correcto, esperar el encabezado de absorción
+        if current_block and not in_abs_block and abs_header in line:
+            in_abs_block = True
+            continue
+
+        if in_abs_block and current_block:
+            m = pat_line.match(line)
+            if m:
+                root_initial = int(m.group(1))
+                root_final   = int(m.group(2))
+                # El estado excitado es root_final (convenio ORCA: "0->1" = S1)
+                state_n = root_final if root_final > 0 else 1
+                collected[current_block].append({
+                    "state":  state_n,
+                    "E_eV":   float(m.group(3)),
+                    "E_cm1":  float(m.group(4)),
+                    "wl_nm":  float(m.group(5)),
+                    "fosc":   float(m.group(6)),
+                })
+            # Salir del bloque si encontramos una línea vacía seguida de "---"
+            # o el comienzo de otro bloque (se detectará en el bucle externo)
+
+    # Construir lista final cruzando los tres bloques
+    # Usamos LEFT-RIGHT como fosc principal; si no existe, RIGHT.
+    primary   = collected["left_right"] or collected["right"]
+    right_map = {e["state"]: e["fosc"] for e in collected["right"]}
+    left_map  = {e["state"]: e["fosc"] for e in collected["left"]}
+
+    result = []
+    for exc in primary:
+        s = exc["state"]
+        result.append({
+            "state":      s,
+            "E_eV":       exc["E_eV"],
+            "E_cm1":      exc["E_cm1"],
+            "wl_nm":      exc["wl_nm"],
+            "fosc":       exc["fosc"],
+            "fosc_right": right_map.get(s, float("nan")),
+            "fosc_left":  left_map.get(s, float("nan")),
+            "source":     "left_right" if collected["left_right"] else "right",
+        })
+    return result
+
+
+def collect_adc2_results(mol_name: str) -> pd.DataFrame:
+    """
+    Recopila todas las excitaciones ADC(2) de los confórmeros de una molécula.
+
+    Estructura esperada:
+        runs/<mol>/07_adc2/conf_<id>/adc2.out
+
+    Retorna DataFrame con columnas:
+        conformer, state, E_eV, E_cm1, wl_nm, fosc, fosc_right, fosc_left, source
+    O DataFrame vacío si no hay archivos.
+    """
+    mol_dir   = WORK_ROOT / mol_name
+    adc2_dir  = mol_dir / ADC2_SUBDIR
+    if not adc2_dir.exists():
+        return pd.DataFrame()
+
+    rows = []
+    for conf_dir in sorted(adc2_dir.glob("conf_*")):
+        if not conf_dir.is_dir():
+            continue
+        conf_id  = conf_dir.name
+        adc2_out = conf_dir / "adc2.out"
+        for exc in parse_adc2_excitations(adc2_out):
+            rows.append({"conformer": conf_id, **exc})
+
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+def compute_adc2_lambda_max(
+    df_adc2: pd.DataFrame,
+    df_conf: pd.DataFrame,
+    temp_label: str = "298K",
+) -> Optional[float]:
+    """
+    Calcula λ_max ADC(2) Boltzmann-promediado (igual que en TDDFT).
+
+    Usa la columna boltz_{temp_label} de df_conf.
+    Sólo considera el estado S1 (state == 1).
+
+    Retorna λ_max en nm o None si no hay datos suficientes.
+    """
+    if df_adc2.empty or df_conf.empty:
+        return None
+
+    col_b = f"boltz_{temp_label}"
+    if col_b not in df_conf.columns:
+        return None
+
+    s1 = df_adc2[df_adc2["state"] == 1].copy()
+    if s1.empty:
+        return None
+
+    s1 = s1.merge(df_conf[["conformer", col_b]], on="conformer", how="left")
+    w  = s1[col_b].fillna(0)
+    if w.sum() <= 0:
+        return None
+
+    return float((s1["wl_nm"] * w).sum() / w.sum())
+
+
+# ─────────────────────────────────────────────
+#  COMPARACIÓN ADC2 vs TDDFT (ΔTDDFT-ADC2)
+# ─────────────────────────────────────────────
+
+def compare_adc2_tddft(
+    mols: Optional[list[str]] = None,
+    temp_label: str = "298K",
+) -> pd.DataFrame:
+    """
+    Compara λ_max(TD-DFT) vs λ_max(ADC2) entre estados de protonación.
+
+    Para cada molécula disponible en runs/ que tenga datos TD-DFT Y ADC2,
+    calcula:
+        lambda_tddft_nm   : λ_max Boltzmann-promediado TD-DFT (nm)
+        lambda_adc2_nm    : λ_max Boltzmann-promediado ADC2 (nm)
+        delta_nm          : λ_TDDFT - λ_ADC2 (nm)
+                            > 0 → TDDFT sobreestima λ (redshift)
+                            < 0 → TDDFT subestima λ (blueshift)
+        delta_eV          : conversión a eV  (Δ positivo = TDDFT demasiado bajo en energía)
+        n_confs_adc2      : número de confórmeros con ADC2 completado
+        n_confs_tddft     : número de confórmeros con TDDFT disponible
+
+    También imprime un análisis de sistematicidad:
+        - ¿Es Δ constante entre estados? (std_delta → corrección sistemática viable)
+        - Corrección empírica recomendada: shift = mean(Δ) ± std(Δ)
+
+    Parámetros
+    ----------
+    mols        : lista de nombres de mol (directorios en runs/). None → todos.
+    temp_label  : temperatura para el Boltzmann (default "298K").
+
+    Retorna DataFrame con una fila por molécula.
+    """
+    if mols is None:
+        mols = sorted(p.name for p in WORK_ROOT.iterdir()
+                      if p.is_dir() and (p / "04_sp").exists())
+
+    rows = []
+    for mol in mols:
+        # ── Cargar TDDFT ───────────────────────────────────────────────────
+        try:
+            df_conf, df_tddft = collect_results(mol)
+        except Exception as e:
+            warnings.warn(f"[ADC2 vs TDDFT] {mol}: error al cargar TDDFT — {e}")
+            df_conf  = pd.DataFrame()
+            df_tddft = pd.DataFrame()
+
+        lmax_tddft: Optional[float] = None
+        n_confs_tddft = 0
+        if not df_tddft.empty and not df_conf.empty:
+            lmax_tddft    = df_conf.attrs.get("lambda_max_boltz_298K") \
+                            if temp_label == "298K" else \
+                            _boltz_weighted_lmax(df_tddft, df_conf, temp_label)
+            n_confs_tddft = int(df_tddft["conformer"].nunique())
+
+        # ── Cargar ADC2 ────────────────────────────────────────────────────
+        df_adc2      = collect_adc2_results(mol)
+        lmax_adc2: Optional[float] = None
+        n_confs_adc2 = 0
+        if not df_adc2.empty and not df_conf.empty:
+            lmax_adc2    = compute_adc2_lambda_max(df_adc2, df_conf, temp_label)
+            n_confs_adc2 = int(df_adc2["conformer"].nunique())
+
+        # ── Δ = TDDFT − ADC2 ──────────────────────────────────────────────
+        delta_nm: Optional[float] = None
+        delta_eV: Optional[float] = None
+        if lmax_tddft is not None and lmax_adc2 is not None and lmax_adc2 > 0:
+            delta_nm = lmax_tddft - lmax_adc2
+            # Conversión eV: E = hc/λ → ΔE ≈ -hc·Δλ/λ² (diferencia de energías)
+            # Calculamos directamente como diferencia de energías en eV:
+            ev_tddft = 1239.84193 / lmax_tddft   # eV
+            ev_adc2  = 1239.84193 / lmax_adc2    # eV
+            delta_eV = ev_tddft - ev_adc2         # >0 → TDDFT subestima E (redshift)
+
+        rows.append({
+            "molecule":        mol,
+            "lambda_tddft_nm": lmax_tddft,
+            "lambda_adc2_nm":  lmax_adc2,
+            "delta_nm":        delta_nm,        # TDDFT − ADC2 en nm
+            "delta_eV":        delta_eV,        # TDDFT − ADC2 en eV
+            "n_confs_tddft":   n_confs_tddft,
+            "n_confs_adc2":    n_confs_adc2,
+        })
+
+    return pd.DataFrame(rows)
+
+
+def _boltz_weighted_lmax(
+    df_tddft: pd.DataFrame,
+    df_conf:  pd.DataFrame,
+    temp_label: str,
+) -> Optional[float]:
+    """Helper: λ_max TDDFT Boltzmann-promediado a temperatura arbitraria."""
+    col_b = f"boltz_{temp_label}"
+    if col_b not in df_conf.columns:
+        return None
+    s1 = df_tddft[df_tddft["state"] == 1].copy()
+    if s1.empty:
+        return None
+    s1 = s1.merge(df_conf[["conformer", col_b]], on="conformer", how="left")
+    w  = s1[col_b].fillna(0)
+    return float((s1["wavelength_nm"] * w).sum() / w.sum()) if w.sum() > 0 else None
+
+
+def print_adc2_summary(df_adc2: pd.DataFrame, mol_name: str,
+                       df_conf: pd.DataFrame):
+    """Imprime tabla de excitaciones ADC2 de una molécula."""
+    sep = "─" * 74
+    print(f"\n{sep}")
+    print(f"  ADC(2) EXCITACIONES — {mol_name}")
+    print(sep)
+
+    if df_adc2.empty:
+        print(f"  Sin datos ADC2 para '{mol_name}'.")
+        print(f"  Ruta esperada: runs/{mol_name}/{ADC2_SUBDIR}/conf_*/adc2.out")
+        print(f"{sep}\n")
+        return
+
+    # S1 por confórmero con pesos Boltzmann
+    col_b = "boltz_298K"
+    s1 = df_adc2[df_adc2["state"] == 1].copy()
+    if not s1.empty and not df_conf.empty and col_b in df_conf.columns:
+        s1 = s1.merge(df_conf[["conformer", col_b]], on="conformer", how="left")
+        disp_cols = ["conformer", "wl_nm", "E_eV", "fosc", col_b]
+        disp_cols = [c for c in disp_cols if c in s1.columns]
+        print("\n  ── S1 por confórmero (ADC2, ponderado 298 K) ──")
+        print(s1[disp_cols].to_string(index=False,
+              float_format=lambda x: f"{x:.4f}"))
+
+    lmax = compute_adc2_lambda_max(df_adc2, df_conf, "298K")
+    if lmax:
+        print(f"\n  λ_max ADC2 Boltzmann-promediado (298 K, S1): {lmax:.1f} nm")
+
+    n = df_adc2["conformer"].nunique()
+    print(f"  Confórmeros ADC2 completados: {n}")
+    print(f"{sep}\n")
+
+
+def print_adc2_tddft_comparison(df_cmp: pd.DataFrame):
+    """
+    Imprime la tabla comparativa ADC2 vs TDDFT con análisis de sistematicidad.
+    """
+    sep = "═" * 80
+    print(f"\n{sep}")
+    print(f"  COMPARACIÓN ADC(2) vs TD-DFT — λ_max Boltzmann-promediado (298 K)")
+    print(sep)
+
+    if df_cmp.empty:
+        print("  Sin datos para comparar.")
+        return
+
+    # ── Tabla por estado de protonación ─────────────────────────────────────
+    print(f"\n  {'Molécula':<25} {'λ_TDDFT(nm)':>12} {'λ_ADC2(nm)':>12} "
+          f"{'Δ(nm)':>10} {'Δ(eV)':>10} {'N_ADC2':>7}")
+    print(f"  {'─'*25} {'─'*12} {'─'*12} {'─'*10} {'─'*10} {'─'*7}")
+
+    valid_rows = []
+    for _, row in df_cmp.iterrows():
+        tddft = row.get("lambda_tddft_nm")
+        adc2  = row.get("lambda_adc2_nm")
+        delta = row.get("delta_nm")
+        devv  = row.get("delta_eV")
+        n     = row.get("n_confs_adc2", 0)
+
+        flag = ""
+        if tddft is None or adc2 is None:
+            flag = "  ⚠ datos incompletos"
+
+        print(f"  {row['molecule']:<25} "
+              f"{'—':>12}" if tddft is None else
+              f"  {row['molecule']:<25} {tddft:>12.1f}", end="")
+        print(f" {adc2:>12.1f}" if adc2 is not None else f" {'—':>12}", end="")
+        print(f" {delta:>+10.1f}" if delta is not None else f" {'—':>10}", end="")
+        print(f" {devv:>+10.4f}" if devv is not None else f" {'—':>10}", end="")
+        print(f" {int(n):>7}{flag}")
+
+        if delta is not None:
+            valid_rows.append(row)
+
+    if not valid_rows:
+        print(f"\n  Sin pares TDDFT+ADC2 completos para análisis de sistematicidad.")
+        print(f"{sep}\n")
+        return
+
+    # ── Análisis de sistematicidad ───────────────────────────────────────────
+    deltas_nm = [r["delta_nm"] for r in valid_rows]
+    deltas_eV = [r["delta_eV"] for r in valid_rows]
+
+    mean_nm = float(np.mean(deltas_nm))
+    std_nm  = float(np.std(deltas_nm, ddof=1)) if len(deltas_nm) > 1 else 0.0
+    mean_eV = float(np.mean(deltas_eV))
+    std_eV  = float(np.std(deltas_eV, ddof=1)) if len(deltas_eV) > 1 else 0.0
+
+    print(f"\n  ── Sistematicidad del desplazamiento TDDFT − ADC2 ──")
+    print(f"  N pares válidos       : {len(deltas_nm)}")
+    print(f"  Δ medio (nm)          : {mean_nm:+.2f} ± {std_nm:.2f}")
+    print(f"  Δ medio (eV)          : {mean_eV:+.4f} ± {std_eV:.4f}")
+
+    # Evaluación de sistematicidad: si std < |mean|/3 el desplazamiento es sistemático
+    systematic = (std_nm < abs(mean_nm) / 3.0) if mean_nm != 0 else (std_nm < 2.0)
+
+    if systematic and len(deltas_nm) > 1:
+        direction = "redshift" if mean_nm > 0 else "blueshift"
+        print(f"\n  ✓  Desplazamiento SISTEMÁTICO ({direction}):")
+        print(f"     TD-DFT predice λ_max {abs(mean_nm):.1f} nm más {direction.replace('shift','ed')}"
+              f" que ADC2 (CV = {std_nm/abs(mean_nm)*100:.1f}%)")
+        print(f"\n  ► Corrección empírica recomendada:")
+        print(f"     λ_corr(nm) = λ_TDDFT(nm) − ({mean_nm:+.1f} nm)")
+        print(f"     E_corr(eV) = E_TDDFT(eV) − ({mean_eV:+.4f} eV)")
+        print(f"     Incertidumbre: ±{std_nm:.1f} nm  (±{std_eV:.4f} eV)")
+    elif len(deltas_nm) == 1:
+        print(f"\n  ⚠  Solo 1 par: imposible evaluar sistematicidad.")
+        print(f"     Desplazamiento observado: {mean_nm:+.1f} nm ({mean_eV:+.4f} eV)")
+    else:
+        print(f"\n  ⚠  Desplazamiento NO sistemático (std/|mean| = "
+              f"{std_nm/abs(mean_nm)*100:.1f}% > 33%).")
+        print(f"     La corrección empírica tiene alta incertidumbre (±{std_nm:.1f} nm).")
+        print(f"     Considerar revisar geometrías o ampliar ensemble conformacional.")
+
+    # ADC2 inter-estados: comparación relativa
+    if len(valid_rows) > 1:
+        lmax_adc2_vals = [r["lambda_adc2_nm"] for r in valid_rows]
+        mols_valid     = [r["molecule"]        for r in valid_rows]
+        print(f"\n  ── Comparación λ_max ADC2 entre estados de protonación ──")
+        adc2_min  = min(lmax_adc2_vals)
+        adc2_max  = max(lmax_adc2_vals)
+        mol_min   = mols_valid[lmax_adc2_vals.index(adc2_min)]
+        mol_max   = mols_valid[lmax_adc2_vals.index(adc2_max)]
+        print(f"  Rango ADC2: {adc2_min:.1f} – {adc2_max:.1f} nm")
+        print(f"  Estado con λ_max ADC2 menor: {mol_min} ({adc2_min:.1f} nm)")
+        print(f"  Estado con λ_max ADC2 mayor: {mol_max} ({adc2_max:.1f} nm)")
+
+    print(f"\n{sep}\n")
+
+
+def export_adc2_comparison(df_cmp: pd.DataFrame, fmt: str):
+    """Exporta la tabla comparativa ADC2 vs TDDFT a CSV y/o XLSX."""
+    if df_cmp.empty:
+        return
+    out = WORK_ROOT / "comparison_adc2_tddft"
+    if fmt in ("csv", "both"):
+        df_cmp.to_csv(out.with_suffix(".csv"), index=False)
+        print(f"  CSV ADC2 vs TDDFT → {out.with_suffix('.csv')}")
+    if fmt in ("xlsx", "both"):
+        df_cmp.to_excel(out.with_suffix(".xlsx"), index=False)
+        print(f"  XLSX ADC2 vs TDDFT → {out.with_suffix('.xlsx')}")
+
+
+def plot_adc2_tddft_comparison(df_cmp: pd.DataFrame,
+                                dfs_conf: dict, dfs_tddft: dict,
+                                sigma: float = 20.0,
+                                x_range: tuple = (200, 500)):
+    """
+    Grafica la comparación ADC2 vs TDDFT mostrando para cada estado:
+      - Espectro TDDFT (gaussiano, normalizado)
+      - Línea vertical λ_max TDDFT
+      - Línea vertical λ_max ADC2
+      - Flechas mostrando el desplazamiento Δ
+
+    Panel inferior: barra de Δ(nm) por estado de protonación.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+    except ImportError:
+        print("matplotlib no disponible — saltando plot ADC2")
+        return
+
+    if df_cmp.empty:
+        return
+
+    # Filtrar solo filas con datos completos
+    valid = df_cmp.dropna(subset=["lambda_tddft_nm", "lambda_adc2_nm"])
+    if valid.empty:
+        print("  Sin pares TDDFT+ADC2 para graficar.")
+        return
+
+    n_mols = len(valid)
+    palette = [
+        "#4477AA", "#EE6677", "#228833", "#CCBB44",
+        "#66CCEE", "#AA3377", "#BBBBBB"
+    ]
+
+    fig, axes = plt.subplots(
+        2, 1, figsize=(11, 9),
+        gridspec_kw={"height_ratios": [3, 1.2]}
+    )
+    ax_spec, ax_delta = axes
+
+    x = np.linspace(x_range[0], x_range[1], 1500)
+
+    for i, (_, row) in enumerate(valid.iterrows()):
+        mol   = row["molecule"]
+        color = palette[i % len(palette)]
+
+        df_t = dfs_tddft.get(mol, pd.DataFrame())
+        df_c = dfs_conf.get(mol, pd.DataFrame())
+
+        # Espectro TDDFT
+        if not df_t.empty and not df_c.empty:
+            y = _build_spectrum(df_t, df_c, sigma, x, temp_label="298K")
+            y_norm = y / y.max() if y.max() > 0 else y
+            ax_spec.plot(x, y_norm, lw=1.8, alpha=0.7,
+                         label=mol.replace("_", " "), color=color)
+
+        # λ_max TDDFT
+        lmax_td = row["lambda_tddft_nm"]
+        ax_spec.axvline(lmax_td, color=color, lw=1.5, ls="--", alpha=0.85,
+                        label=f"λ_TDDFT {mol.replace('_', ' ')} = {lmax_td:.0f} nm")
+
+        # λ_max ADC2
+        lmax_a2 = row["lambda_adc2_nm"]
+        ax_spec.axvline(lmax_a2, color=color, lw=2.0, ls=":",
+                        label=f"λ_ADC2  {mol.replace('_', ' ')} = {lmax_a2:.0f} nm")
+
+        # Flecha TDDFT → ADC2
+        y_arrow = 0.85 - i * 0.12
+        if 0 < y_arrow < 1:
+            ax_spec.annotate(
+                "", xy=(lmax_a2, y_arrow), xytext=(lmax_td, y_arrow),
+                arrowprops=dict(arrowstyle="<->", color=color, lw=1.4)
+            )
+            mid = (lmax_td + lmax_a2) / 2
+            ax_spec.text(mid, y_arrow + 0.03,
+                         f"Δ={row['delta_nm']:+.1f}nm",
+                         ha="center", va="bottom", fontsize=8, color=color)
+
+    ax_spec.set_xlabel("Longitud de onda (nm)", fontsize=12)
+    ax_spec.set_ylabel("Intensidad TD-DFT (norm.)", fontsize=12)
+    ax_spec.set_title(
+        f"TD-DFT vs ADC(2) — λ_max por estado de protonación  "
+        f"(σ = {sigma} nm, T = 298 K)", fontsize=12
+    )
+    # Leyenda compacta: solo las líneas de espectro
+    handles = [
+        plt.Line2D([0], [0], color=palette[i % len(palette)], lw=1.8, alpha=0.7,
+                   label=row["molecule"].replace("_", " "))
+        for i, (_, row) in enumerate(valid.iterrows())
+    ]
+    handles += [
+        plt.Line2D([0], [0], color="gray", lw=1.5, ls="--", label="λ_max TD-DFT"),
+        plt.Line2D([0], [0], color="gray", lw=2.0, ls=":", label="λ_max ADC(2)"),
+    ]
+    ax_spec.legend(handles=handles, fontsize=8, loc="upper right")
+
+    # Panel inferior: Δ(nm) por estado
+    mols_bar  = valid["molecule"].tolist()
+    delta_bar = valid["delta_nm"].tolist()
+    colors_bar = [palette[i % len(palette)] for i in range(len(mols_bar))]
+    y_pos = range(len(mols_bar))
+
+    bars = ax_delta.barh(list(y_pos), delta_bar, color=colors_bar, alpha=0.85)
+    ax_delta.axvline(0, color="black", lw=0.8, ls="-")
+
+    # Añadir valor numérico en cada barra
+    for bar, val in zip(bars, delta_bar):
+        xpos = val + 0.3 if val >= 0 else val - 0.3
+        ha   = "left" if val >= 0 else "right"
+        ax_delta.text(xpos, bar.get_y() + bar.get_height() / 2,
+                      f"{val:+.1f} nm", va="center", ha=ha, fontsize=9)
+
+    ax_delta.set_yticks(list(y_pos))
+    ax_delta.set_yticklabels([m.replace("_", " ") for m in mols_bar], fontsize=9)
+    ax_delta.set_xlabel("Δλ = λ_TDDFT − λ_ADC2  (nm)", fontsize=11)
+    ax_delta.set_title("Desplazamiento TD-DFT vs ADC(2)  "
+                       "[positivo = TDDFT redshifted]", fontsize=10)
+
+    plt.tight_layout()
+    out_png = WORK_ROOT / "comparison_adc2_tddft.png"
+    plt.savefig(out_png, dpi=150)
+    print(f"  Plot ADC2 vs TDDFT guardado en: {out_png}")
+    plt.show()
+
+
 # ─────────────────────────────────────────────
 #  EXPORTACIÓN
 # ─────────────────────────────────────────────
@@ -2727,6 +3301,28 @@ def export_results(df_conf: pd.DataFrame, df_tddft: pd.DataFrame,
         print(f"  Excel guardado en: {xlsx_path}")
 
 
+def export_adc2_mol(df_adc2: "pd.DataFrame", mol_name: str, fmt: str):
+    """Exporta excitaciones ADC2 de una molecula al CSV/XLSX del estado."""
+    if df_adc2.empty:
+        return
+    mol_dir = WORK_ROOT / mol_name
+    if fmt in ("csv", "both"):
+        out = mol_dir / "adc2_excitations.csv"
+        df_adc2.to_csv(out, index=False)
+        print(f"  ADC2 CSV -> {out}")
+    if fmt in ("xlsx", "both"):
+        xlsx_path = mol_dir / f"{mol_name}_results.xlsx"
+        mode = "a" if xlsx_path.exists() else "w"
+        kw   = {"if_sheet_exists": "replace"} if mode == "a" else {}
+        try:
+            with pd.ExcelWriter(xlsx_path, engine="openpyxl", mode=mode, **kw) as w:
+                df_adc2.to_excel(w, sheet_name="ADC2", index=False)
+            print(f"  ADC2 -> {xlsx_path} (hoja: ADC2)")
+        except Exception as exc:
+            warnings.warn(f"[ADC2 export] {exc}")
+
+
+
 def export_comparison(df_cmp: pd.DataFrame, fmt: str):
     if df_cmp.empty:
         return
@@ -2764,10 +3360,10 @@ Ejemplos:
     mode.add_argument("--mol",     metavar="NAME",
                       help="analizar un estado (nombre del directorio en runs/)")
     mode.add_argument("--compare", action="store_true",
-                      help="comparar todos los estados de protonación en runs/")
+                      help="comparar todos los estados de protonacion en runs/")
 
     parser.add_argument("--ref",    metavar="NAME", default=None,
-                        help="estado de referencia para ΔE relativa (solo con --compare)")
+                        help="estado de referencia para dE relativa (solo con --compare)")
     parser.add_argument("--export", choices=["csv", "xlsx", "both"], default=None,
                         help="exportar tablas")
     parser.add_argument("--plot",   action="store_true",
@@ -2775,14 +3371,19 @@ Ejemplos:
     parser.add_argument("--goodvibes", action="store_true",
                         help="correr GoodVibes (mRRHO Grimme) sobre cada "
                              "freq.out y comparar contra el G_corr de ORCA "
-                             "(solo con --mol). Imprime y exporta el apéndice "
-                             "de comparación a runs/<mol>/.")
+                             "(solo con --mol). Imprime y exporta el apendice "
+                             "de comparacion a runs/<mol>/.")
+    parser.add_argument("--adc2",   action="store_true",
+                        help="extraer lambda_max ADC(2) y comparar con TD-DFT. "
+                             "Con --mol: analiza ese estado. "
+                             "Con --compare: compara todos los estados y evalua "
+                             "la sistematicidad del desplazamiento TDDFT-ADC2.")
     parser.add_argument("--sigma",  type=float, default=20.0,
                         help="anchura Gaussiana en nm para los plots (default: 20)")
     parser.add_argument("--xmin",   type=float, default=200.0,
-                        help="límite inferior del eje λ en nm (default: 200)")
+                        help="limite inferior del eje lambda en nm (default: 200)")
     parser.add_argument("--xmax",   type=float, default=500.0,
-                        help="límite superior del eje λ en nm (default: 500)")
+                        help="limite superior del eje lambda en nm (default: 500)")
     args = parser.parse_args()
 
     x_range = (args.xmin, args.xmax)
@@ -2791,15 +3392,26 @@ Ejemplos:
         df_conf, df_tddft = collect_results(args.mol)
         print_summary(df_conf, df_tddft, args.mol)
 
+        if args.adc2:
+            df_adc2 = collect_adc2_results(args.mol)
+            print_adc2_summary(df_adc2, args.mol, df_conf)
+            if args.export:
+                export_adc2_mol(df_adc2, args.mol, args.export)
+            if not df_adc2.empty:
+                df_cmp_adc2 = compare_adc2_tddft(mols=[args.mol])
+                print_adc2_tddft_comparison(df_cmp_adc2)
+                if args.export:
+                    export_adc2_comparison(df_cmp_adc2, args.export)
+
         if args.export:
             export_results(df_conf, df_tddft, args.mol, args.export)
         if args.plot:
             plot_spectrum(df_tddft, df_conf, args.mol,
                           sigma=args.sigma, x_range=x_range)
         if args.goodvibes:
-            print(f"\n{'─'*74}")
-            print(f"  GOODVIBES (mRRHO Grimme) vs ORCA (RRHO) — {args.mol}")
-            print(f"{'─'*74}")
+            print(f"\n{chr(9472)*74}")
+            print(f"  GOODVIBES (mRRHO Grimme) vs ORCA (RRHO) -- {args.mol}")
+            print(f"{chr(9472)*74}")
             gv_results = run_goodvibes_on_mol(args.mol)
             df_gv = compute_gv_appendix(args.mol, df_conf, gv_results)
             print(df_gv.to_string(index=False))
@@ -2816,9 +3428,26 @@ Ejemplos:
 
         print_comparison(df_cmp, ref_mol=args.ref)
 
-        # También imprimir resumen individual de cada estado
         for mol in sorted(dfs_conf.keys()):
             print_summary(dfs_conf[mol], dfs_tddft.get(mol, pd.DataFrame()), mol)
+
+        if args.adc2:
+            mols_available = sorted(dfs_conf.keys()) or None
+            df_cmp_adc2 = compare_adc2_tddft(mols=mols_available)
+            print_adc2_tddft_comparison(df_cmp_adc2)
+            for mol in sorted(dfs_conf.keys()):
+                df_c   = dfs_conf.get(mol, pd.DataFrame())
+                df_adc2 = collect_adc2_results(mol)
+                print_adc2_summary(df_adc2, mol, df_c)
+                if args.export and not df_adc2.empty:
+                    export_adc2_mol(df_adc2, mol, args.export)
+            if args.export:
+                export_adc2_comparison(df_cmp_adc2, args.export)
+            if args.plot:
+                plot_adc2_tddft_comparison(
+                    df_cmp_adc2, dfs_conf, dfs_tddft,
+                    sigma=args.sigma, x_range=x_range
+                )
 
         if args.export:
             export_comparison(df_cmp, args.export)
@@ -2827,7 +3456,7 @@ Ejemplos:
                     export_results(dfs_conf[mol],
                                    dfs_tddft.get(mol, pd.DataFrame()),
                                    mol, args.export)
-        if args.plot:
+        if args.plot and not args.adc2:
             plot_comparison(dfs_conf, dfs_tddft,
                             sigma=args.sigma, x_range=x_range)
 
