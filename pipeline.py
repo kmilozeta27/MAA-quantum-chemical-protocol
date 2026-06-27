@@ -78,9 +78,77 @@ from ase.io import read, write
 #  CONFIGURACIÓN GLOBAL
 # ─────────────────────────────────────────────
 
+def _resolve_bin(name: str, conda_env: str = "sciencebitch") -> Path:
+    """
+    Resuelve un ejecutable a una ruta absoluta de forma robusta.
+
+    Antes, CENSO_BIN/CREST_BIN eran solo el nombre del comando (p.ej. Path("censo")),
+    así que su existencia dependía 100% de que el PATH del proceso que lanzó
+    pipeline.py ya tuviera el env conda correcto activado. Si el script se
+    invocaba desde un shell/cron/nohup sin 'conda activate sciencebitch', el
+    fallo solo se descubría al llamar subprocess.run() — a veces horas después
+    (p.ej. tras 70 min de CREST), con un FileNotFoundError tardío.
+
+    Busca en orden:
+      1. PATH actual del proceso (shutil.which) — caso normal, env ya activado.
+      2. <prefix de conda_env>/bin/<name> — vía `conda env list --json`,
+         sin necesitar que el env esté activado.
+    Si no se encuentra en ningún lado, devuelve Path(name) tal cual (para no
+    romper compatibilidad); el caller debe loggear/abortar temprano con
+    check_required_bins().
+    """
+    found = shutil.which(name)
+    if found:
+        return Path(found)
+    try:
+        result = subprocess.run(
+            ["conda", "env", "list", "--json"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            envs = json.loads(result.stdout).get("envs", [])
+            for env_path in envs:
+                if Path(env_path).name == conda_env:
+                    candidate = Path(env_path) / "bin" / name
+                    if candidate.is_file() and os.access(candidate, os.X_OK):
+                        return candidate
+    except Exception:
+        pass
+    return Path(name)
+
+
+def check_required_bins(log: logging.Logger) -> None:
+    """
+    Verifica al inicio del pipeline (antes de lanzar CREST) que los binarios
+    requeridos existan y sean ejecutables, con mensaje de diagnóstico claro.
+    Evita descubrir un 'censo: command not found' después de 70+ min de CREST.
+    """
+    missing = []
+    for bin_name, bin_path in (("CREST", CREST_BIN), ("CENSO", CENSO_BIN)):
+        resolved = shutil.which(str(bin_path)) or (
+            str(bin_path) if bin_path.is_absolute() and bin_path.is_file() else None
+        )
+        if resolved is None:
+            missing.append((bin_name, bin_path))
+        else:
+            log.debug(f"[CHECK-BIN] {bin_name} → {resolved}")
+    if missing:
+        for bin_name, bin_path in missing:
+            log.error(
+                f"[CHECK-BIN]  ✗  {bin_name} no encontrado ({bin_path}). "
+                f"¿'conda activate sciencebitch' antes de lanzar pipeline.py? "
+                f"¿está instalado en ese env (pip/conda list | grep -i {bin_name.lower()})?"
+            )
+        raise SystemExit(
+            "ERROR: faltan ejecutables requeridos: "
+            + ", ".join(n for n, _ in missing)
+            + ". Pipeline abortado ANTES de CREST para no desperdiciar horas de cómputo."
+        )
+
+
 ORCA_BIN   = Path("/home/kmilozeta/orca_6_1_1_avx2/orca")
-CREST_BIN  = Path("crest")          # asumido en PATH; ajusta si hace falta
-CENSO_BIN  = Path("censo")          # asumido en PATH (env sciencebitch); ajusta si hace falta
+CREST_BIN  = _resolve_bin("crest")  # resuelto vía PATH o conda env sciencebitch
+CENSO_BIN  = _resolve_bin("censo")  # resuelto vía PATH o conda env sciencebitch
 WORK_ROOT  = Path("runs")           # directorio de salida
 TMPL_DIR   = Path("templates")
 MULT       = 1                      # multiplicidad siempre 1
@@ -3512,6 +3580,14 @@ Ejemplos (modo expansión conformacional):
         log.info(f"Expand batch           : {args.parallel} × {nprocs_per_expand_job} = "
                  f"{total_expand_cores} cores en paralelo / RAM estimada ≈ {total_expand_ram:.1f} GB")
     log.info("=" * 60)
+
+    # ── Verificación temprana de binarios requeridos ─────────────────────
+    # Antes, un 'censo' no encontrado solo se descubría dentro de
+    # stage_censo_prescreen() vía FileNotFoundError — después de que CREST
+    # ya hubiera corrido (p.ej. 70+ min de cómputo). check_required_bins()
+    # aborta aquí, antes de gastar tiempo de cómputo, con mensaje claro
+    # sobre activar el conda env 'sciencebitch'.
+    check_required_bins(log)
 
     start_idx = STEPS.index(args.start)
 
