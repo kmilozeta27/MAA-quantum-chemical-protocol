@@ -2404,6 +2404,53 @@ def select_nconf_auto(conformers_xyz: Path, log: logging.Logger) -> int:
     return max(NCONF_MIN, min(NCONF_MAX, nconf))
 
 
+def _extract_conf_ids_from_xyz(source_xyz: Path) -> dict[int, str]:
+    """
+    Lee el multi-XYZ de CREST/CENSO y devuelve un dict {índice_0based → CONF#}.
+
+    Soporta comentarios extXYZ ("CONF7=T ...") y plain ("CONF7  -1218.034197").
+    Si un frame no tiene token CONF# en el comentario, se omite del dict.
+
+    Usado por stage_opt y stage_expand_opt para propagar la identificación
+    CREST original (CONF39, CONF29, etc.) a los directorios de trabajo ORCA,
+    evitando el re-etiquetado conf_001, conf_002, ... que borra la trazabilidad.
+    """
+    result: dict[int, str] = {}
+    try:
+        raw_lines = source_xyz.read_text(errors="replace").splitlines()
+    except OSError:
+        return result
+
+    frame_idx = 0
+    line_idx  = 0
+    n_atoms: Optional[int] = None
+
+    while line_idx < len(raw_lines):
+        stripped = raw_lines[line_idx].strip()
+        if stripped.isdigit():
+            nat = int(stripped)
+            if n_atoms is None:
+                n_atoms = nat
+            if nat == n_atoms and line_idx + 1 < len(raw_lines):
+                comment = raw_lines[line_idx + 1].strip()
+                # extXYZ: "CONF7=T ..."
+                m = re.search(r"(CONF\d+)=", comment)
+                if m:
+                    result[frame_idx] = m.group(1)
+                else:
+                    # plain: primer token que empiece con CONF
+                    for tok in comment.split():
+                        if tok.startswith("CONF"):
+                            result[frame_idx] = tok
+                            break
+                frame_idx += 1
+                line_idx  += nat + 2
+                continue
+        line_idx += 1
+
+    return result
+
+
 def stage_opt(conformers_xyz: Path, mol_dir: Path,
               charge: int, nconf: int, log: logging.Logger,
               conf_ids: Optional[list[str]] = None) -> list[Path]:
@@ -2459,6 +2506,9 @@ def stage_opt(conformers_xyz: Path, mol_dir: Path,
         _missing = [cid for cid in conf_ids if cid not in _frame_idx]
         if _missing:
             log.warning(f"[OPT] CONF# no encontrados en ensemble: {_missing}")
+        # En modo Boltzmann, conf_ids ya tiene los CONF# en orden de peso descendente;
+        # se usan directamente como nombres de directorio para trazabilidad completa.
+        _crest_labels: list[str] = [cid for cid in conf_ids if cid in _frame_idx]
     else:
         # Modo clásico: primeros nconf frames
         log.info(f"[OPT] optimizando {nconf} confórmeros (seleccionados automáticamente)")
@@ -2467,20 +2517,28 @@ def stage_opt(conformers_xyz: Path, mol_dir: Path,
         except RuntimeError as e:
             log.error(f"[OPT] no se pudo leer {conformers_xyz}: {e}")
             return []
+        # Extraer los CONF# del XYZ para los primeros nconf frames
+        _xyz_id_map = _extract_conf_ids_from_xyz(conformers_xyz)
+        _crest_labels = [_xyz_id_map.get(i, f"CONF{i+1}") for i in range(len(conformers))]
+        if any(lbl.startswith("CONF") and not lbl[4:].isdigit() for lbl in _crest_labels):
+            log.warning("[OPT] algunos frames no tienen CONF# en el comentario; "
+                        "usando CONF<n> como fallback")
 
     if not conformers:
         log.error("[OPT] el archivo de confórmeros está vacío")
         return []
 
     log.info(f"[OPT] {len(conformers)} confórmeros disponibles — "
-             f"batch {OPT_BATCH_SIZE}×{NPROCS} cores")
+             f"batch {OPT_BATCH_SIZE}x{NPROCS} cores")
+    log.info(f"[OPT] IDs CREST → dirs: "
+             + "  ".join(f"{lbl}→conf_{lbl[4:]}" for lbl in _crest_labels))
     template   = get_template("opt")
     successful = []
 
     tasks_all = [
         {
-            "conf_id":  f"conf_{i:03d}",
-            "conf_dir": mol_dir / "02_opt" / f"conf_{i:03d}",
+            "conf_id":  f"conf_{crest_lbl[4:]}",      # CONF39 → conf_39
+            "conf_dir": mol_dir / "02_opt" / f"conf_{crest_lbl[4:]}",
             "atoms":    atoms,
             "charge":   charge,
             "template": template,
@@ -2488,7 +2546,7 @@ def stage_opt(conformers_xyz: Path, mol_dir: Path,
             "maxcore":  MAXCORE,
             "log":      log,
         }
-        for i, atoms in enumerate(conformers, start=1)
+        for crest_lbl, atoms in zip(_crest_labels, conformers)
     ]
 
     n_lotes = -(-len(tasks_all) // OPT_BATCH_SIZE)   # ceiling division
@@ -3368,8 +3426,8 @@ def stage_expand_opt(
         log             : logger del pipeline principal
 
     Returns:
-        Lista de directorios 02_opt/conf_XXX/ que pasan el filtro,
-        listos para continuar en stage_numfreq.
+        Lista de directorios 02_opt/conf##/ (CONF# CREST en minúsculas) que
+        pasan el filtro, listos para continuar en stage_numfreq.
     """
     log.info("=" * 60)
     log.info(f"[EXPAND] skip={skip}  window={window}  "
@@ -3396,9 +3454,14 @@ def stage_expand_opt(
         log.warning(f"[EXPAND] Rango [{skip}:{end_idx}] vacío — nada que procesar")
         return []
 
+    # Extraer CONF# del XYZ para el rango [skip:end_idx]
+    _all_xyz_ids = _extract_conf_ids_from_xyz(conformers_xyz)
+    _expand_labels = [
+        _all_xyz_ids.get(skip + rel, f"CONF{skip + rel + 1}")
+        for rel in range(len(new_confs))
+    ]
     log.info(f"[EXPAND] Procesando CREST[{skip}:{end_idx}] → "
-             f"conf_{skip+1:03d} … conf_{end_idx:03d}  "
-             f"({len(new_confs)} estructuras)")
+             f"IDs: {', '.join(_expand_labels)}  ({len(new_confs)} estructuras)")
 
     # ── Referencia energética de opts previos ────────────────────
     e_ref = find_opt_minimum(mol_dir, log)
@@ -3408,8 +3471,8 @@ def stage_expand_opt(
     _check_cpu_budget(batch_size, nprocs_per_job, log)
     tasks_all = [
         {
-            "conf_id":  f"conf_{skip + rel + 1:03d}",
-            "conf_dir": mol_dir / "02_opt" / f"conf_{skip + rel + 1:03d}",
+            "conf_id":  f"conf_{crest_lbl[4:]}",      # CONF39 → conf_39
+            "conf_dir": mol_dir / "02_opt" / f"conf_{crest_lbl[4:]}",
             "atoms":    atoms,
             "charge":   charge,
             "template": template,
@@ -3417,7 +3480,7 @@ def stage_expand_opt(
             "maxcore":  maxcore_per_job,
             "log":      log,
         }
-        for rel, atoms in enumerate(new_confs)
+        for crest_lbl, atoms in zip(_expand_labels, new_confs)
     ]
 
     n_lotes = -(-len(tasks_all) // batch_size)   # ceiling division
