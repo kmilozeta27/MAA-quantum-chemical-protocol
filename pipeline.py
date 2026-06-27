@@ -205,6 +205,109 @@ OMP_ENV: dict = build_omp_env(NPROCS)
 STEPS = ["crest", "opt", "numfreq", "sp", "tddft", "adc2"]
 
 # ─────────────────────────────────────────────
+#  REGISTRO DE λmax EXPERIMENTAL
+# ─────────────────────────────────────────────
+#
+# Asocia el nombre de carpeta de corrida (= mol_xyz.stem, p.ej. "A", "SA")
+# con el λmax experimental en nm.  Se consulta en stage_adc2 para calcular
+# Δλ = λ_ADC2 − λ_exp y registrarlo en el log y en adc2_results.json.
+#
+# Fuente canónica: molecules.yml en el directorio de trabajo (junto al script).
+# Si el archivo no existe o no contiene la clave, se usa el diccionario
+# de fallback EXP_LAMBDA_FALLBACK definido aquí.
+#
+# Formato molecules.yml:
+#   exp_lambda:
+#     A:   335.0   # M-Gly:Val estado A (carboxilato libre)
+#     B:   335.0   # M-Gly:Val estado B
+#     C:   335.0   # M-Gly:Val estado C
+#     D:   335.0   # M-Gly:Val estado D (zwitterion)
+#     R:   335.0   # M-Gly:Val estado R (neutro tautómero)
+#     SA:  334.0   # Shinorine estado A
+#     SB:  334.0   # Shinorine estado B
+#     SR:  334.0   # Shinorine estado R
+#
+# Para agregar una molécula nueva sin tocar el código:
+#   echo "  MiMol: 320.0" >> molecules.yml
+
+EXP_LAMBDA_FALLBACK: dict[str, float] = {
+    # M-Gly:Val — λmax experimental ~ 335 nm (UV-Vis en agua, Antarctic MAAs)
+    "A":  335.0,
+    "B":  335.0,
+    "C":  335.0,
+    "D":  335.0,
+    "R":  335.0,
+    # Shinorine — λmax experimental ~ 334 nm
+    "SA": 334.0,
+    "SB": 334.0,
+    "SC": 334.0,
+    "SD": 334.0,
+    "SR": 334.0,
+}
+
+_MOLECULES_YML = Path("molecules.yml")   # ruta relativa al CWD donde corre el script
+
+
+def load_exp_lambda(mol_name: str, log: logging.Logger) -> Optional[float]:
+    """
+    Devuelve el λmax experimental (nm) para mol_name.
+
+    Orden de búsqueda:
+      1. molecules.yml  →  sección exp_lambda:<mol_name>
+      2. EXP_LAMBDA_FALLBACK  (diccionario en este script)
+      3. None  (no disponible; stage_adc2 omite Δλ pero no falla)
+
+    El YAML se lee sin PyYAML para no añadir dependencia: solo se parsean
+    líneas "  clave: valor" dentro del bloque "exp_lambda:", lo que es
+    suficiente para el formato plano que usamos.
+    """
+    # ── Intentar leer molecules.yml ──────────────────────────────
+    if _MOLECULES_YML.exists():
+        try:
+            text = _MOLECULES_YML.read_text(errors="replace")
+            in_block = False
+            for line in text.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("exp_lambda:"):
+                    in_block = True
+                    continue
+                if in_block:
+                    # Salir del bloque si aparece una clave de nivel superior (sin indentación)
+                    if line and not line[0].isspace():
+                        in_block = False
+                        continue
+                    # Parsear "  clave: valor"
+                    if ":" in stripped and not stripped.startswith("#"):
+                        key, _, val = stripped.partition(":")
+                        key = key.strip()
+                        val = val.split("#")[0].strip()   # ignorar comentarios inline
+                        if key == mol_name:
+                            try:
+                                return float(val)
+                            except ValueError:
+                                log.warning(
+                                    f"[EXP_LAMBDA] molecules.yml: valor inválido "
+                                    f"para '{mol_name}': '{val}'"
+                                )
+        except OSError as e:
+            log.warning(f"[EXP_LAMBDA] No se pudo leer molecules.yml: {e}")
+
+    # ── Fallback: diccionario en el script ───────────────────────
+    if mol_name in EXP_LAMBDA_FALLBACK:
+        log.debug(
+            f"[EXP_LAMBDA] '{mol_name}' no encontrado en molecules.yml "
+            f"— usando fallback ({EXP_LAMBDA_FALLBACK[mol_name]:.1f} nm)"
+        )
+        return EXP_LAMBDA_FALLBACK[mol_name]
+
+    log.warning(
+        f"[EXP_LAMBDA] λmax experimental no disponible para '{mol_name}'. "
+        f"Añádelo en molecules.yml bajo 'exp_lambda:' para obtener Δλ."
+    )
+    return None
+
+
+# ─────────────────────────────────────────────
 #  NOHUP — lanzamiento inmune a HUP
 # ─────────────────────────────────────────────
 
@@ -2800,7 +2903,12 @@ def stage_sp_nroot(mol_dir: Path, charge: int, log: logging.Logger,
 #  ETAPA ADC2  (séptima etapa, obligatoria)
 # ─────────────────────────────────────────────
 
-def stage_adc2(mol_dir: Path, charge: int, log: logging.Logger) -> Optional[Path]:
+def stage_adc2(
+    mol_dir: Path,
+    charge: int,
+    log: logging.Logger,
+    mol_name: str = "",
+) -> Optional[Path]:
     """
     Etapa 07_adc2: validación ADC2 (NRoots 1) sobre un único confórmero —
     el dominante, definido como el de menor energía SP (FINAL SINGLE POINT
@@ -2815,9 +2923,22 @@ def stage_adc2(mol_dir: Path, charge: int, log: logging.Logger) -> Optional[Path
     elegido. Si 05_tddft no tiene la copia (p.ej. corrida con --start previo
     a tddft incompleta), aborta esa etapa con error explicado.
 
+    mol_name: nombre de la corrida (mol_dir.name si no se pasa explícitamente).
+              Se usa para buscar λmax experimental en molecules.yml /
+              EXP_LAMBDA_FALLBACK y calcular Δλ = λ_ADC2 − λ_exp.
+
     Devuelve el directorio 07_adc2/<conf_id>/ si el cálculo terminó bien,
     o None si falló o no se pudo seleccionar confórmero.
+
+    Efectos secundarios:
+      - Escribe 07_adc2/adc2_results.json con los valores numéricos de la
+        transición S0→S1 (λ_nm, E_eV, fosc, λ_exp_nm, delta_lambda_nm).
+        El archivo se sobreescribe en cada llamada exitosa con parseo correcto.
     """
+    # Resolver mol_name desde mol_dir si no se pasó explícitamente
+    if not mol_name:
+        mol_name = mol_dir.name
+
     sp_root = mol_dir / "04_sp"
     if not sp_root.exists():
         log.error("[ADC2] No existe 04_sp/ — corre primero la etapa SP.")
@@ -2890,10 +3011,47 @@ def stage_adc2(mol_dir: Path, charge: int, log: logging.Logger) -> Optional[Path
         result = extract_adc2_lambda(out_file)
         if result is not None:
             lambda_nm, energy_ev, fosc = result
-            log.info(
-                f"[ADC2] λmax(S0→S1) = {lambda_nm:.1f} nm  "
-                f"({energy_ev:.4f} eV)  fosc = {fosc:.6f}"
-            )
+
+            # Buscar λmax experimental y calcular Δλ
+            lambda_exp = load_exp_lambda(mol_name, log)
+            if lambda_exp is not None:
+                delta_lambda = lambda_nm - lambda_exp
+                sign = "+" if delta_lambda >= 0 else ""
+                log.info(
+                    f"[ADC2] λmax(S0→S1) = {lambda_nm:.1f} nm  "
+                    f"({energy_ev:.4f} eV)  fosc = {fosc:.6f}  │  "
+                    f"λexp = {lambda_exp:.1f} nm  │  "
+                    f"Δλ = {sign}{delta_lambda:.1f} nm"
+                )
+            else:
+                delta_lambda = None
+                log.info(
+                    f"[ADC2] λmax(S0→S1) = {lambda_nm:.1f} nm  "
+                    f"({energy_ev:.4f} eV)  fosc = {fosc:.6f}"
+                )
+
+            # ── Guardar resultados en JSON ────────────────────────
+            results_json = adc2_root / "adc2_results.json"
+            record: dict = {
+                "mol_name":        mol_name,
+                "conf_id":         conf_id,
+                "lambda_nm":       round(lambda_nm, 2),
+                "energy_eV":       round(energy_ev, 6),
+                "fosc":            round(fosc, 8),
+                "lambda_exp_nm":   lambda_exp,
+                "delta_lambda_nm": (
+                    round(delta_lambda, 2) if delta_lambda is not None else None
+                ),
+                "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+            }
+            try:
+                results_json.write_text(
+                    json.dumps(record, indent=2, ensure_ascii=False) + "\n"
+                )
+                log.info(f"[ADC2] resultados guardados → {results_json}")
+            except OSError as e:
+                log.warning(f"[ADC2] no se pudo escribir {results_json}: {e}")
+
         else:
             log.warning(
                 f"[ADC2] {conf_id}: cálculo OK pero no se pudo extraer λmax "
@@ -4049,7 +4207,7 @@ Ejemplos (modo expansión conformacional):
 
         # ── ADC2 (obligatoria, confórmero dominante por E_SP) ────
         if start_idx <= STEPS.index("adc2"):
-            adc2_dir = stage_adc2(mol_dir, args.charge, log)
+            adc2_dir = stage_adc2(mol_dir, args.charge, log, mol_name=mol_name)
             if adc2_dir is None:
                 log.warning("[EXPAND] No se pudo completar la validación ADC2.")
             else:
@@ -4214,7 +4372,7 @@ Ejemplos (modo expansión conformacional):
 
     # ── Etapa 6: ADC2 (obligatoria, confórmero dominante por E_SP) ──
     if start_idx <= STEPS.index("adc2"):
-        adc2_dir = stage_adc2(mol_dir, args.charge, log)
+        adc2_dir = stage_adc2(mol_dir, args.charge, log, mol_name=mol_name)
         if adc2_dir is None:
             log.warning("[ADC2] No se pudo completar la validación ADC2.")
         else:
