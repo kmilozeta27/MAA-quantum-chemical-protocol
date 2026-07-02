@@ -42,6 +42,16 @@ Uso (modo multi-temperatura, --multitemp):
 Nota: --start crest y --start opt son equivalentes al inicio (ambos requieren
       que CREST+CENSO corran). Solo usar --start opt/numfreq/sp/tddft/adc2
       para retomar un pipeline con CREST+CENSO ya completados.
+
+Nota (--start adc2): caso especial, NO retoma la cadena normal. Solo requiere
+      que exista 04_sp/ (con sus .out y opt_opt.xyz por confórmero) — ignora
+      por completo 01_crest/, 02_opt/, 03_numfreq/ y 05_tddft/, incluso si no
+      existen en disco. Identifica automáticamente el confórmero de menor
+      energía SP y corre ADC2 solo sobre ese. Pensado para el flujo real de
+      trabajo: como ADC2 necesita ~400GB de disco, Kmilo respalda todo en un
+      disco externo y borra los archivos pesados del computador antes de
+      correrlo, dejando únicamente 04_sp/ disponible.
+    python pipeline.py --mol molecules/mol_A.xyz --charge -1 --start adc2
 """
 
 import argparse
@@ -2947,14 +2957,16 @@ def stage_adc2(
     el dominante, definido como el de menor energía SP (FINAL SINGLE POINT
     ENERGY en 04_sp/conf_*/sp.out).
 
-    La geometría usada es la misma que TDDFT: sp_opt.xyz copiada en
-    05_tddft/<conf_id>/ (idéntica a opt_opt.xyz de 02_opt/numfreq, pero se
-    reutiliza la copia ya validada en esa etapa para evitar resolver de nuevo
-    el archivo de origen).
+    La geometría se toma directamente de 04_sp/<conf_id>/opt_opt.xyz (copiada
+    ahí por la propia etapa SP desde 02_opt/03_numfreq). ADC2 NO depende de
+    TDDFT ni de ninguna otra etapa posterior a SP — así --start adc2 solo
+    necesita que 04_sp/ exista, sin requerir 05_tddft ni el resto del
+    pipeline (relevante porque ADC2 necesita ~400GB de disco, por lo que
+    Kmilo suele respaldar y borrar todo lo demás antes de correrlo).
 
-    Requiere que 04_sp/ y 05_tddft/<conf_id>/ ya existan para el confórmero
-    elegido. Si 05_tddft no tiene la copia (p.ej. corrida con --start previo
-    a tddft incompleta), aborta esa etapa con error explicado.
+    Requiere únicamente que 04_sp/<conf_id>/ exista (out + opt_opt.xyz) para
+    el confórmero dominante. Si falta la geometría, aborta esa etapa con
+    error explicado.
 
     mol_name: nombre de la corrida (mol_dir.name si no se pasa explícitamente).
               Se usa para buscar λmax experimental en molecules.yml /
@@ -3006,14 +3018,15 @@ def stage_adc2(
         log.info(f"[ADC2] siguiente más estable: {runner_up[1].name} "
                  f"(ΔE = +{dE:.4f} kcal/mol respecto al dominante)")
 
-    # ── Localizar geometría: misma que usó TDDFT (sp_opt.xyz) ────
-    tddft_dir = mol_dir / "05_tddft" / conf_id
-    geom_src  = tddft_dir / "sp_opt.xyz"
-    if not geom_src.exists():
+    # ── Localizar geometría: directamente desde 04_sp/<conf_id>/ ─
+    # (opt_opt.xyz ya fue copiada ahí por la etapa SP; no depende de TDDFT)
+    geom_src = resolve_opt_xyz(sp_dir)
+    if geom_src is None:
         log.error(
-            f"[ADC2] No se encontró {geom_src} — el confórmero dominante "
-            f"({conf_id}) necesita haber pasado por TDDFT primero (la geometría "
-            f"de ADC2 se toma de ahí). Corre la etapa TDDFT para este confórmero."
+            f"[ADC2] No se encontró opt_opt.xyz ni opt.xyz en {sp_dir} — "
+            f"el confórmero dominante ({conf_id}) tiene sp.out pero le falta "
+            f"la geometría en 04_sp/. Vuelve a correr la etapa SP para este "
+            f"confórmero."
         )
         return None
 
@@ -3412,6 +3425,11 @@ Ejemplos (modo normal):
   python pipeline.py --mol molecules/mglyval.xyz --charge -1 --nroot
   python pipeline.py --mol molecules/mglyval.xyz --charge -1 --nroot --nroot-top 3
 
+  # ADC2 standalone: SOLO requiere 04_sp/ (ignora crest/opt/numfreq/tddft
+  # aunque no existan en disco). Útil cuando ya se borró todo salvo 04_sp/
+  # para liberar espacio (ADC2 necesita ~400GB libres).
+  python pipeline.py --mol molecules/mglyval.xyz --charge -1 --start adc2
+
   # Ver estado de todos los runs
   python pipeline.py --status
         """,
@@ -3420,7 +3438,9 @@ Ejemplos (modo normal):
     parser.add_argument("--charge", type=int, default=0,
                         help="carga formal de la molécula (default: 0)")
     parser.add_argument("--start",  choices=STEPS, default="crest",
-                        help="etapa desde la que iniciar (default: crest)")
+                        help="etapa desde la que iniciar (default: crest). "
+                             "--start adc2 es especial: solo requiere 04_sp/, "
+                             "ignora todas las demás etapas y sus directorios.")
     parser.add_argument("--status", action="store_true",
                         help="mostrar estado de todos los runs y salir")
     parser.add_argument(
@@ -3725,6 +3745,37 @@ Ejemplos (modo normal):
         log.info("=" * 60)
         log.info("PIPELINE (SP_NROOT) FINALIZADO")
         log.info(f"Resultados en: {(mol_dir / '06_sp_nroot').resolve()}")
+        log.info("=" * 60)
+        return
+
+    # ════════════════════════════════════════════════════════════
+    #  MODO ADC2 standalone (--start adc2)
+    # ════════════════════════════════════════════════════════════
+    # ADC2 solo depende de 04_sp/ (energías + opt_opt.xyz de cada confórmero).
+    # Se salta CREST, CENSO, OPT, NUMFREQ, TDDFT por completo — ni siquiera
+    # se verifica que existan — porque en el flujo real de Kmilo esos
+    # archivos ya fueron borrados del disco (ADC2 requiere ~400GB libres,
+    # así que respalda todo en un disco externo y limpia el compu antes de
+    # correr esta etapa). Lo único indispensable es 04_sp/.
+    if args.start == "adc2":
+        log.info("MODO: ADC2 standalone (--start adc2)")
+        log.info("[ADC2] saltando CREST/CENSO/OPT/NUMFREQ/TDDFT — "
+                 "solo se usa 04_sp/ (confórmero de menor energía)")
+        sp_root = mol_dir / "04_sp"
+        if not sp_root.exists():
+            sys.exit(
+                f"ERROR: --start adc2 requiere que exista {sp_root}\n"
+                f"       (los .out y opt_opt.xyz de cada confórmero SP). "
+                f"Corre primero la etapa SP."
+            )
+        adc2_dir = stage_adc2(mol_dir, args.charge, log, mol_name=mol_name)
+        if adc2_dir is None:
+            log.error("[ADC2] No se pudo completar la validación ADC2.")
+            sys.exit(1)
+        log.info("=" * 60)
+        log.info(f"[ADC2] validación completada ✓ → {adc2_dir}")
+        log.info("PIPELINE (ADC2 standalone) FINALIZADO")
+        log.info(f"Resultados en: {(mol_dir / '07_adc2').resolve()}")
         log.info("=" * 60)
         return
 
