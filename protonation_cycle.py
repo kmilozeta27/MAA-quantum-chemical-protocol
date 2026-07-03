@@ -78,7 +78,10 @@ ESTRUCTURA DE DIRECTORIOS (igual que pipeline.py / results_collector.py)
   └── C/                         ← estado de protonación C
       └── (mismo árbol)
 
-WORK_ROOT apunta a /home/kmilozeta/MGLYVAL/runs. Los nombres de estado que se
+WORK_ROOT apunta, por default, a ./runs relativo al directorio desde donde se
+corre el script (equivalente a Path.cwd()/"runs"). Se puede sobreescribir con
+--work-root /ruta/a/runs si el script no se corre desde la carpeta del proyecto.
+Los nombres de estado que se
 pasan en --neutral/--anion/--dianion son los nombres de carpeta dentro de
 runs/ (p. ej. "R", "A", "B", "C"), no rutas completas.
 
@@ -131,7 +134,7 @@ import pandas as pd
 #  CONSTANTES  (idénticas a results_collector.py)
 # ─────────────────────────────────────────────
 
-WORK_ROOT        = Path("/home/kmilozeta/MGLYVAL/runs")
+WORK_ROOT        = Path.cwd() / "runs"  # default; sobreescribible con --work-root
 HARTREE_TO_KCAL  = 627.5094740631
 HARTREE_TO_KJ    = HARTREE_TO_KCAL * 4.184
 R_KCAL           = 1.9872041e-3        # kcal/(mol·K)
@@ -1730,6 +1733,10 @@ Ejemplos:
                         help="Carpeta en runs/ para el zwitterión D — TAUTÓMERO de "
                              "--neutral (mismo q=0, mismos átomos), p. ej. 'D'. "
                              "Requiere también --protonated y --neutral.")
+    parser.add_argument("--work-root", metavar="DIR", default=None,
+                        help="Ruta a la carpeta runs/ que contiene los estados "
+                             "(default: ./runs relativo al directorio desde donde "
+                             "corres el script, p. ej. ~/PAPER1/MGLYVAL/runs)")
     parser.add_argument("--ph",       type=float, default=PH_ANTARCTIC,
                         help=f"pH de referencia para la distribución "
                              f"(default: {PH_ANTARCTIC}, agua de mar antártica)")
@@ -1753,6 +1760,16 @@ Ejemplos:
                         help="Mostrar contribuciones detalladas del ciclo de Born")
     args = parser.parse_args()
 
+    global WORK_ROOT
+    if args.work_root:
+        WORK_ROOT = Path(args.work_root).expanduser().resolve()
+    if not WORK_ROOT.exists():
+        parser.error(
+            f"No existe la carpeta runs/: {WORK_ROOT}\n"
+            f"Usa --work-root /ruta/a/runs para indicar la correcta, o corre el "
+            f"script desde el directorio que contiene runs/."
+        )
+
     # Verificar que se pasó al menos un par de estados
     if args.neutral is None and args.anion is None:
         parser.error("Debes proporcionar al menos --neutral y --anion.")
@@ -1772,6 +1789,7 @@ Ejemplos:
     print("\n" + "═" * 74)
     print("  PROTONATION CYCLE  —  FAE-MAA / kmilozeta")
     print("═" * 74)
+    print(f"  runs/ : {WORK_ROOT}")
 
     if use_extended:
         _run_extended(args)
