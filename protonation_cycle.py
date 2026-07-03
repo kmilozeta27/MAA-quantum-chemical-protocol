@@ -497,6 +497,193 @@ def collect_mol_data(mol_name: str, verbose: bool = False) -> dict:
 
 
 # ─────────────────────────────────────────────
+#  ENERGÍA LIBRE REPRESENTATIVA DE UN ESTADO (método directo)
+# ─────────────────────────────────────────────
+
+def _state_G_total_direct(data: dict, T: float = T_STD) -> dict:
+    """
+    G_total_CPCM (E_SP_aq + G_corr) del confórmero representativo de un estado,
+    para el método directo. Funciona con dos tipos de entrada:
+
+      1. Un dict "normal" salido de collect_mol_data(): se relee freq.out del
+         confórmero representativo (best_conf) y se recalcula G_corr a T.
+
+      2. Un dict "macroestado" (data["is_macrostate"] = True), construido por
+         compute_tautomer_equilibrium(): ya trae G_total_direct_Eh precalculado
+         (combinación de Boltzmann entre neutro y zwitterión) y se usa tal cual,
+         sin volver a tocar archivos.
+
+    Retorna dict: G_total_Eh, conf, theory_sp, theory_freq, ok, warn (str|None).
+    """
+    if data.get("is_macrostate"):
+        return {
+            "G_total_Eh":  data["G_total_direct_Eh"],
+            "conf":        data.get("conf_label", "macroestado"),
+            "theory_sp":   data.get("theory_label"),
+            "theory_freq": data.get("theory_label"),
+            "ok":          True,
+            "warn":        None,
+        }
+
+    mol  = data["mol_name"]
+    conf = data.get("best_conf")
+    if conf is None:
+        return {"ok": False, "warn": f"No hay confórmero representativo para {mol}."}
+
+    df = data["df"]
+    row = df[df["conformer"] == conf].iloc[0]
+    E_aq = row["E_sp_aq"]
+    if E_aq is None or pd.isna(E_aq):
+        return {"ok": False, "warn": f"Sin SP acuoso para {mol}/{conf}."}
+
+    freq_file = WORK_ROOT / mol / SUBDIR_FREQ / conf / "freq.out"
+    tc = parse_thermochem(freq_file, T=T)
+    G_corr = tc["G_corr"] if tc["ok"] else None
+    warn = None
+    if not tc["ok"]:
+        warn = f"G_corr no disponible para {mol}/{conf}. Se usa G≈E_SP (sin ZPE/entropía)."
+
+    G_total = E_aq + (G_corr if G_corr is not None else 0.0)
+    theory_sp   = parse_theory_level(WORK_ROOT / mol / SUBDIR_SP / conf / "sp.out")
+    theory_freq = parse_theory_level(freq_file)
+
+    return {
+        "G_total_Eh":  G_total,
+        "conf":        conf,
+        "theory_sp":   theory_sp,
+        "theory_freq": theory_freq,
+        "ok":          True,
+        "warn":        warn,
+    }
+
+
+# ─────────────────────────────────────────────
+#  EQUILIBRIO DE TAUTÓMEROS  (neutro ⇌ zwitterión, sin H⁺)
+# ─────────────────────────────────────────────
+
+def compute_tautomer_equilibrium(
+    data_R: dict,
+    data_D: dict,
+    T: float = T_STD,
+    verbose: bool = False,
+) -> dict:
+    """
+    Compara el neutro (R) y el zwitterión (D) como TAUTÓMEROS: mismo q=0,
+    mismo número de átomos (solo se desplaza un H interno, p. ej. de COOH a
+    N). A diferencia del ciclo de pKa, esto NO involucra H⁺ de bulk — es una
+    comparación directa de G_total_CPCM entre confórmeros representativos.
+
+      ΔG_taut = G_total(D) − G_total(R)     [kcal/mol]
+      K_taut  = [D]/[R] = exp(−ΔG_taut / RT)
+      f_R     = 1 / (1 + K_taut)
+      f_D     = K_taut / (1 + K_taut)
+
+    También construye el "macroestado neutro" combinado (R+D) vía Boltzmann,
+    que se usa como base/ácido en compute_pka() para los pasos con el catión
+    y con el anión:
+
+      G_macro = G_min − RT·ln( Σ exp(−(G_i − G_min)/RT) )   i ∈ {R, D}
+
+    Nota: f_R y f_D son independientes del pH (es un equilibrio intramolecular),
+    así que se calculan una sola vez aquí y se reusan en toda la distribución.
+    """
+    mol_R = data_R["mol_name"]
+    mol_D = data_D["mol_name"]
+    warns: list[str] = []
+    result: dict = {
+        "mol_R": mol_R, "mol_D": mol_D, "T": T, "ok": False, "warnings": warns,
+        "conf_R": None, "conf_D": None, "G_R_Eh": None, "G_D_Eh": None,
+        "dG_taut_kcal": None, "K_taut": None, "f_R": None, "f_D": None,
+        "G_macro_Eh": None, "theory_R": None, "theory_D": None,
+    }
+
+    def _warn(msg: str):
+        warns.append(msg)
+        warnings.warn(f"[tautómero {mol_R}⇌{mol_D}] {msg}")
+
+    gR = _state_G_total_direct(data_R, T=T)
+    gD = _state_G_total_direct(data_D, T=T)
+
+    if not gR.get("ok"):
+        _warn(gR.get("warn") or f"No se pudo obtener G_total para {mol_R}.")
+        return result
+    if not gD.get("ok"):
+        _warn(gD.get("warn") or f"No se pudo obtener G_total para {mol_D}.")
+        return result
+    if gR.get("warn"):
+        warns.append(gR["warn"])
+    if gD.get("warn"):
+        warns.append(gD["warn"])
+
+    if gR["theory_sp"] and gD["theory_sp"] and gR["theory_sp"] != gD["theory_sp"]:
+        _warn(
+            f"NIVEL DE TEORÍA INCONSISTENTE en el SP acuoso entre "
+            f"{mol_R} ('{gR['theory_sp']}') y {mol_D} ('{gD['theory_sp']}'). "
+            f"La comparación de tautómeros no es válida si difieren base/funcional/CPCM."
+        )
+
+    G_R = gR["G_total_Eh"]
+    G_D = gD["G_total_Eh"]
+    result["conf_R"], result["conf_D"] = gR["conf"], gD["conf"]
+    result["G_R_Eh"], result["G_D_Eh"] = G_R, G_D
+    result["theory_R"], result["theory_D"] = gR["theory_sp"], gD["theory_sp"]
+
+    dG_taut_kcal = (G_D - G_R) * HARTREE_TO_KCAL
+    K_taut = np.exp(-dG_taut_kcal / (R_KCAL * T))
+    f_R = 1.0 / (1.0 + K_taut)
+    f_D = K_taut / (1.0 + K_taut)
+
+    # Macroestado combinado (Boltzmann de dos "confórmeros" R y D)
+    G_min = min(G_R, G_D)
+    dG_R_kcal = (G_R - G_min) * HARTREE_TO_KCAL
+    dG_D_kcal = (G_D - G_min) * HARTREE_TO_KCAL
+    lnZ = np.log(np.exp(-dG_R_kcal / (R_KCAL * T)) + np.exp(-dG_D_kcal / (R_KCAL * T)))
+    G_macro = G_min - (R_KCAL * T * lnZ) / HARTREE_TO_KCAL
+
+    result.update({
+        "dG_taut_kcal": dG_taut_kcal, "K_taut": K_taut,
+        "f_R": f_R, "f_D": f_D, "G_macro_Eh": G_macro, "ok": True,
+    })
+
+    if verbose:
+        _print_tautomer_cycle(result)
+
+    return result
+
+
+def _print_tautomer_cycle(r: dict):
+    """Imprime el equilibrio de tautómeros neutro⇌zwitterión."""
+    sep = "─" * 66
+    print(f"\n  {sep}")
+    print(f"  EQUILIBRIO DE TAUTÓMEROS (sin H⁺) — {r['mol_R']} ⇌ {r['mol_D']}")
+    print(f"  T = {r['T']:.2f} K")
+    print(f"  {sep}")
+    print(f"  Conf. R (neutro)      : {r['conf_R']}")
+    print(f"  Conf. D (zwitterión)  : {r['conf_D']}")
+    print(f"  Nivel SP(R)  : {r['theory_R'] or '—'}")
+    print(f"  Nivel SP(D)  : {r['theory_D'] or '—'}")
+    print()
+    print(f"  {'G_total_CPCM(R)  [Eh]':<40} {r['G_R_Eh']:>14.8f}")
+    print(f"  {'G_total_CPCM(D)  [Eh]':<40} {r['G_D_Eh']:>14.8f}")
+    print(f"  {'─'*40}  {'─'*14}")
+    print(f"  {'ΔG_taut = G(D) − G(R)  [kcal/mol]':<40} {r['dG_taut_kcal']:>+14.3f}")
+    print(f"  {'K_taut = [D]/[R]':<40} {r['K_taut']:>14.4g}")
+    print()
+    print(f"  f(R, neutro)      = {r['f_R']*100:6.2f} %")
+    print(f"  f(D, zwitterión)  = {r['f_D']*100:6.2f} %")
+    dominant = "R (neutro)" if r["f_R"] >= r["f_D"] else "D (zwitterión)"
+    print(f"  Tautómero dominante: {dominant}")
+    print(f"\n  G_macroestado neutro (Boltzmann R+D) = {r['G_macro_Eh']:.8f} Eh")
+    print(f"  (este valor combinado es el que entra al ciclo de pKa como")
+    print(f"   estado 'neutro/zwitterión' frente al catión y al anión)")
+    if r["warnings"]:
+        print(f"\n  Advertencias:")
+        for w in r["warnings"]:
+            print(f"    ⚠  {w}")
+    print(f"  {sep}\n")
+
+
+# ─────────────────────────────────────────────
 #  CICLO TERMODINÁMICO DE pKa
 # ─────────────────────────────────────────────
 
@@ -570,6 +757,64 @@ def compute_pka(
 
     if method not in ("auto", "born", "direct"):
         raise ValueError(f"method debe ser 'auto', 'born' o 'direct', no {method!r}")
+
+    # ── Rama simplificada: uno de los dos lados es un macroestado combinado ─
+    # (neutro+zwitterión, construido por compute_tautomer_equilibrium). No hay
+    # forma físicamente limpia de combinar dos SP de fase gas de especies
+    # distintas en un ciclo de Born, así que este caso SIEMPRE usa el método
+    # directo, sin importar lo que pida --method.
+    if data_acid.get("is_macrostate") or data_base.get("is_macrostate"):
+        if method == "born":
+            _warn(
+                f"method='born' solicitado, pero uno de los estados "
+                f"({mol_acid if data_acid.get('is_macrostate') else mol_base}) "
+                f"es un macroestado combinado neutro+zwitterión. El ciclo de Born "
+                f"completo requiere SP fase gas de una única especie; no está "
+                f"definido para una mezcla. Se usa el método directo."
+            )
+
+        g_acid = _state_G_total_direct(data_acid, T=T)
+        g_base = _state_G_total_direct(data_base, T=T)
+
+        result["conf_acid"] = g_acid.get("conf")
+        result["conf_base"] = g_base.get("conf")
+        result["theory_sp_acid"] = g_acid.get("theory_sp")
+        result["theory_sp_base"] = g_base.get("theory_sp")
+
+        if not g_acid.get("ok"):
+            _warn(g_acid.get("warn") or f"No se pudo obtener G_total para {mol_acid}.")
+            return result
+        if not g_base.get("ok"):
+            _warn(g_base.get("warn") or f"No se pudo obtener G_total para {mol_base}.")
+            return result
+        if g_acid.get("warn"):
+            warns.append(g_acid["warn"])
+        if g_base.get("warn"):
+            warns.append(g_base["warn"])
+
+        if (g_acid["theory_sp"] and g_base["theory_sp"]
+                and g_acid["theory_sp"] != g_base["theory_sp"]):
+            _warn(
+                f"NIVEL DE TEORÍA INCONSISTENTE entre {mol_acid} "
+                f"('{g_acid['theory_sp']}') y {mol_base} ('{g_base['theory_sp']}')."
+            )
+
+        G_total_acid = g_acid["G_total_Eh"]
+        G_total_base = g_base["G_total_Eh"]
+        result["G_total_acid_Eh"] = G_total_acid
+        result["G_total_base_Eh"] = G_total_base
+        result["G_hplus_aq_kcal"] = G_HPLUS_AQ_DIRECT
+
+        dG_aq_kcal = (G_total_base - G_total_acid) * HARTREE_TO_KCAL + G_HPLUS_AQ_DIRECT
+        result["dG_aq_kcal"] = dG_aq_kcal
+        result["method"] = "direct"
+        result["pKa"] = dG_aq_kcal / (R_KCAL * T * LN10)
+        result["ok"] = True
+
+        if verbose:
+            _print_direct_cycle(result)
+
+        return result
 
     # ── Obtener confórmero representativo de cada estado ──────────────────
     conf_acid = data_acid.get("best_conf")
@@ -880,6 +1125,68 @@ def boltzmann_protonation_states(
     return pd.DataFrame(rows)
 
 
+def boltzmann_5state(
+    pKa0: Optional[float],
+    pKa1: Optional[float],
+    pKa2: Optional[float],
+    f_R: Optional[float],
+    f_D: Optional[float],
+    pH_values: list[float],
+) -> pd.DataFrame:
+    """
+    Distribución de Henderson-Hasselbalch encadenada para la cadena completa:
+
+        A⁺ (catión)  ⇌  [R (neutro) ⇌ D (zwitterión)]  ⇌  B⁻ (anión)  ⇌  C²⁻ (dianión)
+              pKa0                  (f_R / f_D, sin pH)        pKa1          pKa2
+
+    pKa0 = A → neutro/zwitterión + H⁺
+    pKa1 = neutro/zwitterión → B + H⁺
+    pKa2 = B → C + H⁺
+
+    f_R, f_D: fracción de R y D DENTRO del macroestado neutro (constante con
+    el pH, viene de compute_tautomer_equilibrium). Si no se proveen, se asume
+    f_R = 1, f_D = 0 (todo el macroestado se reporta como "neutro").
+
+    Cualquier pKa que sea None se trata como "ese estado no existe" (se omite
+    su rama de la cadena, igual que boltzmann_protonation_states).
+
+    Retorna DataFrame con columnas: pH, f_cation, f_R, f_D, f_neutral_macro,
+    f_anion, f_dianion (las que apliquen).
+    """
+    if f_R is None or f_D is None:
+        f_R, f_D = 1.0, 0.0
+
+    def _pow10(exp):
+        # clip para evitar overflow cuando un pKa está muy lejos del rango de pH
+        # (con pKa's físicamente razonables esto nunca se activa)
+        return 10.0 ** np.clip(exp, -300.0, 300.0)
+
+    rows = []
+    for pH in pH_values:
+        r0 = _pow10(pKa0 - pH) if pKa0 is not None else 0.0
+        r1 = _pow10(pH - pKa1) if pKa1 is not None else 0.0
+        r2 = (_pow10(2 * pH - pKa1 - pKa2)
+              if (pKa1 is not None and pKa2 is not None) else 0.0)
+
+        D = 1.0 + r0 + r1 + r2
+        f_neutral_macro = 1.0 / D
+        row = {
+            "pH":               pH,
+            "f_neutral_macro":  f_neutral_macro,
+            "f_R":              f_neutral_macro * f_R,
+            "f_D":              f_neutral_macro * f_D,
+        }
+        if pKa0 is not None:
+            row["f_cation"] = r0 / D
+        if pKa1 is not None:
+            row["f_anion"] = r1 / D
+        if pKa1 is not None and pKa2 is not None:
+            row["f_dianion"] = r2 / D
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
 # ─────────────────────────────────────────────
 #  IMPRESIÓN DE RESULTADOS
 # ─────────────────────────────────────────────
@@ -920,58 +1227,48 @@ def print_mol_summary(data: dict, verbose: bool = False):
         print(f"\n  ⚠  {w}")
 
 
-def print_pka_summary(pka1: dict, pka2: Optional[dict] = None):
-    """Imprime resumen de pKa1 y pKa2 con diagnóstico de incertidumbre."""
+def _print_single_pka(pka: dict, label: str):
+    """Imprime un único resultado de pKa con su etiqueta (pKa₀, pKa₁, pKa₂, ...)."""
+    if pka is None:
+        return
+    if pka["ok"]:
+        print(f"\n  {label}  ({pka['mol_acid']} → {pka['mol_base']} + H⁺)"
+              f"   [método: {pka['method']}]")
+        if pka["method"] == "born":
+            print(f"  ΔG_gas        = {pka['dG_gas_kcal']:+.3f} kcal/mol")
+            print(f"  ΔG_solv(ácido) = {pka['dG_solv_acid_kcal']:+.3f} kcal/mol")
+            print(f"  ΔG_solv(base)  = {pka['dG_solv_base_kcal']:+.3f} kcal/mol")
+            print(f"  ΔG_solv(H⁺)   = {DG_SOLV_HPLUS:+.3f} kcal/mol  [Kelly 2006]")
+        else:
+            print(f"  G(H⁺, aq)     = {pka['G_hplus_aq_kcal']:+.3f} kcal/mol "
+                  f"[Pliego & Riveros 2002]")
+        print(f"  ΔG_aq         = {pka['dG_aq_kcal']:+.3f} kcal/mol")
+        print(f"\n  ━━►  {label}  =  {pka['pKa']:.2f}  (T = {pka['T']:.2f} K)")
+        if pka["warnings"]:
+            print(f"\n  ⚠  Advertencias (revisar antes de reportar):")
+            for w in pka["warnings"]:
+                print(f"     ⚠  {w}")
+    else:
+        print(f"\n  {label}: NO calculado.")
+        for w in pka["warnings"]:
+            print(f"    ⚠  {w}")
+
+
+def print_pka_summary(pka_list: list):
+    """
+    Imprime resumen de todos los pKa's calculados.
+
+    pka_list: lista de tuplas (resultado_dict_o_None, etiqueta_str), en orden,
+    p. ej. [(pka0, "pKa₀ (A→R/D)"), (pka1, "pKa₁ (R/D→B)"), (pka2, "pKa₂ (B→C)")]
+    """
     sep = "═" * 74
     print(f"\n{sep}")
     print(f"  RESULTADOS FINALES — CICLOS DE pKa")
     print(sep)
 
-    if pka1["ok"]:
-        print(f"\n  pKa₁  ({pka1['mol_acid']} → {pka1['mol_base']} + H⁺)"
-              f"   [método: {pka1['method']}]")
-        if pka1["method"] == "born":
-            print(f"  ΔG_gas        = {pka1['dG_gas_kcal']:+.3f} kcal/mol")
-            print(f"  ΔG_solv(AH)   = {pka1['dG_solv_acid_kcal']:+.3f} kcal/mol")
-            print(f"  ΔG_solv(A⁻)   = {pka1['dG_solv_base_kcal']:+.3f} kcal/mol")
-            print(f"  ΔG_solv(H⁺)   = {DG_SOLV_HPLUS:+.3f} kcal/mol  [Kelly 2006]")
-        else:
-            print(f"  G(H⁺, aq)     = {pka1['G_hplus_aq_kcal']:+.3f} kcal/mol "
-                  f"[Pliego & Riveros 2002]")
-        print(f"  ΔG_aq         = {pka1['dG_aq_kcal']:+.3f} kcal/mol")
-        print(f"\n  ━━►  pKa₁  =  {pka1['pKa']:.2f}  (T = {pka1['T']:.2f} K)")
-        if pka1["warnings"]:
-            print(f"\n  ⚠  Advertencias (revisar antes de reportar):")
-            for w in pka1["warnings"]:
-                print(f"     ⚠  {w}")
-    else:
-        print(f"\n  pKa₁: NO calculado.")
-        for w in pka1["warnings"]:
-            print(f"    ⚠  {w}")
-
-    if pka2 is not None:
-        print()
-        if pka2["ok"]:
-            print(f"  pKa₂  ({pka2['mol_acid']} → {pka2['mol_base']} + H⁺)"
-                  f"   [método: {pka2['method']}]")
-            if pka2["method"] == "born":
-                print(f"  ΔG_gas        = {pka2['dG_gas_kcal']:+.3f} kcal/mol")
-                print(f"  ΔG_solv(AH⁻)  = {pka2['dG_solv_acid_kcal']:+.3f} kcal/mol")
-                print(f"  ΔG_solv(A²⁻)  = {pka2['dG_solv_base_kcal']:+.3f} kcal/mol")
-                print(f"  ΔG_solv(H⁺)   = {DG_SOLV_HPLUS:+.3f} kcal/mol  [Kelly 2006]")
-            else:
-                print(f"  G(H⁺, aq)     = {pka2['G_hplus_aq_kcal']:+.3f} kcal/mol "
-                      f"[Pliego & Riveros 2002]")
-            print(f"  ΔG_aq         = {pka2['dG_aq_kcal']:+.3f} kcal/mol")
-            print(f"\n  ━━►  pKa₂  =  {pka2['pKa']:.2f}  (T = {pka2['T']:.2f} K)")
-            if pka2["warnings"]:
-                print(f"\n  ⚠  Advertencias (revisar antes de reportar):")
-                for w in pka2["warnings"]:
-                    print(f"     ⚠  {w}")
-        else:
-            print(f"  pKa₂: NO calculado.")
-            for w in pka2["warnings"]:
-                print(f"    ⚠  {w}")
+    for pka, label in pka_list:
+        if pka is not None:
+            _print_single_pka(pka, label)
 
     print(f"\n  Nota: incertidumbre típica ±1–2 unidades de pKa para métodos")
     print(f"  Born/CPCM a nivel ωB97X-D3/def2-TZVPD (Ho & Coote 2010). El método")
@@ -979,6 +1276,8 @@ def print_pka_summary(pka1: dict, pka2: Optional[dict] = None):
     print(f"  Pliego & Riveros 2002 — esta constante NO es intercambiable con la")
     print(f"  de Tissandier/Kelly usada en 'born', que está calibrada para SP en")
     print(f"  fase gas pura. Cada método usa su propia referencia del protón.")
+    print(f"  Los pasos que involucran el macroestado neutro/zwitterión combinado")
+    print(f"  siempre usan 'direct' (ver advertencias arriba si pediste 'born').")
     print(f"{sep}\n")
 
 
@@ -1034,6 +1333,66 @@ def print_distribution_table(
         pH_PI = (pKa1 + pKa2) / 2
         print(f"    Punto isoeléctrico (pI) ≈ (pKa₁ + pKa₂)/2 = {pH_PI:.2f}")
 
+    print(sep)
+
+
+def print_distribution_table_5(
+    df_dist: pd.DataFrame,
+    pKa0: Optional[float],
+    pKa1: Optional[float],
+    pKa2: Optional[float],
+    ph_highlight: Optional[float] = None,
+):
+    """Imprime tabla de distribución de 5 especies (catión, R, D, anión, dianión)."""
+    sep = "─" * 92
+    print(f"\n{sep}")
+    hdr = "  DISTRIBUCIÓN DE ESTADOS DE PROTONACIÓN  ("
+    parts = []
+    if pKa0 is not None: parts.append(f"pKa₀ = {pKa0:.2f}")
+    if pKa1 is not None: parts.append(f"pKa₁ = {pKa1:.2f}")
+    if pKa2 is not None: parts.append(f"pKa₂ = {pKa2:.2f}")
+    print(hdr + ", ".join(parts) + ")")
+    print(sep)
+
+    has_cation  = "f_cation"  in df_dist.columns
+    has_anion   = "f_anion"   in df_dist.columns
+    has_dianion = "f_dianion" in df_dist.columns
+
+    cols   = ["pH"]
+    labels = [f"{'pH':>6}"]
+    if has_cation:  labels.append(f"{'f(A⁺)':>9}")
+    labels.append(f"{'f(R)':>9}")
+    labels.append(f"{'f(D)':>9}")
+    if has_anion:   labels.append(f"{'f(B⁻)':>9}")
+    if has_dianion: labels.append(f"{'f(C²⁻)':>9}")
+    labels.append("Dominante")
+    print(f"\n  {'  '.join(labels)}")
+    print(f"  {'─'*(len(''.join(labels)) + 2*(len(labels)-1))}")
+
+    for _, row in df_dist.iterrows():
+        pH = row["pH"]
+        fracs = {"R": row.get("f_R", 0.0), "D": row.get("f_D", 0.0)}
+        vals = [f"{pH:6.2f}"]
+        if has_cation:
+            fracs["A⁺"] = row.get("f_cation", 0.0)
+            vals.append(f"{row.get('f_cation', 0.0):9.4f}")
+        vals.append(f"{row.get('f_R', 0.0):9.4f}")
+        vals.append(f"{row.get('f_D', 0.0):9.4f}")
+        if has_anion:
+            fracs["B⁻"] = row.get("f_anion", 0.0)
+            vals.append(f"{row.get('f_anion', 0.0):9.4f}")
+        if has_dianion:
+            fracs["C²⁻"] = row.get("f_dianion", 0.0)
+            vals.append(f"{row.get('f_dianion', 0.0):9.4f}")
+        dominant = max(fracs, key=fracs.get)
+        marker = " ◀" if (ph_highlight is not None and abs(pH - ph_highlight) < 0.05) else ""
+        print(f"  {'  '.join(vals)}  {dominant}{marker}")
+
+    print(f"\n  Nota: f(R) y f(D) son las fracciones DENTRO del macroestado neutro")
+    print(f"  (equilibrio de tautómeros, independiente del pH); f(R)+f(D) = f(neutro/zwitterión total).")
+    if pKa0 is not None and pKa1 is not None:
+        pH_PI = (pKa0 + pKa1) / 2
+        print(f"\n  pI aproximado ≈ (pKa₀ + pKa₁)/2 = {pH_PI:.2f}")
     print(sep)
 
 
@@ -1107,6 +1466,71 @@ def plot_distribution(
     plt.close(fig)
 
 
+def plot_distribution_5(
+    df_dist: pd.DataFrame,
+    pKa0: Optional[float],
+    pKa1: Optional[float],
+    pKa2: Optional[float],
+    output_path: Optional[Path] = None,
+    ph_highlight: Optional[float] = None,
+):
+    """Diagrama de distribución de 5 especies (catión, R, D, anión, dianión) vs pH."""
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.ticker as ticker
+    except ImportError:
+        print("  ⚠  matplotlib no disponible. Instalar con: conda install matplotlib")
+        return
+
+    pH_vals = df_dist["pH"].values
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+
+    series = []
+    if "f_cation" in df_dist.columns:
+        series.append(("f_cation", "A⁺ catión (q=+1)", "#9C27B0", "-"))
+    series.append(("f_R", "R neutro (q=0)",       "#2196F3", "-"))
+    series.append(("f_D", "D zwitterión (q=0)",   "#00BCD4", "--"))
+    if "f_anion" in df_dist.columns:
+        series.append(("f_anion", "B⁻ anión (q=−1)",   "#4CAF50", "-"))
+    if "f_dianion" in df_dist.columns:
+        series.append(("f_dianion", "C²⁻ dianión (q=−2)", "#F44336", "-"))
+
+    for col, label, color, ls in series:
+        if col in df_dist.columns:
+            ax.plot(pH_vals, df_dist[col].values * 100, label=label,
+                    color=color, linewidth=2.0, linestyle=ls)
+
+    if pKa0 is not None:
+        ax.axvline(pKa0, color="#9C27B0", linestyle=":", alpha=0.6, label=f"pKa₀ = {pKa0:.2f}")
+    if pKa1 is not None:
+        ax.axvline(pKa1, color="#4CAF50", linestyle=":", alpha=0.6, label=f"pKa₁ = {pKa1:.2f}")
+    if pKa2 is not None:
+        ax.axvline(pKa2, color="#F44336", linestyle=":", alpha=0.6, label=f"pKa₂ = {pKa2:.2f}")
+
+    if ph_highlight is not None:
+        ax.axvline(ph_highlight, color="gray", linestyle=":", alpha=0.8,
+                   label=f"pH = {ph_highlight} (referencia)")
+        ax.axvspan(ph_highlight - 0.1, ph_highlight + 0.1, alpha=0.08, color="gray")
+
+    ax.set_xlabel("pH", fontsize=12)
+    ax.set_ylabel("Fracción molar (%)", fontsize=12)
+    ax.set_title("Distribución de estados de protonación\n"
+                 "catión ⇌ [neutro ⇌ zwitterión] ⇌ anión ⇌ dianión", fontsize=11)
+    ax.set_ylim(-2, 102)
+    ax.set_xlim(pH_vals[0], pH_vals[-1])
+    ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%g%%"))
+    ax.legend(fontsize=8, loc="center right", ncol=1)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    if output_path:
+        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        print(f"  Gráfico guardado en: {output_path}")
+    else:
+        plt.show()
+    plt.close(fig)
+
+
 def plot_conformer_boltzmann(data_list: list[dict], output_path: Optional[Path] = None):
     """
     Gráfico de barras apiladas: distribución conformacional (298 K) por estado.
@@ -1167,19 +1591,26 @@ def plot_conformer_boltzmann(data_list: list[dict], output_path: Optional[Path] 
 # ─────────────────────────────────────────────
 
 def export_results(
-    pka1: dict,
-    pka2: Optional[dict],
+    pka_list: list,
     df_dist: pd.DataFrame,
     data_list: list[dict],
     fmt: str,
+    taut_result: Optional[dict] = None,
 ):
-    """Exporta resultados del ciclo de pKa y distribución de especies."""
+    """
+    Exporta resultados del ciclo de pKa y distribución de especies.
+
+    pka_list: lista de tuplas (resultado_dict_o_None, etiqueta_str), p. ej.
+      [(pka0, "pKa0"), (pka1, "pKa1"), (pka2, "pKa2")]
+    taut_result: dict de compute_tautomer_equilibrium(), opcional (se agrega
+      como fila/hoja adicional si se provee).
+    """
     out_dir = WORK_ROOT
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── DataFrame del ciclo de Born ─────────────────────────────────────
+    # ── DataFrame del ciclo de Born / directo ────────────────────────────
     cycle_rows = []
-    for pka_r, label in [(pka1, "pKa1"), (pka2, "pKa2")]:
+    for pka_r, label in pka_list:
         if pka_r is None:
             continue
         cycle_rows.append({
@@ -1203,6 +1634,24 @@ def export_results(
 
     df_cycle = pd.DataFrame(cycle_rows)
 
+    # ── DataFrame del equilibrio de tautómeros (opcional) ────────────────
+    df_taut = None
+    if taut_result is not None and taut_result.get("ok"):
+        df_taut = pd.DataFrame([{
+            "mol_R":         taut_result.get("mol_R"),
+            "mol_D":         taut_result.get("mol_D"),
+            "conf_R":        taut_result.get("conf_R"),
+            "conf_D":        taut_result.get("conf_D"),
+            "T_K":           taut_result.get("T"),
+            "G_R_Eh":        taut_result.get("G_R_Eh"),
+            "G_D_Eh":        taut_result.get("G_D_Eh"),
+            "dG_taut_kcal":  taut_result.get("dG_taut_kcal"),
+            "K_taut":        taut_result.get("K_taut"),
+            "f_R":           taut_result.get("f_R"),
+            "f_D":           taut_result.get("f_D"),
+            "G_macro_Eh":    taut_result.get("G_macro_Eh"),
+        }])
+
     # ── DataFrame de distribución conformacional ─────────────────────────
     conf_rows = []
     for d in data_list:
@@ -1217,6 +1666,8 @@ def export_results(
         df_cycle.to_csv(out_dir / "pka_cycle.csv", index=False)
         df_dist.to_csv(out_dir / "protonation_distribution.csv", index=False)
         df_confs.to_csv(out_dir / "conformer_boltzmann.csv", index=False)
+        if df_taut is not None:
+            df_taut.to_csv(out_dir / "tautomer_equilibrium.csv", index=False)
         print(f"  CSVs guardados en: {out_dir}/")
 
     if fmt in ("xlsx", "both"):
@@ -1224,6 +1675,8 @@ def export_results(
         with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
             if not df_cycle.empty:
                 df_cycle.to_excel(writer, sheet_name="pKa_cycle", index=False)
+            if df_taut is not None:
+                df_taut.to_excel(writer, sheet_name="Tautomer_equilibrium", index=False)
             df_dist.to_excel(writer, sheet_name="Species_distribution", index=False)
             if not df_confs.empty:
                 # columnas relevantes
@@ -1245,12 +1698,17 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Ejemplos:
-  # Los tres estados (pKa1 + pKa2 + distribución completa):
+  # Los tres estados clásicos (pKa1 + pKa2 + distribución):
   python protonation_cycle.py \\
       --neutral R --anion B --dianion C
 
   # Solo pKa1:
   python protonation_cycle.py --neutral R --anion B
+
+  # Cadena completa de 5 estados con catión y zwitterión (tautómero de R):
+  python protonation_cycle.py \\
+      --neutral R --anion B --dianion C --protonated A --zwitterion D \\
+      --ph 7 --method direct --export xlsx --plot --verbose
 
   # Con exportación, gráficos y pH de referencia antártico:
   python protonation_cycle.py \\
@@ -1259,12 +1717,19 @@ Ejemplos:
         """,
     )
 
-    parser.add_argument("--neutral",  metavar="DIR",
-                        help="Nombre de carpeta en runs/ para AH₂ (q=0), p. ej. 'R'")
-    parser.add_argument("--anion",    metavar="DIR",
-                        help="Nombre de carpeta en runs/ para AH⁻ (q=−1), p. ej. 'B'")
-    parser.add_argument("--dianion",  metavar="DIR",
-                        help="Nombre de carpeta en runs/ para A²⁻ (q=−2), p. ej. 'C'")
+    parser.add_argument("--neutral",    metavar="DIR",
+                        help="Carpeta en runs/ para el neutro R (q=0), p. ej. 'R'")
+    parser.add_argument("--anion",      metavar="DIR",
+                        help="Carpeta en runs/ para el anión B (q=−1), p. ej. 'B'")
+    parser.add_argument("--dianion",    metavar="DIR",
+                        help="Carpeta en runs/ para el dianión C (q=−2), p. ej. 'C'")
+    parser.add_argument("--protonated", metavar="DIR",
+                        help="Carpeta en runs/ para el catión protonado A (q=+1), "
+                             "p. ej. 'A'. Requiere también --zwitterion.")
+    parser.add_argument("--zwitterion", metavar="DIR",
+                        help="Carpeta en runs/ para el zwitterión D — TAUTÓMERO de "
+                             "--neutral (mismo q=0, mismos átomos), p. ej. 'D'. "
+                             "Requiere también --protonated y --neutral.")
     parser.add_argument("--ph",       type=float, default=PH_ANTARCTIC,
                         help=f"pH de referencia para la distribución "
                              f"(default: {PH_ANTARCTIC}, agua de mar antártica)")
@@ -1277,7 +1742,9 @@ Ejemplos:
                         help="Método para ΔG_aq: 'born' (ciclo completo, requiere "
                              "SP fase gas), 'direct' (solo CPCM, sin SP fase gas), "
                              "'auto' usa born si hay SP gas y si no cae a direct "
-                             "(default: auto)")
+                             "(default: auto). Los pasos que involucran el "
+                             "macroestado neutro/zwitterión (con --protonated/"
+                             "--zwitterion) siempre usan 'direct'.")
     parser.add_argument("--export",   choices=["csv", "xlsx", "both"], default=None,
                         help="Exportar resultados")
     parser.add_argument("--plot",     action="store_true",
@@ -1290,12 +1757,31 @@ Ejemplos:
     if args.neutral is None and args.anion is None:
         parser.error("Debes proporcionar al menos --neutral y --anion.")
 
-    # ── Recolectar datos por estado ──────────────────────────────────────
-    data_neutral = data_anion = data_dianion = None
+    use_extended = args.protonated is not None or args.zwitterion is not None
+    if use_extended:
+        missing = [name for name, val in
+                   [("--protonated", args.protonated), ("--zwitterion", args.zwitterion),
+                    ("--neutral", args.neutral)] if val is None]
+        if missing:
+            parser.error(
+                "La cadena extendida (catión + zwitterión) requiere "
+                "--protonated, --zwitterion y --neutral simultáneamente. "
+                f"Falta(n): {', '.join(missing)}."
+            )
 
     print("\n" + "═" * 74)
     print("  PROTONATION CYCLE  —  FAE-MAA / kmilozeta")
     print("═" * 74)
+
+    if use_extended:
+        _run_extended(args)
+    else:
+        _run_classic(args)
+
+
+def _run_classic(args):
+    """Cadena original de 3 estados: neutro → anión → dianión."""
+    data_neutral = data_anion = data_dianion = None
 
     if args.neutral:
         print(f"\n▸ Cargando estado neutro: {args.neutral}")
@@ -1312,9 +1798,7 @@ Ejemplos:
         data_dianion = collect_mol_data(args.dianion, verbose=args.verbose)
         print_mol_summary(data_dianion, verbose=args.verbose)
 
-    # ── Ciclo de pKa ─────────────────────────────────────────────────────
-    pka1_result = None
-    pka2_result = None
+    pka1_result = pka2_result = None
 
     if data_neutral and data_anion:
         print(f"\n▸ Calculando pKa₁  ({args.neutral} → {args.anion} + H⁺)")
@@ -1331,21 +1815,14 @@ Ejemplos:
               "Revisa los directorios y los SP fase gas.")
         sys.exit(1)
 
-    # Imprimir resumen de pKa
-    print_pka_summary(
-        pka1_result or {"ok": False, "warnings": ["No calculado"], "mol_acid": "—",
-                        "mol_base": "—", "T": T_STD, "method": None},
-        pka2_result,
-    )
+    print_pka_summary([(pka1_result, "pKa₁"), (pka2_result, "pKa₂")])
 
-    # ── Distribución de especies ──────────────────────────────────────────
     pKa1 = pka1_result["pKa"] if (pka1_result and pka1_result["ok"]) else None
     pKa2 = pka2_result["pKa"] if (pka2_result and pka2_result["ok"]) else None
 
     if pKa1 is not None:
         pH_range = np.arange(args.ph_range[0], args.ph_range[1] + args.ph_step / 2,
                              args.ph_step)
-        # Incluir siempre los pH de referencia y los pKa
         pH_highlights = [args.ph, PH_STANDARD]
         if pKa1: pH_highlights.append(round(pKa1, 1))
         if pKa2: pH_highlights.append(round(pKa2, 1))
@@ -1354,7 +1831,6 @@ Ejemplos:
 
         df_dist = boltzmann_protonation_states(pKa1, pKa2, pH_all)
 
-        # Tabla condensada (paso 0.5 para no saturar la pantalla)
         pH_display = np.arange(args.ph_range[0], args.ph_range[1] + 0.5, 0.5)
         pH_display_list = sorted(set(
             [round(p, 1) for p in pH_display] + pH_highlights
@@ -1364,7 +1840,6 @@ Ejemplos:
         df_display = boltzmann_protonation_states(pKa1, pKa2, pH_display_list)
         print_distribution_table(df_display, pKa1, pKa2, ph_highlight=args.ph)
 
-        # Distribución a los pH de referencia
         print(f"\n  ── Fracciones a pH de referencia ──")
         for pH_ref, label in [
             (args.ph,     f"pH {args.ph} (agua de mar antártica)"),
@@ -1383,29 +1858,156 @@ Ejemplos:
     else:
         df_dist = pd.DataFrame()
 
-    # ── Exportar ─────────────────────────────────────────────────────────
     data_list = [d for d in [data_neutral, data_anion, data_dianion] if d is not None]
 
     if args.export and not df_dist.empty:
+        export_results([(pka1_result, "pKa1"), (pka2_result, "pKa2")],
+                       df_dist, data_list, args.export)
+
+    if args.plot and pKa1 is not None:
+        out_dir = WORK_ROOT
+        plot_distribution(df_dist, pKa1, pKa2,
+                          output_path=out_dir / "species_distribution.png",
+                          ph_highlight=args.ph)
+        plot_conformer_boltzmann(data_list,
+                                 output_path=out_dir / "conformer_boltzmann.png")
+
+    print("\nTerminado.\n")
+
+
+def _run_extended(args):
+    """
+    Cadena de 5 estados:
+      A⁺ (catión) ⇌ [R (neutro) ⇌ D (zwitterión)] ⇌ B⁻ (anión) ⇌ C²⁻ (dianión)
+    """
+    print(f"\n▸ Cargando catión protonado: {args.protonated}")
+    data_A = collect_mol_data(args.protonated, verbose=args.verbose)
+    print_mol_summary(data_A, verbose=args.verbose)
+
+    print(f"\n▸ Cargando estado neutro: {args.neutral}")
+    data_R = collect_mol_data(args.neutral, verbose=args.verbose)
+    print_mol_summary(data_R, verbose=args.verbose)
+
+    print(f"\n▸ Cargando zwitterión (tautómero de {args.neutral}): {args.zwitterion}")
+    data_D = collect_mol_data(args.zwitterion, verbose=args.verbose)
+    print_mol_summary(data_D, verbose=args.verbose)
+
+    data_B = data_C = None
+    if args.anion:
+        print(f"\n▸ Cargando anión: {args.anion}")
+        data_B = collect_mol_data(args.anion, verbose=args.verbose)
+        print_mol_summary(data_B, verbose=args.verbose)
+
+    if args.dianion:
+        print(f"\n▸ Cargando dianión: {args.dianion}")
+        data_C = collect_mol_data(args.dianion, verbose=args.verbose)
+        print_mol_summary(data_C, verbose=args.verbose)
+
+    # ── Equilibrio de tautómeros R ⇌ D (sin H⁺) ────────────────────────────
+    print(f"\n▸ Calculando equilibrio de tautómeros  ({args.neutral} ⇌ {args.zwitterion})")
+    taut_result = compute_tautomer_equilibrium(data_R, data_D, T=T_STD, verbose=args.verbose)
+    if not taut_result["ok"]:
+        print("\n  ⚠  No se pudo calcular el equilibrio de tautómeros. Abortando.")
+        for w in taut_result["warnings"]:
+            print(f"    ⚠  {w}")
+        sys.exit(1)
+    if not args.verbose:
+        _print_tautomer_cycle(taut_result)
+
+    data_neutral_macro = {
+        "mol_name":          f"{args.neutral}/{args.zwitterion}",
+        "is_macrostate":     True,
+        "G_total_direct_Eh": taut_result["G_macro_Eh"],
+        "conf_label":        (f"{args.neutral}:{taut_result['conf_R']} + "
+                              f"{args.zwitterion}:{taut_result['conf_D']} (Boltzmann)"),
+        "theory_label":      taut_result["theory_R"] or taut_result["theory_D"],
+    }
+
+    # ── Cadena de pKa: A→[R/D], [R/D]→B, B→C ───────────────────────────────
+    pka0_result = pka1_result = pka2_result = None
+
+    print(f"\n▸ Calculando pKa₀  ({args.protonated} → neutro/zwitterión + H⁺)")
+    pka0_result = compute_pka(data_A, data_neutral_macro,
+                              T=T_STD, verbose=args.verbose, method=args.method)
+
+    if data_B:
+        print(f"\n▸ Calculando pKa₁  (neutro/zwitterión → {args.anion} + H⁺)")
+        pka1_result = compute_pka(data_neutral_macro, data_B,
+                                  T=T_STD, verbose=args.verbose, method=args.method)
+
+    if data_B and data_C:
+        print(f"\n▸ Calculando pKa₂  ({args.anion} → {args.dianion} + H⁺)")
+        pka2_result = compute_pka(data_B, data_C,
+                                  T=T_STD, verbose=args.verbose, method=args.method)
+
+    print_pka_summary([
+        (pka0_result, "pKa₀ (A→R/D)"),
+        (pka1_result, "pKa₁ (R/D→B)"),
+        (pka2_result, "pKa₂ (B→C)"),
+    ])
+
+    pKa0 = pka0_result["pKa"] if (pka0_result and pka0_result["ok"]) else None
+    pKa1 = pka1_result["pKa"] if (pka1_result and pka1_result["ok"]) else None
+    pKa2 = pka2_result["pKa"] if (pka2_result and pka2_result["ok"]) else None
+    f_R, f_D = taut_result["f_R"], taut_result["f_D"]
+
+    if pKa0 is None and pKa1 is None:
+        print("\n  ⚠  No se pudo calcular ningún pKa de la cadena principal. "
+              "Revisa los directorios.")
+        sys.exit(1)
+
+    # ── Distribución de especies ──────────────────────────────────────────
+    pH_range = np.arange(args.ph_range[0], args.ph_range[1] + args.ph_step / 2, args.ph_step)
+    pH_highlights = [args.ph, PH_STANDARD]
+    for pk in (pKa0, pKa1, pKa2):
+        if pk is not None:
+            pH_highlights.append(round(pk, 1))
+    pH_all = sorted(set(list(pH_range) + pH_highlights))
+    pH_all = [p for p in pH_all if args.ph_range[0] <= p <= args.ph_range[1]]
+
+    df_dist = boltzmann_5state(pKa0, pKa1, pKa2, f_R, f_D, pH_all)
+
+    pH_display = np.arange(args.ph_range[0], args.ph_range[1] + 0.5, 0.5)
+    pH_display_list = sorted(set([round(p, 1) for p in pH_display] + pH_highlights))
+    pH_display_list = [p for p in pH_display_list if args.ph_range[0] <= p <= args.ph_range[1]]
+    df_display = boltzmann_5state(pKa0, pKa1, pKa2, f_R, f_D, pH_display_list)
+    print_distribution_table_5(df_display, pKa0, pKa1, pKa2, ph_highlight=args.ph)
+
+    print(f"\n  ── Fracciones a pH de referencia ──")
+    for pH_ref, label in [
+        (args.ph,     f"pH {args.ph} (agua de mar antártica)"),
+        (PH_STANDARD, f"pH {PH_STANDARD} (estándar)"),
+    ]:
+        row = boltzmann_5state(pKa0, pKa1, pKa2, f_R, f_D, [pH_ref])
+        if not row.empty:
+            r0 = row.iloc[0]
+            parts = []
+            if "f_cation" in row: parts.append(f"f(A⁺)={r0['f_cation']*100:.1f}%")
+            parts.append(f"f(R)={r0['f_R']*100:.1f}%")
+            parts.append(f"f(D)={r0['f_D']*100:.1f}%")
+            if "f_anion" in row: parts.append(f"f(B⁻)={r0['f_anion']*100:.1f}%")
+            if "f_dianion" in row: parts.append(f"f(C²⁻)={r0['f_dianion']*100:.1f}%")
+            print(f"    {label}: {', '.join(parts)}")
+
+    # ── Exportar ─────────────────────────────────────────────────────────
+    data_list = [d for d in [data_A, data_R, data_D, data_B, data_C] if d is not None]
+
+    if args.export and not df_dist.empty:
         export_results(
-            pka1_result or {},
-            pka2_result,
-            df_dist,
-            data_list,
-            args.export,
+            [(pka0_result, "pKa0"), (pka1_result, "pKa1"), (pka2_result, "pKa2")],
+            df_dist, data_list, args.export, taut_result=taut_result,
         )
 
     # ── Gráficos ─────────────────────────────────────────────────────────
-    if args.plot and pKa1 is not None:
+    if args.plot:
         out_dir = WORK_ROOT
-        plot_distribution(
-            df_dist, pKa1, pKa2,
+        plot_distribution_5(
+            df_dist, pKa0, pKa1, pKa2,
             output_path=out_dir / "species_distribution.png",
             ph_highlight=args.ph,
         )
         plot_conformer_boltzmann(
-            data_list,
-            output_path=out_dir / "conformer_boltzmann.png",
+            data_list, output_path=out_dir / "conformer_boltzmann.png",
         )
 
     print("\nTerminado.\n")
