@@ -1924,20 +1924,57 @@ def _run_extended(args):
     # ── Equilibrio de tautómeros R ⇌ D (sin H⁺) ────────────────────────────
     print(f"\n▸ Calculando equilibrio de tautómeros  ({args.neutral} ⇌ {args.zwitterion})")
     taut_result = compute_tautomer_equilibrium(data_R, data_D, T=T_STD, verbose=args.verbose)
+
     if not taut_result["ok"]:
-        print("\n  ⚠  No se pudo calcular el equilibrio de tautómeros. Abortando.")
+        # No se pudo cerrar el equilibrio R⇌D (típicamente porque D no tiene
+        # confórmero representativo). Esto NO debe abortar todo el script:
+        # se cae a usar R solo como estado "neutro" (f_R=100%, f_D=0%) y se
+        # sigue con la cadena de pKa para los estados que sí tienen datos.
+        print(f"\n  ⚠  No se pudo calcular el equilibrio de tautómeros "
+              f"({args.neutral}⇌{args.zwitterion}). Se continúa usando solo "
+              f"'{args.neutral}' como estado neutro "
+              f"(f_{args.neutral}=100%, f_{args.zwitterion}=0%).")
         for w in taut_result["warnings"]:
             print(f"    ⚠  {w}")
-        sys.exit(1)
-    if not args.verbose:
+
+        gR_fallback = _state_G_total_direct(data_R, T=T_STD)
+        if not gR_fallback.get("ok"):
+            print(f"\n  ⚠  Tampoco se pudo obtener G_total para "
+                  f"'{args.neutral}'. Abortando.")
+            sys.exit(1)
+
+        taut_result = {
+            "mol_R": args.neutral, "mol_D": args.zwitterion, "T": T_STD,
+            "ok": True,
+            "warnings": taut_result["warnings"] + [
+                f"Macroestado neutro construido solo con '{args.neutral}' "
+                f"(sin datos válidos para '{args.zwitterion}')."
+            ],
+            "conf_R": gR_fallback["conf"], "conf_D": None,
+            "G_R_Eh": gR_fallback["G_total_Eh"], "G_D_Eh": None,
+            "dG_taut_kcal": None, "K_taut": None,
+            "f_R": 1.0, "f_D": 0.0,
+            "G_macro_Eh": gR_fallback["G_total_Eh"],
+            "theory_R": gR_fallback["theory_sp"], "theory_D": None,
+        }
+        print(f"    → G_total({args.neutral}, confórmero {gR_fallback['conf']}) "
+              f"= {gR_fallback['G_total_Eh']:.8f} Eh  usado como G_macro")
+    elif not args.verbose:
         _print_tautomer_cycle(taut_result)
 
+    if taut_result["conf_D"] is not None:
+        conf_label = (f"{args.neutral}:{taut_result['conf_R']} + "
+                      f"{args.zwitterion}:{taut_result['conf_D']} (Boltzmann)")
+        mol_label  = f"{args.neutral}/{args.zwitterion}"
+    else:
+        conf_label = f"{args.neutral}:{taut_result['conf_R']} (sin {args.zwitterion})"
+        mol_label  = args.neutral
+
     data_neutral_macro = {
-        "mol_name":          f"{args.neutral}/{args.zwitterion}",
+        "mol_name":          mol_label,
         "is_macrostate":     True,
         "G_total_direct_Eh": taut_result["G_macro_Eh"],
-        "conf_label":        (f"{args.neutral}:{taut_result['conf_R']} + "
-                              f"{args.zwitterion}:{taut_result['conf_D']} (Boltzmann)"),
+        "conf_label":        conf_label,
         "theory_label":      taut_result["theory_R"] or taut_result["theory_D"],
     }
 
