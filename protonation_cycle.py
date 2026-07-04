@@ -259,6 +259,142 @@ def parse_theory_level(out_file: Path) -> Optional[str]:
     return None
 
 
+def parse_charge_mult_natoms(out_file: Path) -> dict:
+    """
+    Extrae carga total, multiplicidad y número de átomos de un .out de ORCA.
+
+    Se usa para validar que los estados de protonación pasados por
+    --protonated/--neutral/--anion/--dianion/--zwitterion realmente difieren
+    entre sí en la forma esperada (Δq=-1/ΔN_átomos=-1 para una desprotonación,
+    Δq=0/ΔN_átomos=0 para un par de tautómeros) — ver
+    _validate_state_charges(). Sin este chequeo, un mapeo de carpetas
+    desalineado (p. ej. --anion apuntando al estado equivocado, o un
+    best_conf que no corresponde a la geometría que se cree) se procesa sin
+    quejarse y produce un pKa numéricamente válido pero físicamente absurdo.
+
+    Prioriza la línea de eco del input ('|  N> * xyz Q M'), que es
+    exactamente lo que se envió a ORCA. Si no aparece (p. ej. geometría
+    leída de un archivo externo en vez de un bloque xyz inline), cae a los
+    patrones de la sección de configuración SCF ('Total Charge ... Charge
+    ... N', 'Multiplicity ... Mult ... N').
+
+    n_atoms se cuenta a partir del primer bloque
+    'CARTESIAN COORDINATES (ANGSTROEM)' del archivo.
+
+    Retorna {"charge": int|None, "mult": int|None, "n_atoms": int|None}.
+    """
+    null = {"charge": None, "mult": None, "n_atoms": None}
+    if not out_file.exists():
+        return null
+    try:
+        lines = out_file.read_text(errors="replace").splitlines()
+    except OSError:
+        return null
+
+    charge: Optional[int] = None
+    mult: Optional[int] = None
+    n_atoms: Optional[int] = None
+
+    # 1) Eco del input: "|  N> * xyz Q M"
+    pat_echo = re.compile(r"^\s*\|\s*\d+>\s*\*\s*xyz\s+(-?\d+)\s+(\d+)", re.IGNORECASE)
+    for line in lines:
+        m = pat_echo.match(line)
+        if m:
+            charge, mult = int(m.group(1)), int(m.group(2))
+            break
+
+    # 2) Fallback: bloque de configuración SCF ("Total Charge ... N")
+    if charge is None:
+        pat_q = re.compile(r"Total Charge\s+Charge\s+\.+\s*(-?\d+)", re.IGNORECASE)
+        for line in lines:
+            m = pat_q.search(line)
+            if m:
+                charge = int(m.group(1))
+                break
+    if mult is None:
+        pat_m = re.compile(r"Multiplicity\s+Mult\s+\.+\s*(\d+)", re.IGNORECASE)
+        for line in lines:
+            m = pat_m.search(line)
+            if m:
+                mult = int(m.group(1))
+                break
+
+    # 3) Número de átomos: primer bloque CARTESIAN COORDINATES (ANGSTROEM)
+    for idx, line in enumerate(lines):
+        if "CARTESIAN COORDINATES (ANGSTROEM)" in line.upper():
+            j = idx + 2  # saltar encabezado y línea separadora '---...'
+            count = 0
+            while j < len(lines) and lines[j].strip():
+                count += 1
+                j += 1
+            n_atoms = count if count > 0 else None
+            break
+
+    return {"charge": charge, "mult": mult, "n_atoms": n_atoms}
+
+
+def _validate_state_charges(
+    data_a: dict,
+    data_b: dict,
+    dq_expected: int,
+    dn_expected: int,
+    label_a: str,
+    label_b: str,
+) -> list[str]:
+    """
+    Verifica que data_b difiera de data_a exactamente en dq_expected unidades
+    de carga y dn_expected átomos. Ejemplos:
+      - compute_pka(acid, base):              dq_expected=-1, dn_expected=-1
+      - compute_tautomer_equilibrium(R, D):    dq_expected=0,  dn_expected=0
+
+    No aborta nada por sí sola: retorna una lista de mensajes. Los mensajes
+    que empiezan con '❌' son fatales — el llamador (compute_pka /
+    compute_tautomer_equilibrium) los trata como error y NO calcula el
+    pKa/equilibrio, en vez de seguir de largo con un resultado numérico sin
+    sentido físico. Los mensajes sin '❌' son informativos (p. ej. cuando no
+    se pudo parsear la carga/N° de átomos de alguno de los dos estados) y
+    solo se agregan a las advertencias.
+    """
+    msgs: list[str] = []
+    qa, qb = data_a.get("charge"), data_b.get("charge")
+    na, nb = data_a.get("n_atoms"), data_b.get("n_atoms")
+
+    if qa is None or qb is None:
+        msgs.append(
+            f"No se pudo verificar la carga entre '{label_a}' y '{label_b}' "
+            f"(carga no determinada desde el .out de ORCA en al menos uno de "
+            f"los dos estados). Verificar manualmente que la relación de "
+            f"carga esperada (Δq={dq_expected:+d}) sea correcta."
+        )
+    elif (qb - qa) != dq_expected:
+        msgs.append(
+            f"❌ CARGA INCONSISTENTE: '{label_a}' (q={qa:+d}) → '{label_b}' "
+            f"(q={qb:+d}) implica Δq={qb - qa:+d}, pero se esperaba "
+            f"Δq={dq_expected:+d}. Revisar si el mapeo de carpetas "
+            f"(--protonated/--neutral/--anion/--dianion/--zwitterion) "
+            f"corresponde al estado que crees que es."
+        )
+
+    if na is None or nb is None:
+        msgs.append(
+            f"No se pudo verificar N° de átomos entre '{label_a}' y '{label_b}' "
+            f"(N° de átomos no determinado desde el .out de ORCA en al menos "
+            f"uno de los dos estados). Verificar manualmente que la relación "
+            f"esperada (ΔN={dn_expected:+d}) sea correcta."
+        )
+    elif (nb - na) != dn_expected:
+        msgs.append(
+            f"❌ N° DE ÁTOMOS INCONSISTENTE: '{label_a}' (N={na}) → "
+            f"'{label_b}' (N={nb}) implica ΔN={nb - na:+d}, pero se esperaba "
+            f"ΔN={dn_expected:+d}. Revisar si el mapeo de carpetas "
+            f"corresponde al estado que crees que es, o si el confórmero "
+            f"representativo (best_conf) corresponde a la geometría "
+            f"esperada."
+        )
+
+    return msgs
+
+
 def parse_thermochem(freq_out: Path, T: float = T_STD) -> dict:
     """
     Extrae correcciones termoquímicas del bloque THERMOCHEMISTRY de ORCA 6.
@@ -673,6 +809,13 @@ def collect_mol_data(mol_name: str, verbose: bool = False,
         if gcorr_source == "goodvibes" and not tc["ok"] and tc.get("warning"):
             warns.append(f"[{mol_name}/{conf_id}] GoodVibes: {tc['warning']}")
 
+        # Carga/multiplicidad/N° átomos — para validación cruzada entre
+        # estados (ver _validate_state_charges). Se intenta primero desde el
+        # SP acuoso y, si falla, desde el freq.out del mismo confórmero.
+        cmn = parse_charge_mult_natoms(sp_aq_file)
+        if cmn["charge"] is None and cmn["n_atoms"] is None:
+            cmn = parse_charge_mult_natoms(freq_file)
+
         row: dict = {
             "conformer":   conf_id,
             "E_sp_aq":     e_sp_aq,
@@ -682,6 +825,9 @@ def collect_mol_data(mol_name: str, verbose: bool = False,
             "H_corr":      tc["H_corr"],
             "S_total_EhK": tc["S_total"],
             "ZPE":         tc["ZPE"],
+            "charge":      cmn["charge"],
+            "mult":        cmn["mult"],
+            "n_atoms":     cmn["n_atoms"],
         }
 
         # G_total compuesto a cada temperatura
@@ -754,12 +900,51 @@ def collect_mol_data(mol_name: str, verbose: bool = False,
             f"El ciclo de pKa requiere SP gas del confórmero representativo."
         )
 
+    # ── Carga / multiplicidad / N° átomos a nivel de estado ────────────────
+    # Todos los confórmeros de un mismo estado deben compartir carga, mult.
+    # y N° de átomos (son el mismo sistema químico, solo geometrías
+    # distintas). Si no es así, algo está mal en runs/<mol_name>/ (p. ej.
+    # confórmeros de dos estados de protonación mezclados en la misma
+    # carpeta) y NO se puede confiar en ningún valor único para la
+    # validación cruzada con estados vecinos (_validate_state_charges).
+    charges_seen  = sorted(set(df["charge"].dropna().astype(int)))
+    mults_seen    = sorted(set(df["mult"].dropna().astype(int)))
+    natoms_seen   = sorted(set(df["n_atoms"].dropna().astype(int)))
+
+    state_charge  = charges_seen[0] if len(charges_seen) == 1 else None
+    state_mult    = mults_seen[0]   if len(mults_seen)   == 1 else None
+    state_n_atoms = natoms_seen[0]  if len(natoms_seen)  == 1 else None
+
+    if len(charges_seen) > 1:
+        warns.append(
+            f"[{mol_name}] Carga inconsistente entre confórmeros: "
+            f"{charges_seen}. No se puede validar contra estados vecinos; "
+            f"revisar runs/{mol_name}/{SUBDIR_SP}/conf_*/sp.out."
+        )
+    if len(natoms_seen) > 1:
+        warns.append(
+            f"[{mol_name}] N° de átomos inconsistente entre confórmeros: "
+            f"{natoms_seen}. No se puede validar contra estados vecinos; "
+            f"revisar runs/{mol_name}/{SUBDIR_SP}/conf_*/sp.out."
+        )
+    if not charges_seen or not natoms_seen:
+        warns.append(
+            f"[{mol_name}] No se pudo determinar carga y/o N° de átomos "
+            f"desde ningún .out. La validación cruzada de carga/N° átomos "
+            f"frente a estados vecinos quedará deshabilitada para este "
+            f"estado (solo se emitirá una advertencia informativa, no un "
+            f"error)."
+        )
+
     return {
         "mol_name":     mol_name,
         "conformers":   rows,
         "df":           df,
         "best_conf":    best_conf,
         "G_boltz":      G_boltz,      # Hartree, ensemble efectivo por T
+        "charge":       state_charge,
+        "mult":         state_mult,
+        "n_atoms":      state_n_atoms,
         "ok":           len(rows) > 0,
         "warnings":     warns,
         "gcorr_source": gcorr_source,
@@ -874,6 +1059,23 @@ def compute_tautomer_equilibrium(
     def _warn(msg: str):
         warns.append(msg)
         warnings.warn(f"[tautómero {mol_R}⇌{mol_D}] {msg}")
+
+    # ── Validación de carga / N° de átomos entre R y D ──────────────────────
+    # R y D son tautómeros: mismo q, mismo N° de átomos (solo se desplaza un
+    # H interno). Si difieren, no son tautómeros del mismo par ácido-base y
+    # el "equilibrio" que se calcularía no tendría sentido físico.
+    charge_msgs = _validate_state_charges(
+        data_R, data_D, dq_expected=0, dn_expected=0,
+        label_a=mol_R, label_b=mol_D,
+    )
+    for m in charge_msgs:
+        _warn(m)
+    if any(m.startswith("❌") for m in charge_msgs):
+        _warn(
+            f"Abortando equilibrio de tautómeros ({mol_R}⇌{mol_D}) por "
+            f"inconsistencia de carga/N° de átomos."
+        )
+        return result
 
     gR = _state_G_total_direct(data_R, T=T, gcorr_source=gcorr_source)
     gD = _state_G_total_direct(data_D, T=T, gcorr_source=gcorr_source)
@@ -1032,6 +1234,27 @@ def compute_pka(
 
     if method not in ("auto", "born", "direct"):
         raise ValueError(f"method debe ser 'auto', 'born' o 'direct', no {method!r}")
+
+    # ── Validación de carga / N° de átomos entre ácido y base ──────────────
+    # Un pKa modela AH → A⁻ + H⁺: la base SIEMPRE debe tener Δq=-1 y
+    # ΔN_átomos=-1 respecto al ácido. Este chequeo corre ANTES de cualquier
+    # cálculo, para atrapar de inmediato un mapeo de carpetas desalineado
+    # (p. ej. --anion apuntando al estado equivocado, o un best_conf que no
+    # corresponde a la geometría esperada) en vez de dejar que el script
+    # calcule un pKa numéricamente válido pero físicamente sin sentido.
+    charge_msgs = _validate_state_charges(
+        data_acid, data_base, dq_expected=-1, dn_expected=-1,
+        label_a=mol_acid, label_b=mol_base,
+    )
+    for m in charge_msgs:
+        _warn(m)
+    if any(m.startswith("❌") for m in charge_msgs):
+        _warn(
+            f"Abortando cálculo de pKa ({mol_acid}→{mol_base}) por "
+            f"inconsistencia de carga/N° de átomos. Revisar el mapeo de "
+            f"estados antes de continuar."
+        )
+        return result
 
     # ── Rama simplificada: uno de los dos lados es un macroestado combinado ─
     # (neutro+zwitterión, construido por compute_tautomer_equilibrium). No hay
@@ -1483,6 +1706,12 @@ def print_mol_summary(data: dict, verbose: bool = False):
     if df.empty:
         print("  ⚠  Sin datos.")
         return
+
+    q, mult, n_at = data.get("charge"), data.get("mult"), data.get("n_atoms")
+    q_str  = f"{q:+d}"  if q  is not None else "?"
+    m_str  = f"{mult}"  if mult is not None else "?"
+    n_str  = f"{n_at}"  if n_at is not None else "?"
+    print(f"  Carga: {q_str}   Multiplicidad: {m_str}   N° átomos: {n_str}")
 
     # Tabla de confórmeros
     cols_base = ["conformer", "E_sp_aq", "thermo_ok", "n_imag"]
@@ -2311,6 +2540,12 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
         "G_total_direct_Eh": taut_result["G_macro_Eh"],
         "conf_label":        conf_label,
         "theory_label":      taut_result["theory_R"] or taut_result["theory_D"],
+        # R y D son tautómeros (mismo q, mismo N° átomos, ya validado en
+        # compute_tautomer_equilibrium), así que cualquiera de los dos sirve
+        # como representante del macroestado para la validación cruzada de
+        # compute_pka() frente al catión (A) y al anión (B).
+        "charge":            data_R.get("charge"),
+        "n_atoms":           data_R.get("n_atoms"),
     }
 
     # ── Cadena de pKa: A→[R/D], [R/D]→B, B→C ───────────────────────────────
