@@ -2685,9 +2685,19 @@ def _run_comparison(args, use_extended: bool):
     Activado con --goodvibes. Usa _run_classic() o _run_extended() según
     corresponda, sin duplicar lógica: solo cambia gcorr_source entre pasadas.
     """
-    if shutil.which("goodvibes") is None:
-        print("\n  ⚠  No se encontró el binario 'goodvibes' en PATH.")
-        print("     Instálalo con: pip install goodvibes --break-system-packages")
+    gv_python = _resolve_gv_python()
+    try:
+        check = subprocess.run(
+            [gv_python, "-c", "import goodvibes"],
+            capture_output=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(f"\n  ⚠  No se pudo verificar goodvibes con {gv_python}: {e}\n")
+        sys.exit(1)
+    if check.returncode != 0:
+        print(f"\n  ⚠  No se puede importar goodvibes con {gv_python}.")
+        print(f"     Instalar con: conda activate {GV_CONDA_ENV or '<env>'} && "
+              f"pip install goodvibes --break-system-packages")
         print("     (o, en un entorno conda: conda install -c conda-forge goodvibes)\n")
         sys.exit(1)
 
