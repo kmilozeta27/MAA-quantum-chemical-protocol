@@ -148,13 +148,13 @@ ORCA_BIN   = Path("/home/kmilozeta/orca_6_1_1_avx2/orca")
 CREST_BIN  = _resolve_bin("crest")  # resuelto vía PATH o conda env sciencebitch
 CENSO_BIN  = _resolve_bin("censo")  # resuelto vía PATH o conda env sciencebitch
 
-# Carpeta madre del proyecto. Cada molécula vive en PAPER_ROOT/<mol_name>/,
-# y sus archivos de cómputo (01_crest/, 02_opt/, etc.) se escriben dentro
-# de PAPER_ROOT/<mol_name>/runs/ — es decir, WORK_ROOT ya no es un único
-# directorio "runs/" que contiene a todas las moléculas; ahora cada
-# molécula tiene su propio "runs/" anidado bajo su carpeta en PAPER1.
+# Carpeta madre del proyecto (solo usada por --status para recorrer todos
+# los grupos moleculares). La ubicación real de cada run NO depende de
+# PAPER_ROOT sino de dónde vive el .xyz de entrada: se sigue la convención
+# <grupo>/molecules/<mol_name>.xyz  →  <grupo>/runs/<mol_name>/
+# (p.ej. PAPER1/MGLYVAL/molecules/D.xyz → PAPER1/MGLYVAL/runs/D/), ver _run_one().
 PAPER_ROOT = Path("/home/kmilozeta/PAPER1")   # carpeta madre del proyecto
-WORK_ROOT  = PAPER_ROOT                        # alias: raíz que contiene <mol_name>/runs/
+WORK_ROOT  = PAPER_ROOT                        # alias, usado solo por print_status()
 TMPL_DIR   = Path("templates")
 MULT       = 1                      # multiplicidad siempre 1
 CREST_TIMEOUT_HOURS = 24.0          # timeout CREST (horas)
@@ -639,10 +639,9 @@ def setup_logging(mol_dir: Path) -> logging.Logger:
     Crea un logger con nombre único por molécula para evitar que dos
     instancias paralelas del script compartan handlers y dupliquen líneas.
     """
-    # mol_dir ahora es PAPER_ROOT/<mol_name>/runs/, así que el nombre de la
-    # molécula está en el directorio padre (mol_dir.name sería "runs" para
-    # todas las moléculas, lo que rompería la unicidad del logger).
-    logger_name = f"pipeline.{mol_dir.parent.name}"
+    # mol_dir es <grupo>/runs/<mol_name>/ — el nombre de la molécula es
+    # directamente mol_dir.name (no mol_dir.parent.name, que sería "runs").
+    logger_name = f"pipeline.{mol_dir.name}"
     log = logging.getLogger(logger_name)
 
     # Evitar añadir handlers duplicados si se llama más de una vez
@@ -1438,7 +1437,7 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
 
     Args:
         conformers_xyz : ruta al ensemble CREST (multi-XYZ).
-        mol_dir        : directorio raíz del run (PAPER_ROOT/<mol_name>/runs/).
+        mol_dir        : directorio raíz del run (<grupo>/runs/<mol_name>/).
         charge         : carga formal de la molécula.
         log            : logger del pipeline.
         temperature    : temperatura para CENSO en K (default 274.15 = 1 °C Antártico).
@@ -3359,7 +3358,7 @@ def _check_cpu_budget(batch_size: int, nprocs_per_job: int, log: logging.Logger)
 # ─────────────────────────────────────────────
 
 def print_status():
-    """Imprime estado de todos los cálculos en PAPER_ROOT/<mol_name>/runs/."""
+    """Imprime estado de todos los cálculos en PAPER_ROOT/<grupo>/runs/<mol_name>/."""
     if not WORK_ROOT.exists():
         print(f"No se encontró el directorio '{WORK_ROOT}/'. Aún no hay cálculos.")
         return
@@ -3368,39 +3367,42 @@ def print_status():
     print(f"  Estado de runs en: {WORK_ROOT.resolve()}")
     print(f"{'─'*60}")
 
-    # Cada molécula es PAPER_ROOT/<mol_name>/, y sus etapas viven en
-    # PAPER_ROOT/<mol_name>/runs/ (no directamente en PAPER_ROOT/<mol_name>/).
-    for mol_parent in sorted(WORK_ROOT.iterdir()):
-        if not mol_parent.is_dir():
+    # Estructura: PAPER_ROOT/<grupo>/runs/<mol_name>/<etapas>
+    # (p.ej. PAPER1/MGLYVAL/runs/D/01_crest/, .../D/02_opt/, etc.)
+    for group_dir in sorted(WORK_ROOT.iterdir()):
+        if not group_dir.is_dir():
             continue
-        mol_dir = mol_parent / "runs"
-        if not mol_dir.is_dir():
+        runs_dir = group_dir / "runs"
+        if not runs_dir.is_dir():
             continue
-        print(f"\n  📁 {mol_parent.name}")
-        for step_num in ["01_crest", "02_opt", "03_numfreq", "04_sp", "05_tddft", "06_sp_nroot", "07_adc2"]:
-            step_dir = mol_dir / step_num
-            if not step_dir.exists():
-                print(f"     {step_num:12s}  —  no iniciado")
+        for mol_dir in sorted(runs_dir.iterdir()):
+            if not mol_dir.is_dir():
                 continue
+            print(f"\n  📁 {group_dir.name}/{mol_dir.name}")
+            for step_num in ["01_crest", "02_opt", "03_numfreq", "04_sp", "05_tddft", "06_sp_nroot", "07_adc2"]:
+                step_dir = mol_dir / step_num
+                if not step_dir.exists():
+                    print(f"     {step_num:12s}  —  no iniciado")
+                    continue
 
-            conf_dirs = [d for d in step_dir.iterdir()
-                         if d.is_dir() and d.name.startswith("conf_")]
-            if conf_dirs:
-                ok = sum(1 for d in conf_dirs
-                         if any(check_success(f) for f in d.glob("*.out")))
-                print(f"     {step_num:12s}  ✓ {ok}/{len(conf_dirs)} confs")
-            else:
-                xyz = step_dir / "crest_conformers.xyz"
-                if xyz.exists() and xyz.stat().st_size > 0:
-                    try:
-                        n = len(read(str(xyz), index=":"))
-                        print(f"     {step_num:12s}  ✓ {n} confórmeros")
-                    except Exception:
-                        print(f"     {step_num:12s}  ⚠  XYZ presente pero ilegible")
+                conf_dirs = [d for d in step_dir.iterdir()
+                             if d.is_dir() and d.name.startswith("conf_")]
+                if conf_dirs:
+                    ok = sum(1 for d in conf_dirs
+                             if any(check_success(f) for f in d.glob("*.out")))
+                    print(f"     {step_num:12s}  ✓ {ok}/{len(conf_dirs)} confs")
                 else:
-                    log_f = step_dir / "crest.log"
-                    status = "en progreso?" if log_f.exists() else "no iniciado"
-                    print(f"     {step_num:12s}  — {status}")
+                    xyz = step_dir / "crest_conformers.xyz"
+                    if xyz.exists() and xyz.stat().st_size > 0:
+                        try:
+                            n = len(read(str(xyz), index=":"))
+                            print(f"     {step_num:12s}  ✓ {n} confórmeros")
+                        except Exception:
+                            print(f"     {step_num:12s}  ⚠  XYZ presente pero ilegible")
+                    else:
+                        log_f = step_dir / "crest.log"
+                        status = "en progreso?" if log_f.exists() else "no iniciado"
+                        print(f"     {step_num:12s}  — {status}")
 
     print(f"\n{'─'*60}\n")
 
@@ -3555,7 +3557,18 @@ def _run_one(args, parser):
                  f"       Ajusta ORCA_BIN al inicio del script.")
 
     mol_name = mol_xyz.stem
-    mol_dir  = WORK_ROOT / mol_name / "runs"
+
+    # Convención de carpetas: <grupo>/molecules/<mol_name>.xyz  →  <grupo>/runs/<mol_name>/
+    # (p.ej. PAPER1/MGLYVAL/molecules/D.xyz  →  PAPER1/MGLYVAL/runs/D/).
+    # Si el .xyz no vive dentro de una carpeta "molecules/", se usa su carpeta
+    # contenedora directamente como "grupo" (fallback razonable, evita romper
+    # invocaciones con otra estructura de carpetas).
+    if mol_xyz.parent.name == "molecules":
+        group_dir = mol_xyz.parent.parent
+    else:
+        group_dir = mol_xyz.parent
+
+    mol_dir = group_dir / "runs" / mol_name
     mol_dir.mkdir(parents=True, exist_ok=True)
 
     log = setup_logging(mol_dir)
