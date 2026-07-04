@@ -66,24 +66,31 @@ BOLTZMANN DE CONFÓRMEROS (dentro de cada estado):
 ESTRUCTURA DE DIRECTORIOS (igual que pipeline.py / results_collector.py)
 ═══════════════════════════════════════════════════════════════════════════════
 
-  /home/kmilozeta/MGLYVAL/runs/
-  ├── R/                         ← estado de referencia/neutro
-  │   ├── 03_numfreq/conf_001/freq.out
-  │   ├── 04_sp/conf_001/sp.out          ← SP acuoso (CPCM)
-  │   └── 06_sp_gas/conf_001/sp_gas.out  ← SP fase gas (sin CPCM) [NUEVO]
-  ├── A/                         ← estado de protonación A
-  │   └── (mismo árbol)
-  ├── B/                         ← estado de protonación B
-  │   └── (mismo árbol)
-  └── C/                         ← estado de protonación C
-      └── (mismo árbol)
+  /home/kmilozeta/PAPER1/
+  ├── MGLYVAL/
+  │   └── runs/
+  │       ├── R/                         ← estado de referencia/neutro
+  │       │   ├── 03_numfreq/conf_001/freq.out
+  │       │   ├── 04_sp/conf_001/sp.out          ← SP acuoso (CPCM)
+  │       │   └── 06_sp_gas/conf_001/sp_gas.out  ← SP fase gas (sin CPCM) [NUEVO]
+  │       ├── A/                         ← estado de protonación A
+  │       │   └── (mismo árbol)
+  │       ├── B/                         ← estado de protonación B
+  │       │   └── (mismo árbol)
+  │       └── C/                         ← estado de protonación C
+  │           └── (mismo árbol)
+  ├── SHINORINE/
+  │   └── runs/
+  │       └── (mismo árbol)
+  └── (otras moléculas...)
 
-WORK_ROOT apunta, por default, a ./runs relativo al directorio desde donde se
-corre el script (equivalente a Path.cwd()/"runs"). Se puede sobreescribir con
---work-root /ruta/a/runs si el script no se corre desde la carpeta del proyecto.
-Los nombres de estado que se
-pasan en --neutral/--anion/--dianion son los nombres de carpeta dentro de
-runs/ (p. ej. "R", "A", "B", "C"), no rutas completas.
+WORK_ROOT se construye, por default, como <cwd>/<MOL>/runs, usando el nombre
+de molécula pasado en --mol (p. ej. --mol MGLYVAL corriendo desde ~/PAPER1
+da ~/PAPER1/MGLYVAL/runs). Se puede sobreescribir del todo con
+--work-root /ruta/a/runs si necesitas apuntar a otro lado (--mol se ignora
+en ese caso). Los nombres de estado que se pasan en
+--neutral/--anion/--dianion son los nombres de carpeta dentro de runs/
+(p. ej. "R", "A", "B", "C"), no rutas completas.
 
 Para el ciclo de pKa se requieren los SP en fase gas (06_sp_gas).
 Si no existen, el módulo de pKa se omite con advertencia clara.
@@ -94,27 +101,28 @@ USO
 
   # Caso más común: tres estados, pKa1 + pKa2 + distribución
   python protonation_cycle.py \\
+      --mol MGLYVAL \\
       --neutral  R \\
       --anion    B \\
       --dianion  C
 
-  # Solo pKa1 (R → B)
+  # Solo pKa1 (R → B), para SHINORINE
   python protonation_cycle.py \\
-      --neutral R --anion B
+      --mol SHINORINE --neutral R --anion B
 
   # Evaluar distribución a pH específico además del rango
   python protonation_cycle.py \\
-      --neutral R --anion B --dianion C \\
+      --mol MGLYVAL --neutral R --anion B --dianion C \\
       --ph 8.1
 
   # Exportar resultados
   python protonation_cycle.py \\
-      --neutral R --anion B --dianion C \\
+      --mol MGLYVAL --neutral R --anion B --dianion C \\
       --export xlsx --plot
 
   # Modo detallado (muestra contribuciones del ciclo de Born paso a paso)
   python protonation_cycle.py \\
-      --neutral R --anion B --dianion C \\
+      --mol MGLYVAL --neutral R --anion B --dianion C \\
       --verbose
 """
 
@@ -2214,19 +2222,20 @@ def main():
 Ejemplos:
   # Los tres estados clásicos (pKa1 + pKa2 + distribución):
   python protonation_cycle.py \\
-      --neutral R --anion B --dianion C
+      --mol MGLYVAL --neutral R --anion B --dianion C
 
   # Solo pKa1:
-  python protonation_cycle.py --neutral R --anion B
+  python protonation_cycle.py --mol MGLYVAL --neutral R --anion B
 
   # Cadena completa de 5 estados con catión y zwitterión (tautómero de R):
   python protonation_cycle.py \\
+      --mol MGLYVAL \\
       --neutral R --anion B --dianion C --protonated A --zwitterion D \\
       --ph 7 --method direct --export xlsx --plot --verbose
 
   # Con exportación, gráficos y pH de referencia antártico:
   python protonation_cycle.py \\
-      --neutral R --anion B --dianion C \\
+      --mol SHINORINE --neutral R --anion B --dianion C \\
       --ph 8.1 --export xlsx --plot --verbose
         """,
     )
@@ -2244,10 +2253,16 @@ Ejemplos:
                         help="Carpeta en runs/ para el zwitterión D — TAUTÓMERO de "
                              "--neutral (mismo q=0, mismos átomos), p. ej. 'D'. "
                              "Requiere también --protonated y --neutral.")
+    parser.add_argument("--mol", metavar="MOL", default=None,
+                        help="Nombre de la carpeta de la molécula dentro del "
+                             "directorio actual, p. ej. 'MGLYVAL' o 'SHINORINE'. "
+                             "Se usa para construir la ruta por default: "
+                             "<cwd>/<MOL>/runs. Ignorado si se pasa --work-root.")
     parser.add_argument("--work-root", metavar="DIR", default=None,
-                        help="Ruta a la carpeta runs/ que contiene los estados "
-                             "(default: ./runs relativo al directorio desde donde "
-                             "corres el script, p. ej. ~/PAPER1/MGLYVAL/runs)")
+                        help="Ruta explícita a la carpeta runs/ que contiene los "
+                             "estados (default: <cwd>/<MOL>/runs usando --mol, "
+                             "p. ej. ~/PAPER1/MGLYVAL/runs). Si se pasa, tiene "
+                             "prioridad sobre --mol.")
     parser.add_argument("--ph",       type=float, default=PH_ANTARCTIC,
                         help=f"pH de referencia para la distribución "
                              f"(default: {PH_ANTARCTIC}, agua de mar antártica)")
@@ -2295,11 +2310,21 @@ Ejemplos:
     GV_QH     = args.gv_qh
     if args.work_root:
         WORK_ROOT = Path(args.work_root).expanduser().resolve()
+    elif args.mol:
+        WORK_ROOT = (Path.cwd() / args.mol / "runs").resolve()
+    else:
+        parser.error(
+            "Debes indicar --mol MOL (p. ej. --mol MGLYVAL) o, alternativamente, "
+            "--work-root /ruta/a/runs. Ya no se asume ./runs en el directorio actual, "
+            "porque ahora conviven varias moléculas (MGLYVAL, SHINORINE, etc.) bajo "
+            "el mismo PAPER1/."
+        )
     if not WORK_ROOT.exists():
         parser.error(
             f"No existe la carpeta runs/: {WORK_ROOT}\n"
-            f"Usa --work-root /ruta/a/runs para indicar la correcta, o corre el "
-            f"script desde el directorio que contiene runs/."
+            f"Verifica que la molécula '{args.mol}' exista bajo {Path.cwd()} "
+            f"(se esperaba {Path.cwd() / (args.mol or '<MOL>') / 'runs'}), "
+            f"o usa --work-root /ruta/a/runs para indicar la correcta."
         )
 
     # Verificar que se pasó al menos un par de estados
@@ -2321,6 +2346,8 @@ Ejemplos:
     print("\n" + "═" * 74)
     print("  PROTONATION CYCLE  —  FAE-MAA / kmilozeta")
     print("═" * 74)
+    if args.mol:
+        print(f"  molécula : {args.mol}")
     print(f"  runs/ : {WORK_ROOT}")
 
     if args.goodvibes:
