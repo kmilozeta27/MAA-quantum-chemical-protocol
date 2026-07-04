@@ -1,18 +1,18 @@
 # === runs/: ignorar todo por defecto, permitir solo lo esencial ===
-runs/**/*
+**/runs/**/*
 # permitir navegar los directorios
-!runs/**/
+!**/runs/**/
 # permitir archivos de texto que SON el registro científico
-!runs/**/*.inp
-!runs/**/*.out
-!runs/**/*.xyz
-!runs/**/*.csv
-!runs/**/*.json
-!runs/**/*.toml
-!runs/**/*.energies
+!**/runs/**/*.inp
+!**/runs/**/*.out
+!**/runs/**/*.xyz
+!**/runs/**/*.csv
+!**/runs/**/*.json
+!**/runs/**/*.toml
+!**/runs/**/*.energies
 # excluir archivos ORCA temporales (re-ignorar después del wildcard)
-runs/**/*_trj.xyz
-runs/**/*.scfgrad.inp
+**/runs/**/*_trj.xyz
+**/runs/**/*.scfgrad.inp
 # === Obsidian ===
 .obsidian/
 **/.obsidian/
@@ -25,10 +25,8 @@ __pycache__/
 # === sistema ===
 .DS_Store
 *.log
-runs/
+**/runs/
 *.out
 *.gbw
 *.densities
 *.hess
-__pycache__/
-*.pyc
