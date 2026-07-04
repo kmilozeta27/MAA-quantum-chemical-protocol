@@ -121,8 +121,12 @@ USO
 from __future__ import annotations
 
 import argparse
+import json
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import warnings
 from pathlib import Path
 from typing import Optional
@@ -184,6 +188,31 @@ G_HPLUS_AQ = G_HPLUS_AQ_DIRECT
 SUBDIR_SP      = "04_sp"
 SUBDIR_FREQ    = "03_numfreq"
 SUBDIR_SP_GAS  = "06_sp_gas"   # SPs sin CPCM para el ciclo de pKa
+
+# ─────────────────────────────────────────────
+#  GOODVIBES  (corrección cuasi-armónica opcional)
+# ─────────────────────────────────────────────
+# G_corr estándar (parse_thermochem) usa el oscilador armónico puro para
+# TODOS los modos vibracionales, incluidos los rotores internos de baja
+# frecuencia (<100 cm⁻¹) — típicos en M-Gly:Val (cadenas laterales Gly/Val,
+# grupos OH/NH libres). Ahí la aproximación armónica sobreestima la entropía
+# y por ende puede desviar bastante el G_corr. GoodVibes (Grimme, Head-Gordon)
+# corrige esto con un tratamiento cuasi-armónico (mRRHO) para esos modos.
+# Estos valores son sobreescritos por --gv-cutoff/--gv-qh/--gv-qs en main().
+GV_CUTOFF = 100.0      # cm⁻¹, frequency cutoff (default de GoodVibes)
+GV_QH     = False      # aplicar también la corrección cuasi-armónica de
+                        # Head-Gordon a la entalpía (si no, H se deja armónica)
+GV_QS     = "grimme"   # método de entropía cuasi-armónica: 'grimme' o 'truhlar'
+
+# Entorno conda donde está instalado GoodVibes. Igual que en results_collector.py:
+# si se deja en None, se salta el paso 1 de _resolve_gv_python() y se prueba
+# directamente con sys.executable / PATH.
+GV_CONDA_ENV = "sciencebitch"
+
+# Caché del intérprete resuelto (evita repetir la búsqueda en disco + los
+# subprocess de verificación en cada llamada a run_goodvibes(), que se invoca
+# una vez por confórmero — potencialmente decenas de veces por corrida).
+_GV_PYTHON_CACHE: Optional[str] = None
 
 # pH de referencia oceánico antártico (WAP superficial, verano)
 PH_ANTARCTIC   = 8.1
@@ -349,13 +378,245 @@ def parse_thermochem(freq_out: Path, T: float = T_STD) -> dict:
     }
 
 
+def _resolve_gv_python(force: bool = False) -> str:
+    """
+    Devuelve la ruta absoluta al intérprete Python que tiene goodvibes instalado.
+
+    Idéntico en espíritu a _resolve_gv_python() de results_collector.py (misma
+    estrategia en el mismo orden de prioridad), para que ambos scripts se
+    comporten igual sea cual sea el shell/entorno desde el que se invoquen:
+
+      1. Si GV_CONDA_ENV está definido, buscar ese entorno en los prefijos
+         estándar de miniforge3, miniconda3, anaconda3 y conda en $HOME.
+      2. Intentar `python -c "import goodvibes"` con el ejecutable actual
+         (sys.executable), por si el entorno activo ya lo incluye.
+      3. Buscar `goodvibes` en el PATH como script de consola y derivar el
+         Python de su mismo directorio bin/.
+      4. Fallback: sys.executable (fallará más adelante con un warning claro
+         en vez de un `shutil.which` silencioso).
+
+    El resultado se cachea en _GV_PYTHON_CACHE porque run_goodvibes() se llama
+    una vez por confórmero — resolver esto en disco + subprocess en cada
+    llamada sería lento e innecesario.
+    """
+    global _GV_PYTHON_CACHE
+    if _GV_PYTHON_CACHE is not None and not force:
+        return _GV_PYTHON_CACHE
+
+    if GV_CONDA_ENV:
+        home = Path.home()
+        for base in ["miniforge3", "miniconda3", "anaconda3", "conda"]:
+            candidate = home / base / "envs" / GV_CONDA_ENV / "bin" / "python"
+            if candidate.exists():
+                try:
+                    r = subprocess.run(
+                        [str(candidate), "-c", "import goodvibes"],
+                        capture_output=True, timeout=10,
+                    )
+                    if r.returncode == 0:
+                        _GV_PYTHON_CACHE = str(candidate)
+                        return _GV_PYTHON_CACHE
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
+
+    try:
+        r = subprocess.run(
+            [sys.executable, "-c", "import goodvibes"],
+            capture_output=True, timeout=10,
+        )
+        if r.returncode == 0:
+            _GV_PYTHON_CACHE = sys.executable
+            return _GV_PYTHON_CACHE
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+    gv_script = shutil.which("goodvibes")
+    if gv_script:
+        py_candidate = Path(gv_script).parent / "python"
+        if py_candidate.exists():
+            _GV_PYTHON_CACHE = str(py_candidate)
+            return _GV_PYTHON_CACHE
+
+    _GV_PYTHON_CACHE = sys.executable
+    return _GV_PYTHON_CACHE
+
+
+def run_goodvibes(
+    freq_out: Path,
+    T: float = T_STD,
+    cutoff: float = GV_CUTOFF,
+    qs: str = GV_QS,
+    qh: bool = GV_QH,
+) -> dict:
+    """
+    Corre GoodVibes (`python -m goodvibes`, con el intérprete resuelto por
+    _resolve_gv_python()) sobre un freq.out de ORCA y extrae la corrección de
+    Gibbs CUASI-ARMÓNICA (mRRHO de Grimme para la entropía, y opcionalmente
+    Head-Gordon para la entalpía si qh=True).
+
+    A diferencia de parse_thermochem() (RRHO puro, como lo reporta ORCA
+    directamente), GoodVibes reinterpola los modos de baja frecuencia
+    (< cutoff, default 100 cm⁻¹) como rotores libres en vez de osciladores
+    armónicos, evitando la sobreestimación de S (y por ende de −TS) que la
+    aproximación armónica pura produce ahí.
+
+    NOTA sobre la invocación: se usa `[python_exe, "-m", "goodvibes", ...]`
+    en vez de depender de que el binario `goodvibes` esté en el PATH del
+    proceso actual (`shutil.which("goodvibes")` se usaba antes, pero eso
+    falla silenciosamente en shells no interactivas — SSH sin `conda activate`,
+    cron, nohup en otra sesión — donde el PATH no incluye el bin/ del entorno
+    sciencebitch aunque GoodVibes esté perfectamente instalado ahí). Misma
+    estrategia que ya usa results_collector.py.
+
+    Retorna dict con claves compatibles con el resto del pipeline:
+        G_corr, H_corr, S_total (Eh, Eh/K), n_imag, ok, warning
+    más los campos crudos de GoodVibes (scf_energy, qh_gibbs_free_energy).
+    """
+    null = {
+        "G_corr": None, "H_corr": None, "S_total": None,
+        "scf_energy": None, "qh_gibbs_free_energy": None,
+        "n_imag": 0, "ok": False, "warning": None,
+    }
+
+    if not freq_out.exists():
+        return {**null, "warning": f"No existe {freq_out}"}
+
+    python_exe = _resolve_gv_python()
+
+    try:
+        r = subprocess.run(
+            [python_exe, "-c", "import goodvibes"],
+            capture_output=True, timeout=10,
+        )
+        if r.returncode != 0:
+            return {**null, "warning": (
+                f"No se puede importar goodvibes con {python_exe}. "
+                f"Instalar con: conda activate {GV_CONDA_ENV or '<env>'} && "
+                f"pip install goodvibes --break-system-packages"
+            )}
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return {**null, "warning": f"No se pudo verificar goodvibes con {python_exe}: {e}"}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        json_path = Path(tmp) / "gv_result.json"
+        cmd = [
+            python_exe, "-m", "goodvibes",
+            "--temp", str(T), "-f", str(cutoff), "--qs", qs,
+        ]
+        if qh:
+            cmd.append("--qh")
+        cmd += ["--json", str(json_path), str(freq_out)]
+
+        try:
+            proc = subprocess.run(
+                cmd, cwd=tmp, capture_output=True, text=True, timeout=180,
+            )
+        except (subprocess.TimeoutExpired, OSError) as e:
+            return {**null, "warning": f"Fallo al ejecutar goodvibes ({python_exe} -m goodvibes): {e}"}
+
+        if not json_path.exists():
+            stderr_tail = (proc.stderr or "").strip()[-400:]
+            return {**null, "warning": (
+                f"goodvibes ({python_exe}) no generó JSON (returncode={proc.returncode}). "
+                f"{stderr_tail}"
+            )}
+
+        try:
+            payload = json.loads(json_path.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            return {**null, "warning": f"No se pudo leer el JSON de goodvibes: {e}"}
+
+    results = payload.get("results") or []
+    if not results:
+        return {**null, "warning": "goodvibes no devolvió resultados para este archivo."}
+
+    thermo = results[0].get("thermo") or {}
+    scf_energy = thermo.get("scf_energy")
+    qh_gibbs   = thermo.get("qh_gibbs_free_energy")
+    # Entalpía: si --qh está activo, usa la entalpía cuasi-armónica (Head-Gordon);
+    # si no, GoodVibes deja la entalpía en su forma armónica estándar.
+    enthalpy   = thermo.get("qh_enthalpy") if qh else thermo.get("enthalpy")
+    # Entropía: siempre cuasi-armónica (mRRHO), que es el objeto del análisis.
+    entropy    = thermo.get("qh_entropy")
+    im_freqs   = thermo.get("im_frequency_wn") or []
+    n_imag     = len(im_freqs) if isinstance(im_freqs, list) else 0
+
+    if scf_energy is None or qh_gibbs is None:
+        return {**null, "warning": (
+            "goodvibes no reportó scf_energy/qh_gibbs_free_energy "
+            "(freq.out posiblemente incompleto o mal formado)."
+        )}
+
+    G_corr = qh_gibbs - scf_energy
+    H_corr = (enthalpy - scf_energy) if enthalpy is not None else None
+
+    return {
+        "G_corr":               G_corr,
+        "H_corr":               H_corr,
+        "S_total":              entropy,      # Eh/K
+        "scf_energy":           scf_energy,
+        "qh_gibbs_free_energy": qh_gibbs,
+        "n_imag":               n_imag,
+        "ok":                   True,
+        "warning":              None,
+    }
+
+
+def get_thermochem(
+    freq_out: Path,
+    T: float = T_STD,
+    source: str = "harmonic",
+    gv_cutoff: float = GV_CUTOFF,
+    gv_qs: str = GV_QS,
+    gv_qh: bool = GV_QH,
+) -> dict:
+    """
+    Wrapper único para obtener G_corr, con dos fuentes intercambiables:
+
+      source="harmonic"  → parse_thermochem()  (RRHO puro, tal cual ORCA)
+      source="goodvibes"  → run_goodvibes()      (mRRHO cuasi-armónico)
+
+    Retorna siempre el shape de parse_thermochem() (E_elec_freq, ZPE,
+    H_corr, TS_total, S_total, G_corr, G_total_freq, T_parsed, n_imag, ok),
+    más "source" y "warning" para trazabilidad. Esto permite que
+    collect_mol_data(), _state_G_total_direct() y compute_pka() usen la
+    misma interfaz sin importar la fuente.
+    """
+    if source not in ("harmonic", "goodvibes"):
+        raise ValueError(f"source debe ser 'harmonic' o 'goodvibes', no {source!r}")
+
+    if source == "harmonic":
+        tc = parse_thermochem(freq_out, T=T)
+        tc["source"] = "harmonic"
+        tc["warning"] = None
+        return tc
+
+    gv = run_goodvibes(freq_out, T=T, cutoff=gv_cutoff, qs=gv_qs, qh=gv_qh)
+    TS_total = (T * gv["S_total"]) if gv.get("S_total") is not None else None
+    return {
+        "E_elec_freq":  gv.get("scf_energy"),
+        "ZPE":          None,   # GoodVibes no expone ZPE por separado en G_corr
+        "H_corr":       gv.get("H_corr"),
+        "TS_total":     TS_total,
+        "S_total":      gv.get("S_total"),
+        "G_corr":       gv.get("G_corr"),
+        "G_total_freq": gv.get("qh_gibbs_free_energy"),
+        "T_parsed":     T,
+        "n_imag":       gv.get("n_imag", 0),
+        "ok":           gv.get("ok", False),
+        "source":       "goodvibes",
+        "warning":      gv.get("warning"),
+    }
+
+
 # ─────────────────────────────────────────────
 #  COLECTOR POR MOL  (versión ligera, sin TDDFT
 #  ni CREST reranking — solo lo necesario para
 #  el ciclo de pKa)
 # ─────────────────────────────────────────────
 
-def collect_mol_data(mol_name: str, verbose: bool = False) -> dict:
+def collect_mol_data(mol_name: str, verbose: bool = False,
+                      gcorr_source: str = "harmonic") -> dict:
     """
     Recolecta los datos termodinámicos de todos los confórmeros de una molécula.
 
@@ -403,9 +664,14 @@ def collect_mol_data(mol_name: str, verbose: bool = False) -> dict:
         sp_gas_file = mol_dir / SUBDIR_SP_GAS / conf_id / "sp_gas.out"
         e_sp_gas    = parse_sp_energy(sp_gas_file)
 
-        # Correcciones térmicas (NumFreq) — leídas a T_STD, S_total re-escalado
+        # Correcciones térmicas — leídas a T_STD, S_total re-escalado.
+        # gcorr_source="harmonic" → RRHO puro de NumFreq (ORCA); "goodvibes"
+        # → mRRHO cuasi-armónico (ver get_thermochem()).
         freq_file = mol_dir / SUBDIR_FREQ / conf_id / "freq.out"
-        tc = parse_thermochem(freq_file, T=T_STD)
+        tc = get_thermochem(freq_file, T=T_STD, source=gcorr_source,
+                            gv_cutoff=GV_CUTOFF, gv_qs=GV_QS, gv_qh=GV_QH)
+        if gcorr_source == "goodvibes" and not tc["ok"] and tc.get("warning"):
+            warns.append(f"[{mol_name}/{conf_id}] GoodVibes: {tc['warning']}")
 
         row: dict = {
             "conformer":   conf_id,
@@ -496,6 +762,7 @@ def collect_mol_data(mol_name: str, verbose: bool = False) -> dict:
         "G_boltz":      G_boltz,      # Hartree, ensemble efectivo por T
         "ok":           len(rows) > 0,
         "warnings":     warns,
+        "gcorr_source": gcorr_source,
     }
 
 
@@ -503,7 +770,8 @@ def collect_mol_data(mol_name: str, verbose: bool = False) -> dict:
 #  ENERGÍA LIBRE REPRESENTATIVA DE UN ESTADO (método directo)
 # ─────────────────────────────────────────────
 
-def _state_G_total_direct(data: dict, T: float = T_STD) -> dict:
+def _state_G_total_direct(data: dict, T: float = T_STD,
+                           gcorr_source: str = "harmonic") -> dict:
     """
     G_total_CPCM (E_SP_aq + G_corr) del confórmero representativo de un estado,
     para el método directo. Funciona con dos tipos de entrada:
@@ -540,11 +808,13 @@ def _state_G_total_direct(data: dict, T: float = T_STD) -> dict:
         return {"ok": False, "warn": f"Sin SP acuoso para {mol}/{conf}."}
 
     freq_file = WORK_ROOT / mol / SUBDIR_FREQ / conf / "freq.out"
-    tc = parse_thermochem(freq_file, T=T)
+    tc = get_thermochem(freq_file, T=T, source=gcorr_source,
+                        gv_cutoff=GV_CUTOFF, gv_qs=GV_QS, gv_qh=GV_QH)
     G_corr = tc["G_corr"] if tc["ok"] else None
     warn = None
     if not tc["ok"]:
-        warn = f"G_corr no disponible para {mol}/{conf}. Se usa G≈E_SP (sin ZPE/entropía)."
+        extra = f" ({tc['warning']})" if tc.get("warning") else ""
+        warn = f"G_corr ({gcorr_source}) no disponible para {mol}/{conf}. Se usa G≈E_SP (sin ZPE/entropía).{extra}"
 
     G_total = E_aq + (G_corr if G_corr is not None else 0.0)
     theory_sp   = parse_theory_level(WORK_ROOT / mol / SUBDIR_SP / conf / "sp.out")
@@ -569,6 +839,7 @@ def compute_tautomer_equilibrium(
     data_D: dict,
     T: float = T_STD,
     verbose: bool = False,
+    gcorr_source: str = "harmonic",
 ) -> dict:
     """
     Compara el neutro (R) y el zwitterión (D) como TAUTÓMEROS: mismo q=0,
@@ -604,8 +875,8 @@ def compute_tautomer_equilibrium(
         warns.append(msg)
         warnings.warn(f"[tautómero {mol_R}⇌{mol_D}] {msg}")
 
-    gR = _state_G_total_direct(data_R, T=T)
-    gD = _state_G_total_direct(data_D, T=T)
+    gR = _state_G_total_direct(data_R, T=T, gcorr_source=gcorr_source)
+    gD = _state_G_total_direct(data_D, T=T, gcorr_source=gcorr_source)
 
     if not gR.get("ok"):
         _warn(gR.get("warn") or f"No se pudo obtener G_total para {mol_R}.")
@@ -696,6 +967,7 @@ def compute_pka(
     T: float = T_STD,
     verbose: bool = False,
     method: str = "auto",
+    gcorr_source: str = "harmonic",
 ) -> dict:
     """
     Calcula el pKa de AH → A⁻ + H⁺.
@@ -776,8 +1048,8 @@ def compute_pka(
                 f"definido para una mezcla. Se usa el método directo."
             )
 
-        g_acid = _state_G_total_direct(data_acid, T=T)
-        g_base = _state_G_total_direct(data_base, T=T)
+        g_acid = _state_G_total_direct(data_acid, T=T, gcorr_source=gcorr_source)
+        g_base = _state_G_total_direct(data_base, T=T, gcorr_source=gcorr_source)
 
         result["conf_acid"] = g_acid.get("conf")
         result["conf_base"] = g_base.get("conf")
@@ -916,8 +1188,10 @@ def compute_pka(
     # ── Correcciones térmicas G_corr a temperatura T (necesarias en ambos métodos) ─
     freq_acid = WORK_ROOT / mol_acid / SUBDIR_FREQ / conf_acid / "freq.out"
     freq_base = WORK_ROOT / mol_base / SUBDIR_FREQ / conf_base / "freq.out"
-    tc_acid = parse_thermochem(freq_acid, T=T)
-    tc_base = parse_thermochem(freq_base, T=T)
+    tc_acid = get_thermochem(freq_acid, T=T, source=gcorr_source,
+                             gv_cutoff=GV_CUTOFF, gv_qs=GV_QS, gv_qh=GV_QH)
+    tc_base = get_thermochem(freq_base, T=T, source=gcorr_source,
+                             gv_cutoff=GV_CUTOFF, gv_qs=GV_QS, gv_qh=GV_QH)
 
     G_corr_acid: Optional[float] = None
     G_corr_base: Optional[float] = None
@@ -925,16 +1199,18 @@ def compute_pka(
     if tc_acid["ok"]:
         G_corr_acid = tc_acid["G_corr"]
     else:
+        extra = f" ({tc_acid['warning']})" if tc_acid.get("warning") else ""
         _warn(
-            f"G_corr no disponible para {mol_acid}/{conf_acid}. "
-            f"Se usa G ≈ E_SP (sin ZPE/entropía; pKa con mayor incertidumbre)."
+            f"G_corr ({gcorr_source}) no disponible para {mol_acid}/{conf_acid}. "
+            f"Se usa G ≈ E_SP (sin ZPE/entropía; pKa con mayor incertidumbre).{extra}"
         )
     if tc_base["ok"]:
         G_corr_base = tc_base["G_corr"]
     else:
+        extra = f" ({tc_base['warning']})" if tc_base.get("warning") else ""
         _warn(
-            f"G_corr no disponible para {mol_base}/{conf_base}. "
-            f"Se usa G ≈ E_SP."
+            f"G_corr ({gcorr_source}) no disponible para {mol_base}/{conf_base}. "
+            f"Se usa G ≈ E_SP.{extra}"
         )
 
     result["G_corr_acid_Eh"] = G_corr_acid
@@ -1695,6 +1971,12 @@ def export_results(
 # ─────────────────────────────────────────────
 
 def main():
+    # Debe ir ANTES de cualquier lectura de estas variables en esta función
+    # (p. ej. como default= en add_argument más abajo). Python exige que la
+    # declaración `global` preceda todo uso del nombre dentro del mismo
+    # scope, o produce SyntaxError: "name used prior to global declaration".
+    global WORK_ROOT, GV_CUTOFF, GV_QS, GV_QH
+
     parser = argparse.ArgumentParser(
         description="Ciclo termodinámico de pKa y distribución de Boltzmann "
                     "entre estados de protonación (Born cycle, Ho & Coote 2010).",
@@ -1758,9 +2040,30 @@ Ejemplos:
                         help="Generar gráficos de distribución y Boltzmann conformacional")
     parser.add_argument("--verbose",  action="store_true",
                         help="Mostrar contribuciones detalladas del ciclo de Born")
+    parser.add_argument("--goodvibes", action="store_true",
+                        help="Corre el ciclo COMPLETO dos veces: una con G_corr "
+                             "armónico estándar de NumFreq (RRHO, tal cual lo "
+                             "reporta ORCA) y otra con la corrección cuasi-armónica "
+                             "de GoodVibes (mRRHO de Grimme para los modos de baja "
+                             "frecuencia), y al final compara cuánto cambian los "
+                             "pKa's y las fracciones de especie. Requiere el "
+                             "binario 'goodvibes' instalado "
+                             "(pip install goodvibes --break-system-packages).")
+    parser.add_argument("--gv-cutoff", type=float, default=GV_CUTOFF, metavar="CM-1",
+                        help=f"Frequency cutoff de GoodVibes en cm⁻¹ "
+                             f"(default: {GV_CUTOFF:.0f})")
+    parser.add_argument("--gv-qs", choices=["grimme", "truhlar"], default=GV_QS,
+                        help=f"Método de interpolación de entropía cuasi-armónica "
+                             f"de GoodVibes (default: {GV_QS})")
+    parser.add_argument("--gv-qh", action="store_true",
+                        help="Además de la entropía, aplica también la corrección "
+                             "cuasi-armónica de Head-Gordon a la entalpía "
+                             "(default: solo la entropía, la más relevante)")
     args = parser.parse_args()
 
-    global WORK_ROOT
+    GV_CUTOFF = args.gv_cutoff
+    GV_QS     = args.gv_qs
+    GV_QH     = args.gv_qh
     if args.work_root:
         WORK_ROOT = Path(args.work_root).expanduser().resolve()
     if not WORK_ROOT.exists():
@@ -1791,29 +2094,43 @@ Ejemplos:
     print("═" * 74)
     print(f"  runs/ : {WORK_ROOT}")
 
-    if use_extended:
+    if args.goodvibes:
+        _run_comparison(args, use_extended)
+    elif use_extended:
         _run_extended(args)
     else:
         _run_classic(args)
 
 
-def _run_classic(args):
-    """Cadena original de 3 estados: neutro → anión → dianión."""
+def _run_classic(args, gcorr_source: str = "harmonic"):
+    """
+    Cadena original de 3 estados: neutro → anión → dianión.
+
+    gcorr_source controla de dónde sale G_corr para TODOS los estados:
+      "harmonic"  → RRHO puro de NumFreq (default, comportamiento original)
+      "goodvibes" → mRRHO cuasi-armónico de GoodVibes (ver --goodvibes)
+
+    Retorna un dict con los resultados clave (pKa1, pKa2, df_dist, ...) para
+    que _run_comparison() pueda diferenciar entre las dos pasadas.
+    """
     data_neutral = data_anion = data_dianion = None
 
     if args.neutral:
         print(f"\n▸ Cargando estado neutro: {args.neutral}")
-        data_neutral = collect_mol_data(args.neutral, verbose=args.verbose)
+        data_neutral = collect_mol_data(args.neutral, verbose=args.verbose,
+                                        gcorr_source=gcorr_source)
         print_mol_summary(data_neutral, verbose=args.verbose)
 
     if args.anion:
         print(f"\n▸ Cargando anión: {args.anion}")
-        data_anion = collect_mol_data(args.anion, verbose=args.verbose)
+        data_anion = collect_mol_data(args.anion, verbose=args.verbose,
+                                      gcorr_source=gcorr_source)
         print_mol_summary(data_anion, verbose=args.verbose)
 
     if args.dianion:
         print(f"\n▸ Cargando dianión: {args.dianion}")
-        data_dianion = collect_mol_data(args.dianion, verbose=args.verbose)
+        data_dianion = collect_mol_data(args.dianion, verbose=args.verbose,
+                                        gcorr_source=gcorr_source)
         print_mol_summary(data_dianion, verbose=args.verbose)
 
     pka1_result = pka2_result = None
@@ -1821,12 +2138,14 @@ def _run_classic(args):
     if data_neutral and data_anion:
         print(f"\n▸ Calculando pKa₁  ({args.neutral} → {args.anion} + H⁺)")
         pka1_result = compute_pka(data_neutral, data_anion,
-                                  T=T_STD, verbose=args.verbose, method=args.method)
+                                  T=T_STD, verbose=args.verbose, method=args.method,
+                                  gcorr_source=gcorr_source)
 
     if data_anion and data_dianion:
         print(f"\n▸ Calculando pKa₂  ({args.anion} → {args.dianion} + H⁺)")
         pka2_result = compute_pka(data_anion, data_dianion,
-                                  T=T_STD, verbose=args.verbose, method=args.method)
+                                  T=T_STD, verbose=args.verbose, method=args.method,
+                                  gcorr_source=gcorr_source)
 
     if pka1_result is None and pka2_result is None:
         print("\n  ⚠  No se pudo calcular ningún pKa. "
@@ -1892,38 +2211,54 @@ def _run_classic(args):
 
     print("\nTerminado.\n")
 
+    return {
+        "gcorr_source": gcorr_source,
+        "pKa1": pKa1, "pKa2": pKa2,
+        "df_dist": df_dist,
+        "data_list": data_list,
+    }
 
-def _run_extended(args):
+
+def _run_extended(args, gcorr_source: str = "harmonic"):
     """
     Cadena de 5 estados:
       A⁺ (catión) ⇌ [R (neutro) ⇌ D (zwitterión)] ⇌ B⁻ (anión) ⇌ C²⁻ (dianión)
+
+    gcorr_source: ver docstring de _run_classic(). Retorna dict con los
+    resultados clave (pKa0/1/2, f_R, f_D, df_dist, ...) para _run_comparison().
     """
     print(f"\n▸ Cargando catión protonado: {args.protonated}")
-    data_A = collect_mol_data(args.protonated, verbose=args.verbose)
+    data_A = collect_mol_data(args.protonated, verbose=args.verbose,
+                              gcorr_source=gcorr_source)
     print_mol_summary(data_A, verbose=args.verbose)
 
     print(f"\n▸ Cargando estado neutro: {args.neutral}")
-    data_R = collect_mol_data(args.neutral, verbose=args.verbose)
+    data_R = collect_mol_data(args.neutral, verbose=args.verbose,
+                              gcorr_source=gcorr_source)
     print_mol_summary(data_R, verbose=args.verbose)
 
     print(f"\n▸ Cargando zwitterión (tautómero de {args.neutral}): {args.zwitterion}")
-    data_D = collect_mol_data(args.zwitterion, verbose=args.verbose)
+    data_D = collect_mol_data(args.zwitterion, verbose=args.verbose,
+                              gcorr_source=gcorr_source)
     print_mol_summary(data_D, verbose=args.verbose)
 
     data_B = data_C = None
     if args.anion:
         print(f"\n▸ Cargando anión: {args.anion}")
-        data_B = collect_mol_data(args.anion, verbose=args.verbose)
+        data_B = collect_mol_data(args.anion, verbose=args.verbose,
+                                  gcorr_source=gcorr_source)
         print_mol_summary(data_B, verbose=args.verbose)
 
     if args.dianion:
         print(f"\n▸ Cargando dianión: {args.dianion}")
-        data_C = collect_mol_data(args.dianion, verbose=args.verbose)
+        data_C = collect_mol_data(args.dianion, verbose=args.verbose,
+                                  gcorr_source=gcorr_source)
         print_mol_summary(data_C, verbose=args.verbose)
 
     # ── Equilibrio de tautómeros R ⇌ D (sin H⁺) ────────────────────────────
     print(f"\n▸ Calculando equilibrio de tautómeros  ({args.neutral} ⇌ {args.zwitterion})")
-    taut_result = compute_tautomer_equilibrium(data_R, data_D, T=T_STD, verbose=args.verbose)
+    taut_result = compute_tautomer_equilibrium(data_R, data_D, T=T_STD, verbose=args.verbose,
+                                               gcorr_source=gcorr_source)
 
     if not taut_result["ok"]:
         # No se pudo cerrar el equilibrio R⇌D (típicamente porque D no tiene
@@ -1937,7 +2272,7 @@ def _run_extended(args):
         for w in taut_result["warnings"]:
             print(f"    ⚠  {w}")
 
-        gR_fallback = _state_G_total_direct(data_R, T=T_STD)
+        gR_fallback = _state_G_total_direct(data_R, T=T_STD, gcorr_source=gcorr_source)
         if not gR_fallback.get("ok"):
             print(f"\n  ⚠  Tampoco se pudo obtener G_total para "
                   f"'{args.neutral}'. Abortando.")
@@ -1983,17 +2318,20 @@ def _run_extended(args):
 
     print(f"\n▸ Calculando pKa₀  ({args.protonated} → neutro/zwitterión + H⁺)")
     pka0_result = compute_pka(data_A, data_neutral_macro,
-                              T=T_STD, verbose=args.verbose, method=args.method)
+                              T=T_STD, verbose=args.verbose, method=args.method,
+                              gcorr_source=gcorr_source)
 
     if data_B:
         print(f"\n▸ Calculando pKa₁  (neutro/zwitterión → {args.anion} + H⁺)")
         pka1_result = compute_pka(data_neutral_macro, data_B,
-                                  T=T_STD, verbose=args.verbose, method=args.method)
+                                  T=T_STD, verbose=args.verbose, method=args.method,
+                                  gcorr_source=gcorr_source)
 
     if data_B and data_C:
         print(f"\n▸ Calculando pKa₂  ({args.anion} → {args.dianion} + H⁺)")
         pka2_result = compute_pka(data_B, data_C,
-                                  T=T_STD, verbose=args.verbose, method=args.method)
+                                  T=T_STD, verbose=args.verbose, method=args.method,
+                                  gcorr_source=gcorr_source)
 
     print_pka_summary([
         (pka0_result, "pKa₀ (A→R/D)"),
@@ -2066,6 +2404,120 @@ def _run_extended(args):
         )
 
     print("\nTerminado.\n")
+
+    return {
+        "gcorr_source": gcorr_source,
+        "pKa0": pKa0, "pKa1": pKa1, "pKa2": pKa2,
+        "f_R": f_R, "f_D": f_D,
+        "df_dist": df_dist,
+        "data_list": data_list,
+    }
+
+
+def _run_comparison(args, use_extended: bool):
+    """
+    Corre el ciclo COMPLETO dos veces con distinta fuente de G_corr —
+    armónico estándar (NumFreq/RRHO) vs. cuasi-armónico (GoodVibes/mRRHO) —
+    y compara al final cuánto cambian los pKa's y la distribución de especies.
+
+    Activado con --goodvibes. Usa _run_classic() o _run_extended() según
+    corresponda, sin duplicar lógica: solo cambia gcorr_source entre pasadas.
+    """
+    if shutil.which("goodvibes") is None:
+        print("\n  ⚠  No se encontró el binario 'goodvibes' en PATH.")
+        print("     Instálalo con: pip install goodvibes --break-system-packages")
+        print("     (o, en un entorno conda: conda install -c conda-forge goodvibes)\n")
+        sys.exit(1)
+
+    runner = _run_extended if use_extended else _run_classic
+
+    print("\n" + "═" * 74)
+    print("  PASADA 1/2  —  G_corr ARMÓNICO ESTÁNDAR (NumFreq, RRHO)")
+    print("═" * 74)
+    res_harm = runner(args, gcorr_source="harmonic")
+
+    qh_tag = ", +qh (Head-Gordon)" if args.gv_qh else ""
+    print("\n" + "═" * 74)
+    print(f"  PASADA 2/2  —  G_corr CUASI-ARMÓNICO (GoodVibes, "
+          f"qs={args.gv_qs}, cutoff={args.gv_cutoff:.0f} cm⁻¹{qh_tag})")
+    print("═" * 74)
+    res_gv = runner(args, gcorr_source="goodvibes")
+
+    _print_goodvibes_comparison(res_harm, res_gv, extended=use_extended, args=args)
+
+
+def _print_goodvibes_comparison(res_harm: dict, res_gv: dict,
+                                 extended: bool, args) -> None:
+    """
+    Imprime una tabla comparativa entre la pasada armónica (NumFreq) y la
+    cuasi-armónica (GoodVibes): Δ en cada pKa y Δ en las fracciones de
+    especie a los pH de referencia (--ph y pH 7.0 estándar).
+    """
+    sep = "═" * 74
+    print(f"\n{sep}")
+    print("  COMPARACIÓN  —  G_corr ARMÓNICO (NumFreq) vs. CUASI-ARMÓNICO (GoodVibes)")
+    print(sep)
+
+    if res_harm is None or res_gv is None:
+        print("\n  ⚠  Una de las dos pasadas no produjo resultados; no se puede comparar.\n")
+        return
+
+    pka_keys = ([("pKa0", "pKa₀ (A→R/D)")] if extended else []) + [
+        ("pKa1", "pKa₁"), ("pKa2", "pKa₂"),
+    ]
+
+    print(f"\n  {'':<20} {'armónico':>12} {'GoodVibes':>12} {'Δ (GV−arm)':>12}")
+    print(f"  {'-'*20} {'-'*12} {'-'*12} {'-'*12}")
+    any_pka = False
+    for key, label in pka_keys:
+        v1, v2 = res_harm.get(key), res_gv.get(key)
+        if v1 is None and v2 is None:
+            continue
+        any_pka = True
+        v1s = f"{v1:.2f}" if v1 is not None else "—"
+        v2s = f"{v2:.2f}" if v2 is not None else "—"
+        ds  = f"{(v2 - v1):+.2f}" if (v1 is not None and v2 is not None) else "—"
+        print(f"  {label:<20} {v1s:>12} {v2s:>12} {ds:>12}")
+    if not any_pka:
+        print("  (sin pKa's calculados en ninguna de las dos pasadas)")
+
+    # ── Fracciones de especie a los pH de referencia ────────────────────
+    def _row_at_ph(df: Optional[pd.DataFrame], ph: float):
+        if df is None or df.empty or "pH" not in df.columns:
+            return None
+        sub = df[np.isclose(df["pH"].astype(float), ph, atol=1e-6)]
+        return sub.iloc[0] if not sub.empty else None
+
+    for ph_ref, ph_label in [
+        (args.ph,     f"pH {args.ph} (referencia)"),
+        (PH_STANDARD, f"pH {PH_STANDARD} (estándar)"),
+    ]:
+        row_h = _row_at_ph(res_harm.get("df_dist"), ph_ref)
+        row_g = _row_at_ph(res_gv.get("df_dist"), ph_ref)
+        if row_h is None or row_g is None:
+            continue
+        frac_cols = [c for c in row_h.index if c.startswith("f_")]
+        if not frac_cols:
+            continue
+        print(f"\n  Fracciones de especie a {ph_label}:")
+        print(f"  {'especie':<14} {'armónico':>10} {'GoodVibes':>10} {'Δ (pp)':>10}")
+        for c in frac_cols:
+            fh = float(row_h[c]) * 100 if pd.notna(row_h[c]) else None
+            fg = float(row_g[c]) * 100 if (c in row_g and pd.notna(row_g[c])) else None
+            if fh is None and fg is None:
+                continue
+            fhs = f"{fh:.2f}%" if fh is not None else "—"
+            fgs = f"{fg:.2f}%" if fg is not None else "—"
+            dps = f"{(fg - fh):+.2f}" if (fh is not None and fg is not None) else "—"
+            print(f"  {c:<14} {fhs:>10} {fgs:>10} {dps:>10}")
+
+    print(f"\n  Nota: la aproximación armónica pura sobreestima la entropía de los")
+    print(f"  modos de baja frecuencia (rotores internos, <{args.gv_cutoff:.0f} cm⁻¹) —")
+    print(f"  típicos en las cadenas laterales Gly/Val y grupos OH/NH libres de")
+    print(f"  M-Gly:Val. Diferencias de pKa >0.3-0.5 unidades, o de fracción de")
+    print(f"  especie >5 puntos porcentuales entre ambas columnas, son razón para")
+    print(f"  preferir el valor de GoodVibes (mRRHO) en el paper en vez del RRHO puro.")
+    print(f"{sep}\n")
 
 
 if __name__ == "__main__":
