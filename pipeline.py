@@ -3119,10 +3119,7 @@ def stage_adc2(
     return None
 
 
-
-# ─────────────────────────────────────────────
-#  STATUS GLOBAL
-# ─────────────────────────────────────────────
+def _opt_worker(task: dict) -> dict:
     """
     Worker para un único OPT, diseñado para ejecutarse en un hilo de
     ThreadPoolExecutor.  ORCA corre como subproceso externo (libera el GIL),
