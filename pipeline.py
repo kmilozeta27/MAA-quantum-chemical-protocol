@@ -3395,168 +3395,19 @@ def print_status():
 #  PUNTO DE ENTRADA
 # ─────────────────────────────────────────────
 
-def main():
+def _run_one(args, parser):
+    """
+    Corre el pipeline completo (CREST -> CENSO -> OPT -> NumFreq -> SP -> TDDFT -> ADC2)
+    para UNA molecula/carga/configuracion ya resuelta en `args`.
+
+    Se separo de main() para poder encadenar varias moleculas en un solo
+    comando (--mol repetido, ver _split_argv_by_mol), corriendo el pipeline
+    consecutivamente para cada una en el orden en que se escribieron en
+    la terminal.
+    """
     global NPROCS_CREST, NPROCS, MAXCORE, NPROCS_NUMFREQ, MAXCORE_NUMFREQ, \
            NPROCS_TDDFT, MAXCORE_TDDFT, NPROCS_ADC2, MAXCORE_ADC2, \
            OPT_BATCH_SIZE, SP_BATCH_SIZE, TDDFT_BATCH_SIZE, OMP_ENV
-    parser = argparse.ArgumentParser(
-        description=(
-            "Pipeline ORCA: CREST → CENSO (prescreen) → Opt → NumFreq → SP → TDDFT → ADC2\n"
-            "CREST y CENSO pre-screening son obligatorios. El número de confórmeros para OPT\n"
-            "se determina automáticamente (mín 3, máx 20) según el panorama conformacional."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Ejemplos (modo normal):
-  # Pipeline completo desde cero, 8 cores totales
-  python pipeline.py --mol molecules/mglyval.xyz --charge -1 --cores 8
-
-  # Retomar desde OPT (CREST+CENSO ya hechos en 01_crest/ y 01b_censo_prescreen/)
-  python pipeline.py --mol molecules/mglyval.xyz --charge -1 --start opt
-
-  # Retomar desde SP (opt y freq ya hechos)
-  python pipeline.py --mol molecules/mglyval.xyz --charge -1 --start sp
-
-  # Retomar NumFreq interrumpida (detección automática de restart)
-  python pipeline.py --mol molecules/mglyval.xyz --charge -1 --start numfreq
-  # → si hay freq_D*.res.Gradients en la carpeta, activa Restart true solo
-
-  # SP+NRoots 1 sobre los 5 mejores confórmeros por E_OPT (requiere 02_opt/ completo)
-  python pipeline.py --mol molecules/mglyval.xyz --charge -1 --nroot
-  python pipeline.py --mol molecules/mglyval.xyz --charge -1 --nroot --nroot-top 3
-
-  # ADC2 standalone: SOLO requiere 04_sp/ (ignora crest/opt/numfreq/tddft
-  # aunque no existan en disco). Útil cuando ya se borró todo salvo 04_sp/
-  # para liberar espacio (ADC2 necesita ~400GB libres).
-  python pipeline.py --mol molecules/mglyval.xyz --charge -1 --start adc2
-
-  # Ver estado de todos los runs
-  python pipeline.py --status
-        """,
-    )
-    parser.add_argument("--mol",    type=Path, help="ruta al .xyz de entrada")
-    parser.add_argument("--charge", type=int, default=0,
-                        help="carga formal de la molécula (default: 0)")
-    parser.add_argument("--start",  choices=STEPS, default="crest",
-                        help="etapa desde la que iniciar (default: crest). "
-                             "--start adc2 es especial: solo requiere 04_sp/, "
-                             "ignora todas las demás etapas y sus directorios.")
-    parser.add_argument("--status", action="store_true",
-                        help="mostrar estado de todos los runs y salir")
-    parser.add_argument(
-        "--skipnumfreq", action="store_true",
-        help=(
-            "Salta NUMFREQ y pasa directo de OPT a SP/TDDFT. "
-            "Usa la geometría de 02_opt/ "
-            "directamente como input de SP, sin correcciones térmicas de NumFreq."
-        ),
-    )
-
-    # ── Recursos de cómputo ─────────────────────────────────────────────────
-    res_group = parser.add_argument_group(
-        "Recursos de cómputo",
-        "Usa --cores para control sencillo (recomendado). Las opciones avanzadas\n"
-        "permiten ajustar cada etapa por separado y sobreescriben --cores.",
-    )
-    res_group.add_argument(
-        "--cores", type=int, default=None, metavar="N",
-        help=(
-            "Cores TOTALES disponibles para el pipeline. El script los distribuye\n"
-            "automáticamente entre etapas (OPT / NumFreq / SP / TDDFT).\n"
-            "  maxcore se recalcula como (RAM_total_MB × 0.85) // cores,\n"
-            "  con RAM_total_MB = 28000 por defecto (ajustar en MAX_RAM_MB)."
-        ),
-    )
-    res_group.add_argument(
-        "--nprocs", type=int, default=None, metavar="N",
-        help=(
-            f"(avanzado) Cores por job de OPT / SP / TDDFT. "
-            f"Sobreescribe la parte OPT de --cores. Default: {NPROCS}."
-        ),
-    )
-    res_group.add_argument(
-        "--maxcore", type=int, default=None, metavar="MB",
-        help=(
-            f"(avanzado) MB/core para OPT / SP / TDDFT. "
-            f"Default: {MAXCORE}. RAM por job = --nprocs × MB."
-        ),
-    )
-    res_group.add_argument(
-        "--nprocs-numfreq", type=int, default=None, metavar="N",
-        help=(
-            f"(avanzado) Cores para NumFreq. "
-            f"Sobreescribe la parte NumFreq de --cores. Default: {NPROCS_NUMFREQ}."
-        ),
-    )
-    res_group.add_argument(
-        "--maxcore-numfreq", type=int, default=None, metavar="MB",
-        help=f"(avanzado) MB/core para NumFreq. Default: {MAXCORE_NUMFREQ}.",
-    )
-
-    # ── Modo SP + NRoots 1 ─────────────────────────────────────────────────
-    parser.add_argument(
-        "--nroot", action="store_true",
-        help=(
-            "Modo SP+NRoots 1: calcula un SP con TD-DFT mínimo (NRoots 1) "
-            "sobre los mejores confórmeros según energía DFT de OPT (02_opt/). "
-            "Los inputs se escriben en 06_sp_nroot/<conf_id>/sp_nroot.inp. "
-            "Requiere que OPT haya completado."
-        ),
-    )
-    parser.add_argument(
-        "--nroot-top", type=int, default=5, metavar="N",
-        help=(
-            "Número de confórmeros (top-N por E_OPT) sobre los que correr "
-            "el SP+NRoots 1 con --nroot (default: 5)."
-        ),
-    )
-
-    # ── Modo multi-temperatura (CENSO) ─────────────────────────────────────
-    parser.add_argument(
-        "--multitemp", action="store_true",
-        help=(
-            "Modo multi-temperatura: corre CENSO pre-screening a múltiples "
-            "temperaturas definidas por --trange T_ini T_fin N_puntos. "
-            "Cada temperatura produce su propio ensemble en "
-            "01b_censo_prescreen/T<temp>K/. "
-            "--trange es opcional (default: 274 298 24)."
-        ),
-    )
-    parser.add_argument(
-        "--trange", type=float, nargs=3, metavar=("T_INI", "T_FIN", "N"),
-        default=None,
-        help=(
-            "Rango de temperaturas para --multitemp. "
-            "Formato: T_INI T_FIN N  (en K, N = número de puntos, incluye extremos). "
-            "Default cuando --multitemp está activo: 274 298 24 "
-            "(24 puntos equiespaciados de 274 K a 298 K). "
-            "Si N=1, se usa solo T_INI."
-        ),
-    )
-    parser.add_argument(
-        "--temperature", type=float, default=298.15, metavar="T",
-        help=(
-            "Temperatura de referencia para CENSO: "
-            "en modo normal (sin --multitemp) es la única temperatura usada; "
-            "en modo --multitemp es la temperatura cuyo ensemble CENSO se usa "
-            "para seleccionar los confórmeros que pasan a OPT. "
-            "En K. Default: 298.15 (25 °C)."
-        ),
-    )
-
-    parser.add_argument(
-        "--boltzmann-threshold", type=float, default=5.0, metavar="PCT",
-        help=(
-            "Umbral de peso Boltzmann (%%) para seleccionar confórmeros que pasan "
-            "a OPT. Requiere que CENSO haya generado 1_SCREENING.out con los pesos. "
-            "Ejemplo: --boltzmann-threshold 5.0 selecciona confs con peso ≥ 5%% "
-            "(típicamente CONF7=41.7%%, CONF290=34.8%%, CONF81=5.9%% para SB). "
-            "Si no se especifica, se usa select_nconf_auto (comportamiento por defecto). "
-            "Si el umbral deja < NCONF_MIN confórmeros, se completan automáticamente."
-        ),
-    )
-
-    args = parser.parse_args()
 
     # ── Validar --multitemp / --trange ───────────────────────────────────────
     if args.trange is not None and not args.multitemp:
@@ -3943,6 +3794,298 @@ Ejemplos (modo normal):
     log.info(f"Resultados en: {mol_dir.resolve()}")
     log.info("=" * 60)
 
+
+
+
+def _split_argv_by_mol(argv):
+    """
+    Divide argv en:
+      - preamble: tokens ANTES del primer --mol (flags "globales" que
+        aplican a todas las moleculas: --status, --cores, --nprocs,
+        --maxcore, --nprocs-numfreq, --maxcore-numfreq, etc.)
+      - mol_blocks: lista de bloques. Cada bloque empieza en un token
+        "--mol" (o "--mol=...") y contiene todos los flags que le
+        siguen hasta el proximo "--mol" (o el final de argv).
+
+    Esto permite encadenar varias moleculas en un solo comando, donde
+    cada una lleva sus propias especificaciones (--charge, --start,
+    --skipnumfreq, --nroot, --multitemp, --boltzmann-threshold, etc.)
+    respetando el orden en que se escriben en la terminal, por ejemplo:
+
+        python pipeline.py --mol molecules/B.xyz --charge -1 \\
+                            --mol molecules/C.xyz --charge -2
+
+    Aqui --charge -1 pertenece solo a B.xyz y --charge -2 solo a C.xyz.
+    Un flag repetido dentro de un mismo bloque (p.ej. --cores puesto de
+    nuevo despues de un --mol) sobreescribe el valor del preamble para
+    esa molecula en particular, ya que argparse siempre se queda con la
+    ultima ocurrencia de un flag.
+    """
+    def _is_mol_flag(tok):
+        return tok == "--mol" or tok.startswith("--mol=")
+
+    mol_indices = [i for i, tok in enumerate(argv) if _is_mol_flag(tok)]
+    if not mol_indices:
+        return argv, []
+
+    preamble = argv[:mol_indices[0]]
+    blocks = []
+    for j, start in enumerate(mol_indices):
+        end = mol_indices[j + 1] if j + 1 < len(mol_indices) else len(argv)
+        blocks.append(argv[start:end])
+    return preamble, blocks
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Pipeline ORCA: CREST → CENSO (prescreen) → Opt → NumFreq → SP → TDDFT → ADC2\n"
+            "CREST y CENSO pre-screening son obligatorios. El número de confórmeros para OPT\n"
+            "se determina automáticamente (mín 3, máx 20) según el panorama conformacional."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Ejemplos (modo normal):
+  # Pipeline completo desde cero, 8 cores totales
+  python pipeline.py --mol molecules/mglyval.xyz --charge -1 --cores 8
+
+  # Retomar desde OPT (CREST+CENSO ya hechos en 01_crest/ y 01b_censo_prescreen/)
+  python pipeline.py --mol molecules/mglyval.xyz --charge -1 --start opt
+
+  # Retomar desde SP (opt y freq ya hechos)
+  python pipeline.py --mol molecules/mglyval.xyz --charge -1 --start sp
+
+  # Retomar NumFreq interrumpida (detección automática de restart)
+  python pipeline.py --mol molecules/mglyval.xyz --charge -1 --start numfreq
+  # → si hay freq_D*.res.Gradients en la carpeta, activa Restart true solo
+
+  # SP+NRoots 1 sobre los 5 mejores confórmeros por E_OPT (requiere 02_opt/ completo)
+  python pipeline.py --mol molecules/mglyval.xyz --charge -1 --nroot
+  python pipeline.py --mol molecules/mglyval.xyz --charge -1 --nroot --nroot-top 3
+
+  # ADC2 standalone: SOLO requiere 04_sp/ (ignora crest/opt/numfreq/tddft
+  # aunque no existan en disco). Útil cuando ya se borró todo salvo 04_sp/
+  # para liberar espacio (ADC2 necesita ~400GB libres).
+  python pipeline.py --mol molecules/mglyval.xyz --charge -1 --start adc2
+
+  # Ver estado de todos los runs
+  python pipeline.py --status
+
+Ejemplos (modo multi-molécula, --mol repetido):
+  # Corre B.xyz (carga -1) y luego C.xyz (carga -2), consecutivamente.
+  # Cada molécula toma las especificaciones que la siguen en la terminal
+  # hasta el próximo --mol.
+  python pipeline.py --mol molecules/B.xyz --charge -1 \\
+                      --mol molecules/C.xyz --charge -2
+
+  # Igual, pero C.xyz además salta NumFreq y B.xyz retoma desde OPT:
+  python pipeline.py --mol molecules/B.xyz --charge -1 --start opt \\
+                      --mol molecules/C.xyz --charge -2 --skipnumfreq
+
+  # Flags globales (--cores, etc.) puestos ANTES del primer --mol se
+  # heredan en todas las moléculas de la cola:
+  python pipeline.py --cores 8 \\
+                      --mol molecules/B.xyz --charge -1 \\
+                      --mol molecules/C.xyz --charge -2
+        """,
+    )
+    parser.add_argument("--mol",    type=Path, help="ruta al .xyz de entrada")
+    parser.add_argument("--charge", type=int, default=0,
+                        help="carga formal de la molécula (default: 0)")
+    parser.add_argument("--start",  choices=STEPS, default="crest",
+                        help="etapa desde la que iniciar (default: crest). "
+                             "--start adc2 es especial: solo requiere 04_sp/, "
+                             "ignora todas las demás etapas y sus directorios.")
+    parser.add_argument("--status", action="store_true",
+                        help="mostrar estado de todos los runs y salir")
+    parser.add_argument(
+        "--skipnumfreq", action="store_true",
+        help=(
+            "Salta NUMFREQ y pasa directo de OPT a SP/TDDFT. "
+            "Usa la geometría de 02_opt/ "
+            "directamente como input de SP, sin correcciones térmicas de NumFreq."
+        ),
+    )
+
+    # ── Recursos de cómputo ─────────────────────────────────────────────────
+    res_group = parser.add_argument_group(
+        "Recursos de cómputo",
+        "Usa --cores para control sencillo (recomendado). Las opciones avanzadas\n"
+        "permiten ajustar cada etapa por separado y sobreescriben --cores.",
+    )
+    res_group.add_argument(
+        "--cores", type=int, default=None, metavar="N",
+        help=(
+            "Cores TOTALES disponibles para el pipeline. El script los distribuye\n"
+            "automáticamente entre etapas (OPT / NumFreq / SP / TDDFT).\n"
+            "  maxcore se recalcula como (RAM_total_MB × 0.85) // cores,\n"
+            "  con RAM_total_MB = 28000 por defecto (ajustar en MAX_RAM_MB)."
+        ),
+    )
+    res_group.add_argument(
+        "--nprocs", type=int, default=None, metavar="N",
+        help=(
+            f"(avanzado) Cores por job de OPT / SP / TDDFT. "
+            f"Sobreescribe la parte OPT de --cores. Default: {NPROCS}."
+        ),
+    )
+    res_group.add_argument(
+        "--maxcore", type=int, default=None, metavar="MB",
+        help=(
+            f"(avanzado) MB/core para OPT / SP / TDDFT. "
+            f"Default: {MAXCORE}. RAM por job = --nprocs × MB."
+        ),
+    )
+    res_group.add_argument(
+        "--nprocs-numfreq", type=int, default=None, metavar="N",
+        help=(
+            f"(avanzado) Cores para NumFreq. "
+            f"Sobreescribe la parte NumFreq de --cores. Default: {NPROCS_NUMFREQ}."
+        ),
+    )
+    res_group.add_argument(
+        "--maxcore-numfreq", type=int, default=None, metavar="MB",
+        help=f"(avanzado) MB/core para NumFreq. Default: {MAXCORE_NUMFREQ}.",
+    )
+
+    # ── Modo SP + NRoots 1 ─────────────────────────────────────────────────
+    parser.add_argument(
+        "--nroot", action="store_true",
+        help=(
+            "Modo SP+NRoots 1: calcula un SP con TD-DFT mínimo (NRoots 1) "
+            "sobre los mejores confórmeros según energía DFT de OPT (02_opt/). "
+            "Los inputs se escriben en 06_sp_nroot/<conf_id>/sp_nroot.inp. "
+            "Requiere que OPT haya completado."
+        ),
+    )
+    parser.add_argument(
+        "--nroot-top", type=int, default=5, metavar="N",
+        help=(
+            "Número de confórmeros (top-N por E_OPT) sobre los que correr "
+            "el SP+NRoots 1 con --nroot (default: 5)."
+        ),
+    )
+
+    # ── Modo multi-temperatura (CENSO) ─────────────────────────────────────
+    parser.add_argument(
+        "--multitemp", action="store_true",
+        help=(
+            "Modo multi-temperatura: corre CENSO pre-screening a múltiples "
+            "temperaturas definidas por --trange T_ini T_fin N_puntos. "
+            "Cada temperatura produce su propio ensemble en "
+            "01b_censo_prescreen/T<temp>K/. "
+            "--trange es opcional (default: 274 298 24)."
+        ),
+    )
+    parser.add_argument(
+        "--trange", type=float, nargs=3, metavar=("T_INI", "T_FIN", "N"),
+        default=None,
+        help=(
+            "Rango de temperaturas para --multitemp. "
+            "Formato: T_INI T_FIN N  (en K, N = número de puntos, incluye extremos). "
+            "Default cuando --multitemp está activo: 274 298 24 "
+            "(24 puntos equiespaciados de 274 K a 298 K). "
+            "Si N=1, se usa solo T_INI."
+        ),
+    )
+    parser.add_argument(
+        "--temperature", type=float, default=298.15, metavar="T",
+        help=(
+            "Temperatura de referencia para CENSO: "
+            "en modo normal (sin --multitemp) es la única temperatura usada; "
+            "en modo --multitemp es la temperatura cuyo ensemble CENSO se usa "
+            "para seleccionar los confórmeros que pasan a OPT. "
+            "En K. Default: 298.15 (25 °C)."
+        ),
+    )
+
+    parser.add_argument(
+        "--boltzmann-threshold", type=float, default=5.0, metavar="PCT",
+        help=(
+            "Umbral de peso Boltzmann (%%) para seleccionar confórmeros que pasan "
+            "a OPT. Requiere que CENSO haya generado 1_SCREENING.out con los pesos. "
+            "Ejemplo: --boltzmann-threshold 5.0 selecciona confs con peso ≥ 5%% "
+            "(típicamente CONF7=41.7%%, CONF290=34.8%%, CONF81=5.9%% para SB). "
+            "Si no se especifica, se usa select_nconf_auto (comportamiento por defecto). "
+            "Si el umbral deja < NCONF_MIN confórmeros, se completan automáticamente."
+        ),
+    )
+
+
+    raw_argv = sys.argv[1:]
+
+    # --status es global y de mayor prioridad: si aparece en cualquier
+    # parte del comando, se ignora todo lo demas (incluyendo --mol
+    # repetidos) y solo se imprime el estado de los runs.
+    if "--status" in raw_argv:
+        status_args = parser.parse_args(raw_argv)
+        if status_args.status:
+            print_status()
+            return
+
+    preamble, mol_blocks = _split_argv_by_mol(raw_argv)
+
+    if not mol_blocks:
+        # Sin --mol: comportamiento clasico de un solo run
+        # (parser.error si --mol era obligatorio y no se dio).
+        args = parser.parse_args(raw_argv)
+        _run_one(args, parser)
+        return
+
+    if len(mol_blocks) == 1:
+        args = parser.parse_args(preamble + mol_blocks[0])
+        _run_one(args, parser)
+        return
+
+    # ================================================================
+    #  MODO MULTI-MOLECULA: --mol repetido -> correr consecutivamente
+    # ================================================================
+    # Cada bloque (--mol ... hasta el proximo --mol) se parsea como
+    # preamble + bloque, de modo que las especificaciones (--charge,
+    # --start, --skipnumfreq, --nroot, --multitemp, etc.) se apliquen
+    # segun el orden en que se escribieron en la terminal, y los flags
+    # globales (--cores, --status, etc.) puestos ANTES del primer --mol
+    # se hereden en todas las moleculas salvo que se sobreescriban
+    # dentro del bloque de una molecula en particular.
+    n = len(mol_blocks)
+    print(f"\n{'='*60}")
+    print(f"MODO MULTI-MOLECULA: {n} moleculas en cola (ejecucion secuencial)")
+    print(f"{'='*60}")
+
+    resumen = []
+    for i, block in enumerate(mol_blocks, start=1):
+        run_argv = preamble + block
+        try:
+            args = parser.parse_args(run_argv)
+        except SystemExit:
+            print(f"[{i}/{n}] ERROR: argumentos invalidos en este bloque -- se omite.")
+            resumen.append((f"run_{i}", "ERROR: argumentos invalidos"))
+            continue
+
+        etiqueta = args.mol.name if args.mol else f"run_{i}"
+        print(f"\n{'#'*60}")
+        print(f"[{i}/{n}] {etiqueta}  (carga={args.charge}, start={args.start})")
+        print(f"{'#'*60}\n")
+
+        try:
+            _run_one(args, parser)
+            resumen.append((etiqueta, "OK"))
+        except SystemExit as e:
+            codigo = e.code if isinstance(e.code, int) else 1
+            print(f"\n[{i}/{n}] {etiqueta}: termino con error (sys.exit={codigo}). "
+                  f"Continuando con la siguiente molecula...\n")
+            resumen.append((etiqueta, f"ERROR (sys.exit={codigo})"))
+        except Exception as e:
+            print(f"\n[{i}/{n}] {etiqueta}: excepcion no controlada: {e!r}. "
+                  f"Continuando con la siguiente molecula...\n")
+            resumen.append((etiqueta, f"EXCEPCION: {e}"))
+
+    print(f"\n{'='*60}")
+    print("RESUMEN MULTI-MOLECULA")
+    print(f"{'='*60}")
+    for etiqueta, estado in resumen:
+        print(f"  {etiqueta:30s} -> {estado}")
+    print(f"{'='*60}\n")
 
 if __name__ == "__main__":
     main()
