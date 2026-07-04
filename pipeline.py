@@ -147,7 +147,14 @@ def check_required_bins(log: logging.Logger) -> None:
 ORCA_BIN   = Path("/home/kmilozeta/orca_6_1_1_avx2/orca")
 CREST_BIN  = _resolve_bin("crest")  # resuelto vía PATH o conda env sciencebitch
 CENSO_BIN  = _resolve_bin("censo")  # resuelto vía PATH o conda env sciencebitch
-WORK_ROOT  = Path("runs")           # directorio de salida
+
+# Carpeta madre del proyecto. Cada molécula vive en PAPER_ROOT/<mol_name>/,
+# y sus archivos de cómputo (01_crest/, 02_opt/, etc.) se escriben dentro
+# de PAPER_ROOT/<mol_name>/runs/ — es decir, WORK_ROOT ya no es un único
+# directorio "runs/" que contiene a todas las moléculas; ahora cada
+# molécula tiene su propio "runs/" anidado bajo su carpeta en PAPER1.
+PAPER_ROOT = Path("/home/kmilozeta/PAPER1")   # carpeta madre del proyecto
+WORK_ROOT  = PAPER_ROOT                        # alias: raíz que contiene <mol_name>/runs/
 TMPL_DIR   = Path("templates")
 MULT       = 1                      # multiplicidad siempre 1
 CREST_TIMEOUT_HOURS = 24.0          # timeout CREST (horas)
@@ -632,7 +639,10 @@ def setup_logging(mol_dir: Path) -> logging.Logger:
     Crea un logger con nombre único por molécula para evitar que dos
     instancias paralelas del script compartan handlers y dupliquen líneas.
     """
-    logger_name = f"pipeline.{mol_dir.name}"
+    # mol_dir ahora es PAPER_ROOT/<mol_name>/runs/, así que el nombre de la
+    # molécula está en el directorio padre (mol_dir.name sería "runs" para
+    # todas las moléculas, lo que rompería la unicidad del logger).
+    logger_name = f"pipeline.{mol_dir.parent.name}"
     log = logging.getLogger(logger_name)
 
     # Evitar añadir handlers duplicados si se llama más de una vez
@@ -1428,7 +1438,7 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
 
     Args:
         conformers_xyz : ruta al ensemble CREST (multi-XYZ).
-        mol_dir        : directorio raíz del run (runs/<mol_name>/).
+        mol_dir        : directorio raíz del run (PAPER_ROOT/<mol_name>/runs/).
         charge         : carga formal de la molécula.
         log            : logger del pipeline.
         temperature    : temperatura para CENSO en K (default 274.15 = 1 °C Antártico).
@@ -3349,20 +3359,24 @@ def _check_cpu_budget(batch_size: int, nprocs_per_job: int, log: logging.Logger)
 # ─────────────────────────────────────────────
 
 def print_status():
-    """Imprime estado de todos los cálculos en runs/."""
-    runs = WORK_ROOT
-    if not runs.exists():
-        print("No se encontró el directorio 'runs/'. Aún no hay cálculos.")
+    """Imprime estado de todos los cálculos en PAPER_ROOT/<mol_name>/runs/."""
+    if not WORK_ROOT.exists():
+        print(f"No se encontró el directorio '{WORK_ROOT}/'. Aún no hay cálculos.")
         return
 
     print(f"\n{'─'*60}")
-    print(f"  Estado de runs en: {runs.resolve()}")
+    print(f"  Estado de runs en: {WORK_ROOT.resolve()}")
     print(f"{'─'*60}")
 
-    for mol_dir in sorted(runs.iterdir()):
+    # Cada molécula es PAPER_ROOT/<mol_name>/, y sus etapas viven en
+    # PAPER_ROOT/<mol_name>/runs/ (no directamente en PAPER_ROOT/<mol_name>/).
+    for mol_parent in sorted(WORK_ROOT.iterdir()):
+        if not mol_parent.is_dir():
+            continue
+        mol_dir = mol_parent / "runs"
         if not mol_dir.is_dir():
             continue
-        print(f"\n  📁 {mol_dir.name}")
+        print(f"\n  📁 {mol_parent.name}")
         for step_num in ["01_crest", "02_opt", "03_numfreq", "04_sp", "05_tddft", "06_sp_nroot", "07_adc2"]:
             step_dir = mol_dir / step_num
             if not step_dir.exists():
@@ -3541,7 +3555,7 @@ def _run_one(args, parser):
                  f"       Ajusta ORCA_BIN al inicio del script.")
 
     mol_name = mol_xyz.stem
-    mol_dir  = WORK_ROOT / mol_name
+    mol_dir  = WORK_ROOT / mol_name / "runs"
     mol_dir.mkdir(parents=True, exist_ok=True)
 
     log = setup_logging(mol_dir)
