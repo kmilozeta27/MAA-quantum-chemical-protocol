@@ -1,4 +1,4 @@
-"""NumfreqStage — frecuencias vibracionales numéricas (termoquímica).
+"""NumFreqStage — frecuencias vibracionales numéricas (termoquímica).
 
 Migrar desde pipeline.py:
   - stage_numfreq()          líneas 2601-2671
@@ -6,7 +6,7 @@ Migrar desde pipeline.py:
 
 Nota: config.skip_numfreq (= --skipnumfreq legacy) hace que el
 orchestrator salte este stage completo (OPT -> SP -> TDDFT directo),
-no que NumfreqStage se ejecute como no-op. Esa decisión vive en
+no que NumFreqStage se ejecute como no-op. Esa decisión vive en
 orchestrator/dag.py, no acá.
 """
 
@@ -18,7 +18,7 @@ from maaqc.config.schema import RecipeConfig
 from maaqc.stages.base import Stage, StageResult
 
 
-class NumfreqStage(Stage):
+class NumFreqStage(Stage):
     name = "numfreq"
     requires = ["opt"]
 
