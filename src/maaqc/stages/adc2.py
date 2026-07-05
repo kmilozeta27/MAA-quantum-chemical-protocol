@@ -63,13 +63,18 @@ def load_exp_lambda(mol_name: str, config: RecipeConfig) -> Optional[float]:
     Orden de búsqueda (adaptado de pipeline.py:load_exp_lambda, que leía
     molecules.yml en texto plano — reemplazado acá por el YAML de recipe,
     que ya pasa por schema/pydantic):
-      1. config.adc2.exp_lambda_nm   (declarado explícito en el recipe)
-      2. EXP_LAMBDA_FALLBACK         (compatibilidad con runs legacy)
+      1. config.adc2.exp_lambda_fallback[mol_name]  (declarado explícito
+         en el recipe — el campo real es `Adc2Config.exp_lambda_fallback`,
+         un dict por-molécula; antes esta función buscaba
+         `config.adc2.exp_lambda_nm`, un campo que nunca existió en el
+         schema, así que el override del recipe nunca surtía efecto y
+         siempre se caía silenciosamente al punto 2)
+      2. EXP_LAMBDA_FALLBACK          (compatibilidad con runs legacy)
       3. None (stage_adc2 omite Δλ pero no falla)
     """
-    exp_from_config = getattr(getattr(config, "adc2", None), "exp_lambda_nm", None)
-    if exp_from_config is not None:
-        return float(exp_from_config)
+    from_recipe = config.adc2.exp_lambda_fallback.get(mol_name)
+    if from_recipe is not None:
+        return float(from_recipe)
 
     if mol_name in EXP_LAMBDA_FALLBACK:
         log.debug(
@@ -184,10 +189,16 @@ class Adc2Stage(Stage):
         a la firma Stage.run(config, workdir) — mol_dir/charge/mol_name/log
         del legacy vienen ahora de config y workdir.
         """
-        mol_name = getattr(config, "molecule_name", None) or workdir.name
+        mol_name = config.molecule_name or workdir.name
         charge = config.charge
-        nprocs_adc2 = getattr(config.adc2, "nprocs", 4)
-        maxcore_adc2 = getattr(config.adc2, "maxcore_mb", 5500)
+        # ANTES: getattr(config.adc2, "nprocs"/"maxcore_mb", default) —
+        # ninguno de los dos existe en Adc2Config, así que cualquier
+        # ajuste de recursos en el recipe se ignoraba en silencio y
+        # siempre corría con los defaults hardcodeados acá. Los campos
+        # reales para esto ya existen en ResourceConfig y son los mismos
+        # que usan opt.py/sp.py (config.resources.nprocs / .maxcore).
+        nprocs_adc2 = config.resources.nprocs_adc2
+        maxcore_adc2 = config.resources.maxcore_adc2
 
         sp_root = workdir / "04_sp"
         if not sp_root.exists():
