@@ -1,27 +1,10 @@
 # tests/fixtures/mini_recipe.yml
+# Campos reales de config/schema.py::RecipeConfig — no hay secciones
+# crest:/opt:/sp:/numfreq: a nivel raíz, ni flags enabled:, ni mult:
+# (es multiplicity). tddft/adc2 quedan con sus defaults porque este
+# recipe solo se usa hoy para el smoke test de OptStage/SpStage.
+
 entry: xyz
 charge: 0
-mult: 1
-
-crest:
-  method: gfn2
-  ewin: 3.0          # ventana chica, glicina no necesita más
-
-censo:
-  enabled: false      # smoke test: sin ranking DFT caro
-
-opt:
-  method: gfn2xtb     # o r2scan-3c si quieres algo DFT barato en ORCA
-
-numfreq:
-  enabled: true
-  method: gfn2xtb
-
-sp:
-  enabled: false
-
-tddft:
-  enabled: false
-
-adc2:
-  mandatory: false
+multiplicity: 1
+skip_numfreq: true   # smoke test: no correr NumFreq (sigue sin migrar)
