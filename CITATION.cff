@@ -1,0 +1,34 @@
+cff-version: 1.2.0
+message: >-
+  Si usas este software, por favor cítalo usando los metadatos de este
+  archivo. Ver también el DOI de Zenodo del release correspondiente
+  (pendiente: agregar tras el primer release en GitHub).
+title: "maaqc: MAA Quantum Characterization pipeline"
+type: software
+version: 0.1.0.dev0
+date-released: "TODO"
+authors:
+  - family-names: "TODO-apellido"
+    given-names: "Kmilo"
+    # orcid: "https://orcid.org/0000-0000-0000-0000"
+repository-code: "https://github.com/kmilozeta/maaqc"
+license: MIT
+keywords:
+  - computational chemistry
+  - quantum chemistry
+  - ORCA
+  - CREST
+  - CENSO
+  - TDDFT
+  - ADC2
+  - mycosporine-like amino acids
+references:
+  - type: software
+    title: "ORCA 6"
+    version: "6.1.1"
+  - type: software
+    title: "CREST"
+    version: "3.0.2"
+  - type: software
+    title: "CENSO"
+    version: "3.0.x"
