@@ -134,6 +134,31 @@ end
 * xyzfile {CHARGE} {MULT} opt_opt.xyz
 """
 
+# Migrado 1:1 desde pipeline.py:837-854. A diferencia de TEMPLATE_OPT/
+# TEMPLATE_SP, usa placeholders propios {MAXCORE_ADC2}/{NPROCS_ADC2} (no
+# {MAXCORE}/{NPROCS} genéricos) porque ADC2 corre con su propio budget de
+# recursos — ver ResourceConfig.nprocs_adc2/maxcore_adc2 en config/schema.py.
+# Tampoco usa {COORDS}: la geometría se copia aparte como adc2_geom.xyz
+# (ver Adc2Stage.run(), que hace safe_copy() antes de formatear esto).
+TEMPLATE_ADC2 = """\
+! ADC2 def2-SVP def2-SVP/C RIJCOSX TightSCF
+%scf
+  MaxIter 500
+end
+%maxcore {MAXCORE_ADC2}
+%pal
+  nprocs {NPROCS_ADC2}
+end
+%mdci
+  nroots 1
+  trafotype trafo_ri
+  maxiter 50
+  MaxCore {MAXCORE_ADC2}
+end
+
+* xyzfile {CHARGE} {MULT} adc2_geom.xyz
+"""
+
 
 def get_template(step: str, templates_dir: Optional[Path] = None) -> str:
     """Devuelve el template inline. Si existe `<templates_dir>/<step>.inp.tmpl`,
@@ -142,7 +167,7 @@ def get_template(step: str, templates_dir: Optional[Path] = None) -> str:
         tmpl_file = templates_dir / f"{step}.inp.tmpl"
         if tmpl_file.exists():
             return tmpl_file.read_text()
-    mapping = {"opt": TEMPLATE_OPT, "sp": TEMPLATE_SP}
+    mapping = {"opt": TEMPLATE_OPT, "sp": TEMPLATE_SP, "adc2": TEMPLATE_ADC2}
     return mapping[step]
 
 
