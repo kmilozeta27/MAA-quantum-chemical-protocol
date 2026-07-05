@@ -103,6 +103,14 @@ class RecipeConfig(BaseModel):
     entry: Literal["smiles", "xyz", "crest-ensemble", "sp-only", "calibrated"] = "xyz"
     reference: Optional[str] = None  # ej. "shinorine" para --entry calibrated
 
+    # Etiqueta del estado de protonación (ej. "A", "B", "R" — ver
+    # EXP_LAMBDA_FALLBACK en stages/adc2.py). Antes, adc2.py leía este
+    # campo vía getattr(config, "molecule_name", None) sin que existiera
+    # en el schema: el override nunca podía tener efecto, siempre caía a
+    # workdir.name. Ahora es un campo real; sigue siendo opcional porque
+    # workdir.name es un fallback razonable cuando coincide con el label.
+    molecule_name: Optional[str] = None
+
     skip_numfreq: bool = False       # reemplaza --skipnumfreq
     charge: Optional[int] = None
     multiplicity: int = 1            # MULT, siempre 1 en pipeline.py legacy
