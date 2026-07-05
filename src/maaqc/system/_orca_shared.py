@@ -159,6 +159,74 @@ end
 * xyzfile {CHARGE} {MULT} adc2_geom.xyz
 """
 
+# Ported 1:1 desde pipeline.py:742-775 (TEMPLATE_NUMFREQ / TEMPLATE_NUMFREQ_RESTART).
+TEMPLATE_NUMFREQ = """\
+! wB97X-D3 def2-SVP CPCM(water) RIJCOSX TightSCF NumFreq
+%method
+  Grid 4
+end
+%scf
+  MaxIter 300
+end
+%maxcore {MAXCORE_NUMFREQ}
+%pal
+  nprocs {NPROCS_NUMFREQ}
+end
+
+* xyzfile {CHARGE} {MULT} opt_opt.xyz
+"""
+
+TEMPLATE_NUMFREQ_RESTART = """\
+! wB97X-D3 def2-SVP CPCM(water) RIJCOSX TightSCF NumFreq
+%method
+  Grid 4
+end
+%scf
+  MaxIter 300
+end
+%maxcore {MAXCORE_NUMFREQ}
+%pal
+  nprocs {NPROCS_NUMFREQ}
+end
+%freq
+  Restart true
+end
+
+* xyzfile {CHARGE} {MULT} opt_opt.xyz
+"""
+
+# Ported desde pipeline.py:812-835 (TEMPLATE_TDDFT), con un cambio de
+# firma deliberado: legacy hardcodeaba "wB97X-D3" y "NRoots 15" a nivel
+# de string; acá se parametrizan como {FUNCTIONAL}/{NROOTS} porque
+# config/schema.py::TddftConfig YA declara `functional`/`states` como
+# campos de recipe (defaults wb97x-d3/10 — el 10 NO coincide con el 15
+# hardcodeado del legacy; avisar a kmilozeta antes de correr algo citable,
+# un recipe con `tddft.states: 15` restaura el comportamiento legacy).
+TEMPLATE_TDDFT = """\
+! {FUNCTIONAL} def2-TZVPD def2-TZVPD/C CPCM(water) RIJCOSX TightSCF
+%pal
+  nprocs {NPROCS}
+end
+%maxcore {MAXCORE}
+%scf
+  MaxIter 300
+  MOInp "{GBW_PATH}"
+end
+%tddft
+  NRoots    {NROOTS}
+  MaxDim    150
+  ETol      1e-6
+  RTol      1e-6
+  TDA       false
+  Triplets  false
+  PrintLevel 3
+  DoCD      true
+  DoNTO     true
+end
+
+* xyzfile {CHARGE} {MULT} sp_opt.xyz
+"""
+
 
 def get_template(step: str, templates_dir: Optional[Path] = None) -> str:
     """Devuelve el template inline. Si existe `<templates_dir>/<step>.inp.tmpl`,
@@ -167,7 +235,14 @@ def get_template(step: str, templates_dir: Optional[Path] = None) -> str:
         tmpl_file = templates_dir / f"{step}.inp.tmpl"
         if tmpl_file.exists():
             return tmpl_file.read_text()
-    mapping = {"opt": TEMPLATE_OPT, "sp": TEMPLATE_SP, "adc2": TEMPLATE_ADC2}
+    mapping = {
+        "opt": TEMPLATE_OPT,
+        "sp": TEMPLATE_SP,
+        "adc2": TEMPLATE_ADC2,
+        "numfreq": TEMPLATE_NUMFREQ,
+        "numfreq_restart": TEMPLATE_NUMFREQ_RESTART,
+        "tddft": TEMPLATE_TDDFT,
+    }
     return mapping[step]
 
 
@@ -183,6 +258,30 @@ def check_success(out_file: Path) -> bool:
     except OSError:
         return False
     return "ORCA TERMINATED NORMALLY" in text
+
+
+def check_no_imaginary(out_file: Path) -> bool:
+    """True si un .out de NumFreq no reporta frecuencias imaginarias.
+    Ported 1:1 desde pipeline.py:889-900."""
+    if not out_file.exists():
+        return True
+    try:
+        text = out_file.read_text(errors="replace")
+    except OSError:
+        return True
+    for line in text.splitlines():
+        if re.match(r"\s+\d+:\s+-\d", line):
+            return False
+    return True
+
+
+def has_numfreq_restart(freq_dir: Path) -> bool:
+    """True si hay gradientes parciales de una NumFreq interrumpida.
+    ORCA 6 guarda cada displacement como freq_D#####.res.Gradients — con
+    eso, '%freq Restart true end' retoma sin recalcular nada. Ported 1:1
+    desde pipeline.py:903-910."""
+    gradients = list(freq_dir.glob("freq_D*.res.Gradients"))
+    return len(gradients) > 0
 
 
 def resolve_opt_xyz(opt_dir: Path) -> Optional[Path]:
