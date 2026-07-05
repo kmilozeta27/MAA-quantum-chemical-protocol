@@ -1,70 +1,101 @@
-"""DAG de dependencias entre stages + lógica de resume/entry points.
+"""orchestrator/dag.py — Resolución de stages por --entry (Opción 2).
 
-Reemplaza:
-  - pipeline.py:_run_one()          líneas 3425-3849 (decide qué stages
-                                     correr según --start/--skipnumfreq/etc.)
-  - pipeline.py:_split_argv_by_mol() líneas 3850-3888 (modo multi-molécula:
-                                     esto se vuelve una cola de runs del
-                                     orchestrator, no parsing de argv)
+Contexto (ver adc2.py y la discusión de decisión (a)):
 
-Responsable de resolver los dos TODOs de diseño dejados pendientes en
-stages/sp.py y stages/adc2.py: `requires` no es siempre una lista
-estática, depende de config (skip_numfreq) o del --entry elegido
-(sp-only ignora todo lo previo a 04_sp/). La resolución de qué stages
-correr para un --entry dado debe vivir acá, como una función que mapea
-(entry, config) -> lista de Stage a ejecutar en orden — no como
-lógica ad hoc dentro de cada Stage.is_complete().
+  sp.py con skip_numfreq: dependencia que CRECE (opt siempre requerido,
+  a veces +numfreq) — se resuelve dentro de SpStage.is_complete(), sin
+  tocar este archivo ni Stage.
 
-STAGE_ORDER y STAGE_REGISTRY reemplazan la lista plana STEPS =
-["crest", "opt", "numfreq", "sp", "tddft", "adc2"] de pipeline.py
-(línea 218) -- nótese que esa lista legacy ya ni siquiera incluye
-"censo", otro síntoma de que el orden real vivía implícito en el código
-de _run_one() en vez de en una estructura de datos explícita.
+  adc2.py con --entry sp-only: dependencia que A VECES NO EXISTE (0
+  requisitos en vez de ["tddft"]) — reemplaza el viejo `--start adc2`
+  standalone de pipeline.py (líneas 3641-3669). Esto SÍ necesita algo
+  fuera de Stage, porque el orchestrator debe decidir qué validar antes
+  de instanciar nada.
+
+Solución elegida: separar dos preguntas que antes vivían mezcladas en
+`requires`:
+
+  1. "¿el stage previo terminó bien?"      → solo se chequea si ese stage
+     previo forma parte de la cadena resuelta para este --entry.
+  2. "¿existen los archivos que necesito?" → SIEMPRE se chequea, vía
+     stage.inputs(workdir), sea cual sea el --entry.
+
+`Stage.requires` NO cambia de tipo (sigue siendo list[str] estático en
+los 7 stages). Todo el mecanismo vive acá.
 """
 
 from __future__ import annotations
 
-from maaqc.config.schema import RecipeConfig
-from maaqc.stages.adc2 import Adc2Stage
-from maaqc.stages.base import Stage
-from maaqc.stages.censo import CensoStage
-from maaqc.stages.crest import CrestStage
-from maaqc.stages.numfreq import NumfreqStage
-from maaqc.stages.opt import OptStage
-from maaqc.stages.sp import SpStage
-from maaqc.stages.tddft import TddftStage
+from pathlib import Path
 
-STAGE_REGISTRY: dict[str, type[Stage]] = {
-    "crest": CrestStage,
-    "censo": CensoStage,
-    "opt": OptStage,
-    "numfreq": NumfreqStage,
-    "sp": SpStage,
-    "tddft": TddftStage,
-    "adc2": Adc2Stage,
+from maaqc.stages.base import Stage
+
+STAGE_ORDER: list[str] = [
+    "crest", "censo", "opt", "numfreq", "sp", "tddft", "adc2",
+]
+
+# Entries que NO retoman la cadena normal, sino que corren un único stage
+# standalone y solo validan sus inputs() en disco. Reemplaza los viejos
+# `--start <stage>` "especiales" de pipeline.py (hoy solo `--start adc2`,
+# ver pipeline.py:3641-3669 y el docstring del módulo, líneas 60-68).
+#
+# Si en el futuro aparece otro --entry con este mismo patrón de "saltar
+# cadena completa" (la skill menciona `calibrated --reference shinorine`
+# como candidato), agregarlo acá — no como un nuevo `if entry == "..."`
+# suelto en el orchestrator.
+STANDALONE_ENTRIES: dict[str, str] = {
+    "sp-only": "adc2",  # antes: --start adc2
 }
 
-STAGE_ORDER: list[str] = ["crest", "censo", "opt", "numfreq", "sp", "tddft", "adc2"]
 
+def resolve_stages_for_entry(entry: str) -> list[str]:
+    """Nombres de stage que el orchestrator debe instanciar/ejecutar.
 
-def resolve_stages_for_entry(entry: str, config: RecipeConfig) -> list[str]:
-    """Mapea --entry + config a la lista de stages a ejecutar, en orden.
-
-    TODO: implementar los 5 casos de pipeline.py (líneas 150-161 del
-    esqueleto de la skill):
-      - smiles          -> cadena completa desde crest
-      - xyz             -> cadena completa desde crest
-      - crest-ensemble  -> salta crest (ya hay confórmeros), empieza en censo
-      - sp-only         -> ignora crest/censo/opt/numfreq/tddft, solo
-                            requiere 04_sp/ (equivalente a --start adc2)
-      - calibrated      -> como xyz/crest-ensemble pero usa config.reference
-                            para shifts empíricos (ej. shinorine) en adc2
-
-    Además debe aplicar config.skip_numfreq (salta "numfreq" del resultado).
+    - "smiles" / "xyz" / "crest-ensemble" / "calibrated": cadena completa.
+      El punto real de retoma dentro de la cadena lo decide is_complete()
+      de cada stage (resume robusto vía state.json), no este mapeo.
+    - "sp-only" (o cualquier otro en STANDALONE_ENTRIES): un único stage,
+      el resto de STAGE_ORDER queda fuera del DAG resuelto para este run.
     """
-    raise NotImplementedError
+    if entry in STANDALONE_ENTRIES:
+        return [STANDALONE_ENTRIES[entry]]
+    return list(STAGE_ORDER)
 
 
-def run_pipeline(config: RecipeConfig, workdir) -> None:
-    """Corre (o retoma) el pipeline completo según resolve_stages_for_entry()."""
-    raise NotImplementedError
+def is_standalone_entry(entry: str) -> bool:
+    return entry in STANDALONE_ENTRIES
+
+
+def validate_stage_ready(
+    stage: Stage,
+    workdir: Path,
+    entry: str,
+    stages_by_name: dict[str, Stage],
+) -> tuple[bool, str | None]:
+    """Decide si `stage` puede correr, sin tocar el atributo estático
+    `stage.requires`.
+
+    Siempre valida `stage.inputs(workdir)` (pregunta 2). Si `entry` es
+    standalone para este stage, NO valida la cadena `stage.requires`
+    (pregunta 1) — exactamente lo que --entry sp-only necesita para
+    Adc2Stage sin volver dinámico Stage.requires. En cadena normal, sí
+    valida is_complete() de cada requisito, igual que antes.
+    """
+    missing = [p for p in stage.inputs(workdir) if not p.exists()]
+    if missing:
+        faltantes = ", ".join(str(p) for p in missing)
+        return False, f"Faltan inputs para '{stage.name}': {faltantes}"
+
+    if is_standalone_entry(entry):
+        return True, None
+
+    for prev_name in stage.requires:
+        prev_stage = stages_by_name.get(prev_name)
+        if prev_stage is None:
+            return False, f"Stage previo desconocido en el registro: '{prev_name}'"
+        if not prev_stage.is_complete(workdir):
+            return False, (
+                f"'{stage.name}' requiere que '{prev_name}' esté completo "
+                f"y no lo está."
+            )
+    return True, None
