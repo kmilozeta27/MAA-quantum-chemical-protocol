@@ -1,26 +1,11 @@
-"""Contrato común que todo stage debe implementar.
+"""stages/base.py — Contrato común para todos los stages del pipeline.
 
-Esto es lo que reemplaza flags hardcodeados como --start adc2,
---skipnumfreq, --expand-crest por detección automática de qué ya está
-satisfecho en disco. Cada stage_* de pipeline.py (legacy) se convierte
-en una subclase de Stage:
-
-    stage_crest            -> CrestStage
-    stage_censo_prescreen  -> CensoStage   (+ stage_censo_multitemp como
-                                             modo del mismo stage, no un
-                                             stage aparte -- ver censo.py)
-    stage_opt              -> OptStage
-    stage_numfreq          -> NumfreqStage
-    stage_sp               -> SpStage      (stage_sp_nroot es un modo,
-                                             no un stage nuevo -- ver sp.py)
-    stage_tddft            -> TddftStage
-    stage_adc2             -> Adc2Stage
-
-`is_complete()` es la pieza que generaliza recover_prescreening.py y
-pipeline.py:_censo_prescreen_recover — cada stage debe poder reconstruir
-su propio estado leyendo los .out en disco, en vez de depender de un
-JSON consolidado que el programa externo (CENSO) solo escribe si el
-proceso terminó sin interrupciones.
+Decisión de diseño (ver discusión adc2.py / dag.py): `requires` se queda
+como atributo ESTÁTICO de clase en los 7 stages, sin excepción — incluido
+Adc2Stage, que en apariencia necesitaría requires dinámico según
+config.entry. Quien resuelve "qué validar según el --entry" es
+`orchestrator/dag.py`, no `Stage`. Esto evita reabrir este contrato cada
+vez que aparezca un --entry nuevo con el patrón "saltar cadena completa".
 """
 
 from __future__ import annotations
@@ -35,52 +20,47 @@ from maaqc.config.schema import RecipeConfig
 
 @dataclass
 class StageResult:
-    """Resultado de correr (o verificar) un stage."""
-
-    stage_name: str
-    success: bool
-    outputs: list[Path] = field(default_factory=list)
-    # Datos estructurados específicos del stage (ej. energías por confórmero,
-    # confórmero de menor energía para ADC2, etc.) — cada stage define su
-    # propia forma; el orchestrator solo los pasa entre stages sin interpretarlos.
-    data: dict[str, Any] = field(default_factory=dict)
+    ok: bool
     message: str = ""
+    data: dict[str, Any] = field(default_factory=dict)
 
 
 class Stage(ABC):
-    """Interfaz común para todos los stages del pipeline.
+    """Interfaz que todo stage debe implementar.
 
-    Contrato acordado en la skill maa-repackaging — no introducir un
-    patrón ad hoc por stage; si un stage nuevo necesita algo que esta
-    interfaz no cubre, extenderla acá (afecta a todos los stages) en
-    vez de resolverlo solo en la subclase.
+    Atributos de clase:
+        name:     nombre corto del stage (ej. "adc2"), usado en logs,
+                  state.json y en `requires` de otros stages.
+        requires: nombres de stages previos que deben estar is_complete()
+                  en la cadena NORMAL. Lista estática — no evaluar config
+                  acá. Casos "a veces existe, a veces no" (--entry
+                  standalone) se resuelven en dag.py, no acá.
     """
 
     name: str
-    requires: list[str]  # nombres de stages previos requeridos, ej. ["censo"]
+    requires: list[str] = []
 
     @abstractmethod
     def is_complete(self, workdir: Path) -> bool:
-        """True si este stage ya produjo outputs válidos y reusables.
-
-        Debe reconstruir el estado leyendo archivos reales en disco
-        (.out, .xyz, etc.), no confiar únicamente en un marcador o JSON
-        consolidado que un proceso externo pudo no haber escrito si fue
-        interrumpido (ver recover_prescreening.py para el caso CENSO).
-        """
-        raise NotImplementedError
+        """True si este stage ya terminó exitosamente para `workdir`."""
+        ...
 
     @abstractmethod
     def inputs(self, workdir: Path) -> list[Path]:
-        """Archivos que este stage necesita que ya existan antes de correr."""
-        raise NotImplementedError
+        """Archivos/directorios que este stage necesita leer para correr.
+
+        Se valida SIEMPRE, sin importar el --entry (ver dag.py). Esta es
+        la fuente de verdad para "¿tengo lo que necesito en disco?",
+        independiente de si los stages previos de la cadena normal
+        corrieron o no en este run.
+        """
+        ...
 
     @abstractmethod
     def outputs(self, workdir: Path) -> list[Path]:
-        """Archivos que este stage produce cuando corre exitosamente."""
-        raise NotImplementedError
+        """Artefactos que este stage produce cuando termina bien."""
+        ...
 
     @abstractmethod
     def run(self, config: RecipeConfig, workdir: Path) -> StageResult:
-        """Ejecuta el stage. Asume que requires ya están is_complete()."""
-        raise NotImplementedError
+        ...
