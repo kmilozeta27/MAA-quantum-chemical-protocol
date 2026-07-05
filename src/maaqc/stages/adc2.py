@@ -30,12 +30,11 @@ from typing import Optional
 from maaqc.config.schema import RecipeConfig
 from maaqc.stages.base import Stage, StageResult
 
-# TODO(migración): estas utilidades ya existen en pipeline.py y presumiblemente
-# ya se migraron junto con opt.py/sp.py/tddft.py (que según el chat ya están
-# migrados). Ajustar el import real cuando se confirme dónde quedaron
-# (candidato: maaqc.io.orca_utils). Se listan explícitas acá para dejar clara
-# la dependencia y no duplicar lógica de parsing ORCA.
-from maaqc.io.orca_utils import (  # type: ignore[import-not-found]
+# Migración confirmada: opt.py/sp.py ya migran química ORCA reutilizando
+# maaqc.system._orca_shared (helpers genéricos de subprocess/ORCA compartidos
+# entre stages). Adc2Stage reusa exactamente el mismo módulo, sin duplicar
+# lógica de parsing/lanzamiento de ORCA.
+from maaqc.system._orca_shared import (
     check_success,
     extract_sp_energy,
     get_template,

@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Optional
 
 from maaqc.config.schema import RecipeConfig
-from maaqc.stages import _orca_shared as shared
+from maaqc.system import _orca_shared as shared
 from maaqc.stages.base import Stage, StageResult
 
 log = logging.getLogger("maaqc.stages.opt")
