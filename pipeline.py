@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """
 pipeline.py — Pipeline ORCA automatizado para cálculos conformacionales
-Flujo: CREST → CENSO (prescreen) → Opt → NumFreq → SP → TDDFT → ADC2
+Flujo: CREST → CENSO (prescreen) → Opt → NumFreq → SP → TDDFT → [ADC2]
 
 El pipeline siempre empieza en CREST. CENSO pre-screening es obligatorio
 entre CREST y OPT. El número de confórmeros que pasan a OPT se determina
 automáticamente a partir del panorama conformacional post-CENSO (mín 3, máx 20).
+
+SP (fase gas) es la etapa OBLIGATORIA: el pipeline solo se da por
+FINALIZADO cuando al menos un confórmero completa SP. ADC2 es OPCIONAL
+y NO corre por defecto — debe pedirse explícitamente con --adc2 (para
+incluirla al final del pipeline normal) o de forma standalone con
+--start adc2 (ver nota más abajo).
 
 Uso (modo normal):
     python pipeline.py --mol molecules/mol_A.xyz --charge -1
@@ -14,6 +20,7 @@ Uso (modo normal):
     python pipeline.py --mol molecules/mol_A.xyz --charge -1 --skipnumfreq   # OPT → SP → TDDFT directo
     python pipeline.py --mol molecules/mol_A.xyz --charge -1 --nroot         # SP+NRoots1 top-5 por E_OPT
     python pipeline.py --mol molecules/mol_A.xyz --charge -1 --nroot --nroot-top 3  # top-3
+    python pipeline.py --mol molecules/mol_A.xyz --charge -1 --adc2         # pipeline normal + ADC2 al final (opcional)
     python pipeline.py --status                  # ver estado de todos los runs
 
 Uso (temperatura personalizada):
@@ -42,6 +49,13 @@ Uso (modo multi-temperatura, --multitemp):
 Nota: --start crest y --start opt son equivalentes al inicio (ambos requieren
       que CREST+CENSO corran). Solo usar --start opt/numfreq/sp/tddft/adc2
       para retomar un pipeline con CREST+CENSO ya completados.
+
+Nota (SP obligatorio / ADC2 opcional): en el pipeline normal, SP (fase gas)
+      es la etapa mínima requerida — el pipeline se aborta si SP no completa
+      ningún confórmero, y solo se declara "PIPELINE FINALIZADO" una vez que
+      SP terminó. TDDFT corre después de SP salvo que --start sea posterior.
+      ADC2 en cambio ya NO corre automáticamente: debe pedirse explícitamente
+      con --adc2 para incluirla al final del pipeline normal.
 
 Nota (--start adc2): caso especial, NO retoma la cadena normal. Solo requiere
       que exista 04_sp/ (con sus .out y opt_opt.xyz por confórmero) — ignora
@@ -2952,7 +2966,7 @@ def stage_sp_nroot(mol_dir: Path, charge: int, log: logging.Logger,
 
 
 # ─────────────────────────────────────────────
-#  ETAPA ADC2  (séptima etapa, obligatoria)
+#  ETAPA ADC2  (séptima etapa, OPCIONAL — requiere --adc2 o --start adc2)
 # ─────────────────────────────────────────────
 
 def stage_adc2(
@@ -3782,16 +3796,24 @@ def _run_one(args, parser):
                     if (mol_dir / "03_numfreq").exists() else []
         log.info(f"[NUMFREQ] saltado — encontrados {len(freq_dirs)} directorios previos")
 
-    # ── Etapa 4: SP ─────────────────────────────────────────────
+    # ── Etapa 4: SP (fase gas) — OBLIGATORIA ─────────────────────
+    # SP es la etapa mínima requerida para dar el pipeline por finalizado.
+    # Si no se completa ningún confórmero, se aborta antes de llegar a
+    # "PIPELINE FINALIZADO" (ver sys.exit(1) abajo).
     if start_idx <= STEPS.index("sp"):
         sp_dirs = stage_sp(freq_dirs, mol_dir, args.charge, log)
         if not sp_dirs:
-            log.error("Ningún SP completado. Abortando.")
+            log.error("Ningún SP completado. Abortando "
+                      "(SP fase gas es obligatorio para finalizar el pipeline).")
             sys.exit(1)
     else:
         sp_dirs = sorted((mol_dir / "04_sp").glob("conf_*")) \
                   if (mol_dir / "04_sp").exists() else []
         log.info(f"[SP] saltado — encontrados {len(sp_dirs)} directorios previos")
+        if not sp_dirs:
+            log.error("[SP] no hay directorios previos disponibles. Abortando "
+                      "(SP fase gas es obligatorio para finalizar el pipeline).")
+            sys.exit(1)
 
     # ── Etapa 5: TDDFT ──────────────────────────────────────────
     if start_idx <= STEPS.index("tddft"):
@@ -3803,18 +3825,22 @@ def _run_one(args, parser):
     else:
         log.info("[TDDFT] no incluido en esta ejecución")
 
-    # ── Etapa 6: ADC2 (obligatoria, confórmero dominante por E_SP) ──
-    if start_idx <= STEPS.index("adc2"):
+    # ── Etapa 6: ADC2 (OPCIONAL — requiere --adc2) ───────────────
+    # ADC2 ya NO corre por defecto. Solo se ejecuta si el usuario lo pide
+    # explícitamente con --adc2 (o de forma standalone con --start adc2,
+    # manejado en su propio bloque más arriba). El pipeline se considera
+    # FINALIZADO con solo SP (obligatorio) completado; ADC2 es un extra.
+    if args.adc2 and start_idx <= STEPS.index("adc2"):
         adc2_dir = stage_adc2(mol_dir, args.charge, log, mol_name=mol_name)
         if adc2_dir is None:
             log.warning("[ADC2] No se pudo completar la validación ADC2.")
         else:
             log.info(f"[ADC2] validación completada ✓ → {adc2_dir}")
     else:
-        log.info("[ADC2] no incluido en esta ejecución")
+        log.info("[ADC2] no incluido en esta ejecución (opcional — usa --adc2 para activarla)")
 
     log.info("=" * 60)
-    log.info("PIPELINE FINALIZADO")
+    log.info("PIPELINE FINALIZADO  (requisito obligatorio SP fase-gas: OK)")
     log.info(f"Resultados en: {mol_dir.resolve()}")
     log.info("=" * 60)
 
@@ -3892,6 +3918,10 @@ Ejemplos (modo normal):
   # para liberar espacio (ADC2 necesita ~400GB libres).
   python pipeline.py --mol molecules/mglyval.xyz --charge -1 --start adc2
 
+  # Pipeline normal + ADC2 al final (ADC2 es OPCIONAL: sin --adc2 el
+  # pipeline se da por finalizado apenas SP, que es obligatorio, completa).
+  python pipeline.py --mol molecules/mglyval.xyz --charge -1 --adc2
+
   # Ver estado de todos los runs
   python pipeline.py --status
 
@@ -3918,8 +3948,12 @@ Ejemplos (modo multi-molécula, --mol repetido):
                         help="carga formal de la molécula (default: 0)")
     parser.add_argument("--start",  choices=STEPS, default="crest",
                         help="etapa desde la que iniciar (default: crest). "
-                             "--start adc2 es especial: solo requiere 04_sp/, "
-                             "ignora todas las demás etapas y sus directorios.")
+                             "SP (fase gas) es obligatorio: el pipeline no se "
+                             "da por finalizado sin completarlo. "
+                             "ADC2 es opcional en el pipeline normal (usa --adc2 "
+                             "para incluirla); --start adc2 es especial: solo "
+                             "requiere 04_sp/, ignora todas las demás etapas y "
+                             "sus directorios.")
     parser.add_argument("--status", action="store_true",
                         help="mostrar estado de todos los runs y salir")
     parser.add_argument(
@@ -3928,6 +3962,18 @@ Ejemplos (modo multi-molécula, --mol repetido):
             "Salta NUMFREQ y pasa directo de OPT a SP/TDDFT. "
             "Usa la geometría de 02_opt/ "
             "directamente como input de SP, sin correcciones térmicas de NumFreq."
+        ),
+    )
+    parser.add_argument(
+        "--adc2", action="store_true",
+        help=(
+            "Incluye la etapa ADC2 (07_adc2/) al final del pipeline normal. "
+            "OPCIONAL: sin este flag, el pipeline se da por FINALIZADO al "
+            "completar SP (04_sp/, fase gas), que es la etapa obligatoria "
+            "y requisito mínimo de finalización. TDDFT corre igualmente "
+            "salvo que --start sea posterior a esa etapa; ADC2 en cambio "
+            "requiere pedirse explícitamente con --adc2 (o de forma "
+            "standalone con --start adc2, que sigue funcionando igual)."
         ),
     )
 
