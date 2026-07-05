@@ -1,18 +1,22 @@
-"""Tests de OptStage. Skipeados hasta que stages/opt.py tenga lógica real.
+"""Tests de OptStage.
 
-Cuando se migre, correr esto contra tests/fixtures/ (molécula chica,
-glicina, NO MGLYVAL) y comparar outputs contra una corrida del
-pipeline.py legacy sobre el mismo input, no solo contra valores
-hardcodeados en el test.
+stages/opt.py YA tiene lógica real (migrado) — este archivo estaba
+marcado @skip con un mensaje que decía lo contrario y además esperaba
+`requires == ["censo"]` (no calzaba con el código real: `["crest"]`).
+Se corrigió lo esperado y se quitó el skip para el chequeo de contrato,
+que no necesita ORCA ni fixture.
+
+TODO (bloqueado en tests/fixtures/glycine.xyz, ver README de fixtures):
+test de integración real que corra `OptStage.run()` contra la glicina
+de test con ORCA real o mockeado, y compare outputs contra una corrida
+de pipeline.py legacy sobre el mismo input — no solo contra valores
+hardcodeados.
 """
-
-import pytest
 
 from maaqc.stages.opt import OptStage
 
 
-@pytest.mark.skip(reason="OptStage.run() todavía no está migrado (ver stages/opt.py)")
-def test_opt_stage_completes_on_glycine_fixture(tmp_path):
+def test_opt_stage_contract():
     stage = OptStage()
     assert stage.name == "opt"
-    assert stage.requires == ["censo"]
+    assert stage.requires == ["crest"]
