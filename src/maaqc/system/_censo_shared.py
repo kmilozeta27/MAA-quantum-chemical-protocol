@@ -17,10 +17,10 @@ orden de búsqueda de outputs, criterios de recovery — es 1:1):
   - `NCONF_MIN`/`NCONF_MAX` de `select_nconf_auto` ahora son parámetros
     (`config.censo.ncon_min`/`ncon_max`) en vez de constantes globales
     — para que un recipe YAML pueda ajustarlos sin tocar código.
-  - Reutiliza `safe_copy`/`build_omp_env`/`USE_NOHUP`/`_apply_nohup`/
-    `kill_active_procs` de `_orca_shared` en vez de duplicarlos (son
-    genéricos de subprocess, no específicos de ORCA a pesar del nombre
-    del módulo — si esto se vuelve confuso al migrar más stages,
+  - Reutiliza `safe_copy`/`build_omp_env`/`USE_NOHUP`/`_apply_nohup`
+    de `_orca_shared` en vez de duplicarlos (son genéricos de
+    subprocess, no específicos de ORCA a pesar del nombre del módulo
+    — si esto se vuelve confuso al migrar más stages,
     conviene extraerlos a `system/process.py`).
 """
 
@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -42,8 +43,6 @@ from ase.io import write as ase_write
 from maaqc.stages._orca_shared import (
     USE_NOHUP,
     _apply_nohup,
-    _procs_lock,
-    _active_procs,
     build_omp_env,
     safe_copy,
 )
@@ -81,7 +80,7 @@ def resolve_bin(name: str, conda_env: str = "sciencebitch") -> Path:
             for env_path in envs:
                 if Path(env_path).name == conda_env:
                     candidate = Path(env_path) / "bin" / name
-                    if candidate.is_file() and __import__("os").access(candidate, __import__("os").X_OK):
+                    if candidate.is_file() and os.access(candidate, os.X_OK):
                         return candidate
     except Exception:
         pass
@@ -646,6 +645,26 @@ def run_censo_prescreen(
 
     elapsed = (time.time() - t0) / 60
 
+    # ── Diagnóstico temprano: parsear censo.log para errores de config ──────
+    censo_log_path = censo_dir / "censo.log"
+    censo_log_snippet = ""
+    if censo_log_path.exists():
+        try:
+            tail = censo_log_path.read_text(errors="replace").splitlines()
+            error_lines = [l for l in tail if any(kw in l for kw in (
+                "validation error", "Path for", "is required", "is not set",
+                "UserWarning", "No context found",
+            ))]
+            if error_lines:
+                censo_log_snippet = " | ".join(error_lines[-4:])
+                log.warning(
+                    f"[CENSO]  ✗  CENSO terminó con errores de configuración "
+                    f"(returncode={returncode}) — posible causa: ~/.censo2rc incompleto "
+                    f"o falta 'tm'/'orca' en [paths]. Detalle: {censo_log_snippet}"
+                )
+        except Exception:
+            pass
+
     # Reconstrucción preferente desde .out con energías (Gtot)
     post_out_candidates = [
         censo_dir / "1_SCREENING.out", censo_dir / "CENSO" / "1_SCREENING.out",
@@ -689,7 +708,12 @@ def run_censo_prescreen(
         log.info(f"[CENSO]  ✓  pre-screening terminó en {elapsed:.1f} min ({p.relative_to(censo_dir)})")
         return output_xyz
 
-    log.warning(f"[CENSO]  ✗  no se encontró ensemble filtrado reconocible (returncode={returncode}) — usando ensemble CREST sin filtrar")
+    if not censo_log_snippet:
+        log.warning(
+            f"[CENSO]  ✗  no se encontró un ensemble filtrado reconocible "
+            f"(returncode={returncode}) en {censo_dir} — revisa {censo_log_path} "
+            f"a mano. Usando ensemble CREST sin filtrar."
+        )
     return conformers_xyz
 
 
