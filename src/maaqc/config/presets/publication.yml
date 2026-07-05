@@ -1,0 +1,21 @@
+# publication.yml — nivel de precisión para resultados citables en PAPER1.
+# ADC2 obligatorio al final, más raíces TDDFT, ensemble CENSO más amplio.
+# Equivalente a: python pipeline.py --mol X.xyz --charge Q --adc2
+
+extends: standard.yml
+
+censo:
+  temperature: 298.15
+  multitemp: true
+  trange: [274.0, 298.0, 24]   # default histórico de --trange
+  boltzmann_threshold: 5.0      # ver nota en pipeline.py --boltzmann-threshold
+  ncon_min: 3
+  ncon_max: 20
+
+tddft:
+  functional: wb97x-d3
+  states: 10
+
+adc2:
+  mandatory: true
+  basis: def2-TZVP

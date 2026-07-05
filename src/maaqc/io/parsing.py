@@ -1,11 +1,16 @@
 """Parsers puros de outputs ORCA/xTB/CREST. Sin side effects, sin logging.
 
 Módulo que elimina la duplicación detectada entre results_collector.py y
-protonation_cycle.py. Cada función documenta su origen exacto y, cuando
-existían variantes divergentes (no solo duplicadas), la discrepancia
-queda marcada explícitamente en vez de resuelta en silencio -- ver notas
-⚠️ DISCREPANCIA en parse_orca_sp_energy y en parse_adc2_excitations /
-extract_adc2_lambda.
+protonation_cycle.py. Cada función documenta su origen exacto.
+
+Dos discrepancias reales (no solo duplicaciones) que existían entre
+variantes legacy ya se resolvieron explícitamente, con la decisión
+documentada en cada función en vez de un merge silencioso:
+  - parse_sp_energy ahora exige 'ORCA TERMINATED NORMALLY' (antes solo
+    parse_orca_sp_energy lo exigía); parse_orca_sp_energy quedó como
+    alias.
+  - extract_adc2_lambda ahora es un wrapper de parse_adc2_excitations,
+    así que ambas usan la misma prioridad de bloque (LEFT-RIGHT > RIGHT).
 """
 
 from __future__ import annotations
@@ -29,20 +34,38 @@ def parse_sp_energy(out_file: Path) -> Optional[float]:
     """Extrae la última FINAL SINGLE POINT ENERGY del .out de SP.
 
     Portado de results_collector.py:136, idéntica carácter por carácter a
-    protonation_cycle.py:235 -- VERIFICADO. También idéntica en lógica a
-    pipeline.py:extract_sp_energy (913-926): mismo bucle, misma condición
-    de "última ocurrencia gana", solo difiere en que extract_sp_energy
-    envuelve el read_text en try/except OSError. Se pliega acá como
-    única fuente de verdad; extract_sp_energy en pipeline.py legacy debe
-    reemplazarse por un import de esta función al migrar pipeline.py.
+    protonation_cycle.py:235. También idéntica en lógica a
+    pipeline.py:extract_sp_energy (913-926); se pliega acá como única
+    fuente de verdad.
 
-    NO exige "ORCA TERMINATED NORMALLY" en el texto -- ver parse_orca_sp_energy
-    más abajo para la variante que sí lo exige (discrepancia (c) sin resolver).
+    DECISIÓN (resuelve discrepancia (c) con parse_orca_sp_energy, antes
+    sin resolver): ahora EXIGE que 'ORCA TERMINATED NORMALLY' esté en el
+    texto antes de aceptar cualquier energía -- si el cálculo no terminó
+    normalmente, retorna None en vez de la última energía parcial
+    encontrada. Se mantiene el barrido de "última ocurrencia gana" (no el
+    "primera ocurrencia + return" de la variante vieja de recovery) porque
+    parse_opt_energy depende de este mismo bucle para tomar el paso final
+    convergido de un .out de OPT con múltiples 'FINAL SINGLE POINT ENERGY'.
+
+    ⚠️ Implicación para el pipeline en vivo: cualquier llamador que hoy
+    lea un .out todavía en progreso (ORCA corriendo, sin terminar) para
+    monitoreo/progreso empezará a recibir None en vez de la última energía
+    parcial. Si `pipeline.py` tiene ese uso en algún punto (a confirmar al
+    migrar `stage_sp`/`stage_opt`), va a necesitar su propio chequeo de
+    progreso en vivo separado de este parser.
     """
     if not out_file.exists():
         return None
+    try:
+        text = out_file.read_text(errors="replace")
+    except OSError:
+        return None
+
+    if "ORCA TERMINATED NORMALLY" not in text:
+        return None
+
     energy = None
-    for line in out_file.read_text(errors="replace").splitlines():
+    for line in text.splitlines():
         if "FINAL SINGLE POINT ENERGY" in line:
             try:
                 energy = float(line.split()[-1])
@@ -366,14 +389,10 @@ def parse_adc2_excitations(adc2_out: Path) -> list[dict]:
     Retorna lista de dicts: state, E_eV, E_cm1, wl_nm, fosc, fosc_right,
     fosc_left, source.
 
-    Portado de results_collector.py:2710.
-
-    ⚠️ DISCREPANCIA sin resolver con extract_adc2_lambda (pipeline.py:929,
-    más abajo): esta función prioriza LEFT-RIGHT como fosc principal;
-    extract_adc2_lambda lee únicamente el bloque RIGHT. Para nroots=1
-    (caso real actual) ambas leen la misma transición 0→1, pero el fosc
-    reportado puede diferir entre "right" y "left_right". No unificar sin
-    decidir cuál es la convención correcta para el paper.
+    Portado de results_collector.py:2710. Es la única fuente de verdad
+    para leer excitaciones ADC(2): extract_adc2_lambda (más abajo) es
+    ahora un wrapper delgado sobre esta función, ya no tiene su propio
+    parseo del bloque RIGHT.
     """
     if not adc2_out.exists():
         return []
@@ -524,88 +543,39 @@ def parse_charge_mult_natoms(out_file: Path) -> dict:
 
 def extract_adc2_lambda(out_file: Path) -> Optional[tuple[float, float, float]]:
     """Extrae λmax (nm), E (eV) y fosc de un output ADC(2)/ORCA
-    (nroots=1, S0→S1). Lee únicamente el bloque RIGHT (primera fila de
-    datos, transición 0-1A → 1-1A).
+    (nroots=1, S0→S1).
 
-    Devuelve (lambda_nm, energy_eV, fosc) o None.
+    Devuelve (lambda_nm, energy_eV, fosc) del primer estado (S1), o None
+    si no se pudo parsear.
 
-    Portado de pipeline.py:929 (variante liviana de un solo root usada
-    durante el pipeline en vivo). Ver nota de discrepancia en
-    parse_adc2_excitations arriba -- sin resolver todavía cuál bloque
-    (RIGHT vs LEFT-RIGHT) es la convención correcta.
+    RESUELTO: antes esta función leía únicamente el bloque RIGHT
+    (pipeline.py:929 original), mientras que parse_adc2_excitations
+    priorizaba LEFT-RIGHT. Ahora es un wrapper delgado sobre
+    parse_adc2_excitations, así que ambas usan la misma prioridad de
+    bloque (LEFT-RIGHT si existe, si no RIGHT) y el mismo fosc principal
+    -- para nroots=1 solo cambia de nombre/forma de retorno (tupla en vez
+    de dict), no de fuente de datos.
     """
-    if not out_file.exists():
+    excitations = parse_adc2_excitations(out_file)
+    if not excitations:
         return None
-
-    _data_re = re.compile(
-        r"^\s*\S+\s+->\s+\S+"
-        r"\s+([\d.]+)"
-        r"\s+[\d.]+\s+([\d.]+)"
-        r"\s+([\d.]+)"
-    )
-    _right_header = "SPECTRUM FOR RIGHT TRANSITION MOMENTS"
-    _abs_header   = "ABSORPTION SPECTRUM VIA TRANSITION ELECTRIC DIPOLE MOMENTS"
-
-    try:
-        text = out_file.read_text(errors="replace")
-    except OSError:
-        return None
-
-    right_pos = text.find(_right_header)
-    if right_pos == -1:
-        return None
-
-    abs_pos = text.find(_abs_header, right_pos)
-    if abs_pos == -1:
-        return None
-
-    segment = text[abs_pos:]
-    for line in segment.splitlines():
-        m = _data_re.match(line)
-        if m:
-            try:
-                energy_ev  = float(m.group(1))
-                lambda_nm  = float(m.group(2))
-                fosc       = float(m.group(3))
-                return (lambda_nm, energy_ev, fosc)
-            except ValueError:
-                return None
-
-    return None
+    exc = excitations[0]  # nroots=1 -> único estado, S0->S1
+    return (exc["wl_nm"], exc["E_eV"], exc["fosc"])
 
 
 def parse_orca_sp_energy(outfile: Path) -> Optional[float]:
-    """Replica el parseo de OrcaProc._sp: busca FINAL SINGLE POINT ENERGY,
-    exigiendo además 'ORCA TERMINATED NORMALLY' en el texto.
+    """Alias de parse_sp_energy, mantenido por compatibilidad con el
+    nombre usado en recover_prescreening.py.
 
-    Portado de recover_prescreening.py (uso: recovery post-mortem de
-    CENSO, donde se quiere ser estricto porque se reconstruye un JSON de
-    resultados a partir de .out que pudieron quedar a medio escribir).
-
-    ⚠️ DISCREPANCIA (c) sin resolver: parse_sp_energy (arriba) NO exige
-    'ORCA TERMINATED NORMALLY'. Mantenidas como funciones separadas a
-    propósito -- no colapsar a una sola hasta decidir si el pipeline en
-    vivo también debería exigir terminación normal, o si la diferencia
-    es intencional (recovery post-mortem vs. pipeline en vivo tienen
-    tolerancias distintas a archivos truncados).
+    RESUELTO: antes esta función era la única de las dos que exigía
+    'ORCA TERMINATED NORMALLY'; ahora parse_sp_energy exige exactamente
+    lo mismo, así que dejaron de ser dos comportamientos distintos.
+    Se conserva como nombre separado solo para no romper el sitio de
+    llamada en recover_prescreening.py al migrarlo -- si preferís
+    eliminarla del todo y actualizar ese call site para usar
+    parse_sp_energy directamente, es un cambio de una línea allá.
     """
-    if not outfile.exists():
-        return None
-    try:
-        text = outfile.read_text(errors="ignore")
-    except OSError:
-        return None
-
-    if "ORCA TERMINATED NORMALLY" not in text:
-        return None
-
-    for line in text.splitlines():
-        if "FINAL SINGLE POINT ENERGY" in line:
-            try:
-                return float(line.split()[-1])
-            except (ValueError, IndexError):
-                return None
-    return None
+    return parse_sp_energy(outfile)
 
 
 def parse_xtb_total_energy(outfile: Path) -> Optional[float]:

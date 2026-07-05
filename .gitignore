@@ -1,0 +1,38 @@
+# === Outputs de cálculos químico-computacionales ===
+# Carpetas de runs con resultados pesados (CREST/CENSO/OPT/NumFreq/SP/TDDFT/ADC2)
+**/runs/
+
+# Archivos binarios y de scratch de ORCA
+*.gbw
+*.densities
+*.tmp
+*.ges
+*.prop
+*.engrad
+*.opt
+*.hess
+*.cpcm
+*.bibtex
+scratch/
+
+# Archivos de CREST/CENSO
+*.xyz.orig
+crest_conformers.xyz
+cre_members.out
+coord.original
+NORMAL_TERMINATION
+
+# Logs y archivos temporales generales
+*.log
+*.pyc
+__pycache__/
+.ipynb_checkpoints/
+
+# Entornos
+.venv/
+venv/
+*.egg-info/
+
+# Sistema
+.DS_Store
+Thumbs.db

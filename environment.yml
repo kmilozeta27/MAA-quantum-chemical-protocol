@@ -1,0 +1,25 @@
+# environment.yml — se mantiene para conda, tal como en el flujo actual
+# (env "sciencebitch"). Uso:
+#
+#   conda env create -f environment.yml
+#   conda activate maaqc
+#   pip install -e ".[dev]"
+#
+# ORCA 6.1.1, CREST y CENSO NO se instalan vía conda aquí: se asume que
+# ya están resueltos en el sistema (ver docs/troubleshooting.md) y que
+# `maaqc doctor` los detecta vía PATH o el prefix de este mismo env.
+
+name: maaqc
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.10
+  - numpy
+  - pandas
+  - ase
+  - pyyaml
+  - matplotlib
+  - pip
+  - pip:
+      - pydantic>=2
+      - -e .

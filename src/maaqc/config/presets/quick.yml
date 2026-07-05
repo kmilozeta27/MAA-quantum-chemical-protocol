@@ -1,0 +1,19 @@
+# quick.yml — exploración rápida, no para resultados citables en el paper.
+# Ensemble CENSO más chico, TDDFT sin ADC2.
+
+entry: xyz
+skip_numfreq: false
+
+censo:
+  temperature: 298.15
+  multitemp: false
+  boltzmann_threshold: null   # usa select_nconf_auto (comportamiento legacy default)
+  ncon_min: 3
+  ncon_max: 8                 # reducido vs. standard/publication para iterar rápido
+
+tddft:
+  functional: wb97x-d3
+  states: 6
+
+adc2:
+  mandatory: false

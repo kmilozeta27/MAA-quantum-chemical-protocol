@@ -1,0 +1,20 @@
+# standard.yml — defaults actuales de pipeline.py legacy (sin --adc2,
+# sin --multitemp). Equivalente a correr:
+#   python pipeline.py --mol X.xyz --charge Q
+
+entry: xyz
+skip_numfreq: false
+
+censo:
+  temperature: 298.15
+  multitemp: false
+  boltzmann_threshold: null
+  ncon_min: 3
+  ncon_max: 20
+
+tddft:
+  functional: wb97x-d3
+  states: 10
+
+adc2:
+  mandatory: false
