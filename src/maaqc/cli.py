@@ -51,13 +51,43 @@ STAGE_CLASS_NAMES: dict[str, str] = {
 #  REGISTRO DE STAGES (import perezoso, tolera migración parcial)
 # ─────────────────────────────────────────────
 
+def _stage_has_stub_methods(stage: Stage, probe_dir: Path) -> Optional[str]:
+    """None si `stage` tiene lógica real; si no, el motivo por el que se
+    lo considera un stub sin migrar todavía.
+
+    Detecta el patrón usado en TODA la migración (crest.py, censo.py,
+    numfreq.py, tddft.py): clases que YA implementan los 4 métodos
+    abstractos de `Stage` (por eso Python las deja instanciar sin
+    quejarse — ABC solo exige que el método EXISTA, no que tenga
+    cuerpo real) pero cuyo cuerpo es únicamente `raise
+    NotImplementedError(...)`. Antes de este chequeo, `maaqc doctor`
+    reportaba estos 4 stages como "[OK] migrado" y `maaqc run` recién
+    reventaba a mitad de la cadena, en el primer `is_complete()` real.
+
+    Se prueba `is_complete()` con un `probe_dir` vacío (no `workdir` del
+    run real) porque es el único método del contrato que no debería
+    tener efectos secundarios para un directorio inexistente en ninguno
+    de los stages ya migrados (opt/sp/adc2 simplemente devuelven False).
+    Solo se captura `NotImplementedError` — cualquier otra excepción es
+    un bug real y debe propagarse, no esconderse acá.
+    """
+    try:
+        stage.is_complete(probe_dir)
+    except NotImplementedError as exc:
+        detail = str(exc) or "is_complete() sin implementar"
+        return f"stub sin migrar ({detail})"
+    return None
+
+
 def _load_stage_registry() -> tuple[dict[str, Stage], dict[str, str]]:
     """Instancia los stages ya migrados a `maaqc.stages.<name>`.
 
     Devuelve (registro, pendientes):
-        registro:   {nombre: instancia de Stage} para los ya migrados.
-        pendientes: {nombre: motivo} para los que faltan (import falló o
-                     la clase no existe todavía en el módulo).
+        registro:   {nombre: instancia de Stage} para los ya migrados
+                     CON lógica real (ver `_stage_has_stub_methods`).
+        pendientes: {nombre: motivo} para los que faltan — import
+                     falló, la clase no existe todavía, o existe pero
+                     sigue siendo un stub (`raise NotImplementedError`).
 
     No asume que los 7 stages existen — eso rompería `maaqc doctor` y
     el `--help` mismo mientras la migración de pipeline.py está en
@@ -65,6 +95,7 @@ def _load_stage_registry() -> tuple[dict[str, Stage], dict[str, str]]:
     """
     registry: dict[str, Stage] = {}
     pending: dict[str, str] = {}
+    probe_dir = Path("/nonexistent-maaqc-stage-probe")
     for name, class_name in STAGE_CLASS_NAMES.items():
         try:
             module = __import__(f"maaqc.stages.{name}", fromlist=[class_name])
@@ -75,7 +106,12 @@ def _load_stage_registry() -> tuple[dict[str, Stage], dict[str, str]]:
         if stage_cls is None:
             pending[name] = f"{class_name} no existe en maaqc.stages.{name}"
             continue
-        registry[name] = stage_cls()
+        instance = stage_cls()
+        stub_reason = _stage_has_stub_methods(instance, probe_dir)
+        if stub_reason is not None:
+            pending[name] = stub_reason
+            continue
+        registry[name] = instance
     return registry, pending
 
 
