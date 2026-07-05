@@ -1,0 +1,27 @@
+# tests/fixtures/mini_recipe.yml
+entry: xyz
+charge: 0
+mult: 1
+
+crest:
+  method: gfn2
+  ewin: 3.0          # ventana chica, glicina no necesita más
+
+censo:
+  enabled: false      # smoke test: sin ranking DFT caro
+
+opt:
+  method: gfn2xtb     # o r2scan-3c si quieres algo DFT barato en ORCA
+
+numfreq:
+  enabled: true
+  method: gfn2xtb
+
+sp:
+  enabled: false
+
+tddft:
+  enabled: false
+
+adc2:
+  mandatory: false

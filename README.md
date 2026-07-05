@@ -8,14 +8,10 @@ CREST -> CENSO (prescreen) -> OPT -> NumFreq -> SP -> TDDFT -> [ADC2]
 ```
 
 Reemplaza los scripts monolíticos `pipeline.py` / `results_collector.py` /
-`protonation_cycle.py` por un paquete con la misma "sensación" que
+`protonation_cycle.py` por un paquete que orquesta
 CREST/CENSO/ORCA: un único CLI de subcomandos, recipes declarativos en
 YAML, y una interfaz `Stage` común para que el resume sea robusto sin
-depender de flags como `--start adc2` o `--skipnumfreq`.
-
-> **Estado:** en migración activa desde el pipeline legacy (tag
-> `v0-legacy` en git). Ver `docs/` para el estado real de cada stage y
-> `CHANGELOG.md` para el progreso de la migración.
+depender de flags.
 
 ## Instalación
 
@@ -42,7 +38,7 @@ Ver `docs/config_reference.md` para cada keyword de configuración y
 ## Citar este software
 
 Ver `CITATION.cff`. Sigue la convención de citar CREST/CENSO/ORCA con
-paper + versión (pendiente: DOI de Zenodo tras el primer release).
+paper + versión.
 
 ## Estructura del repo
 
