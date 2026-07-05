@@ -25,8 +25,9 @@ propio sub-modelo pydantic que RecipeConfig anida.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
+import yaml
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -113,11 +114,88 @@ class RecipeConfig(BaseModel):
     nroot: NrootConfig = Field(default_factory=NrootConfig)
 
 
+def _read_yaml_mapping(path: Path) -> dict[str, Any]:
+    """Lee un YAML y exige que la raíz sea un mapping (no lista/escalar)."""
+    try:
+        raw = path.read_text()
+    except OSError as e:
+        raise FileNotFoundError(f"no se pudo leer el recipe: {path} ({e})") from e
+
+    data = yaml.safe_load(raw)
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"{path}: la raíz de un recipe debe ser un mapping YAML "
+            f"(clave: valor), no {type(data).__name__}"
+        )
+    return data
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Merge recursivo: `override` gana en cada clave, pero si ambos lados
+    tienen un dict en la misma clave (ej. `censo:`, `tddft:`), se mergean
+    campo a campo en vez de que `override` reemplace el bloque entero.
+    Así `publication.yml` puede pisar solo `censo.multitemp` sin tener que
+    repetir el resto de las claves de `censo` que ya trae `standard.yml`.
+
+    La clave `extends` nunca sobrevive al merge: ya se usó para localizar
+    al padre, y el `RecipeConfig` resultante siempre queda "aplanado".
+    """
+    merged = dict(base)
+    for key, value in override.items():
+        if key == "extends":
+            continue
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_recipe_dict(path: Path, _chain: tuple[Path, ...] = ()) -> dict[str, Any]:
+    """Resuelve `extends` recursivamente y devuelve el dict ya mergeado
+    (sin validar todavía contra `RecipeConfig` — eso lo hace `load_recipe`
+    una sola vez, al final de toda la cadena)."""
+    path = path.resolve()
+    if path in _chain:
+        ciclo = " -> ".join(str(p) for p in (*_chain, path))
+        raise ValueError(f"'extends' circular detectado: {ciclo}")
+
+    own = _read_yaml_mapping(path)
+    parent_name = own.get("extends")
+    if parent_name is None:
+        return own
+
+    parent_path = (path.parent / parent_name).resolve()
+    if not parent_path.exists():
+        raise FileNotFoundError(
+            f"{path}: extends '{parent_name}' no existe (buscado en {parent_path})"
+        )
+
+    parent_dict = _load_recipe_dict(parent_path, _chain=(*_chain, path))
+    return _deep_merge(parent_dict, own)
+
+
 def load_recipe(path: Path) -> RecipeConfig:
     """Carga y valida un recipe YAML, resolviendo `extends` recursivamente.
 
-    TODO: implementar merge de `extends` (deep-merge de dicts antes de
-    validar con pydantic) una vez que exista más de un preset real que
-    lo use. Por ahora los tres presets en config/presets/ son standalone.
+    - Sin `extends` (ej. `quick.yml`, `standard.yml`): se parsea y se
+      valida tal cual contra `RecipeConfig`.
+    - Con `extends: <otro.yml>` (ej. `publication.yml` -> `standard.yml`):
+      se resuelve el padre primero (recursivo, soporta cadenas de más de
+      un nivel), y se hace deep-merge campo a campo — el hijo solo
+      necesita declarar lo que cambia respecto al padre.
+    - `extends` se busca como ruta relativa al directorio del propio
+      archivo (así los tres presets en `config/presets/` se referencian
+      entre sí por nombre de archivo, sin rutas absolutas).
+    - Herencia circular (A extends B extends A) levanta `ValueError` con
+      la cadena completa, en vez de recursión infinita.
     """
-    raise NotImplementedError("load_recipe: pendiente merge de `extends` + parseo YAML")
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"recipe no encontrado: {path}")
+
+    merged = _load_recipe_dict(path)
+    merged.pop("extends", None)
+    return RecipeConfig(**merged)
