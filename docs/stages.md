@@ -38,6 +38,19 @@ ignora la cadena completa y solo exige `04_sp/` — ver TODO de diseño en
 6. `analysis/` completo, apoyado en `io/parsing.py` ya unificado.
 7. `cli.py` real sobre el orchestrator ya migrado.
 
+## Duplicación resuelta: `io/xyz.py`
+
+`io/xyz.py` tenía 2 stubs (`NotImplementedError`) aunque las 3 funciones
+correspondientes ya estaban migradas y en uso activo, viviendo
+duplicadas en `system/_orca_shared.py` (`atoms_to_xyz_block`,
+`read_all_conformers`, `extract_conf_ids_from_xyz` — esta última ni
+siquiera declarada como stub). Resuelto: `io/xyz.py` es ahora la fuente
+única de verdad; `_orca_shared.py` importa desde ahí. La firma legacy
+`read_conformers(xyz_file, nconf)` se descartó formalmente (no se migra
+tal cual) — el truncamiento a `nconf` ahora es responsabilidad de CENSO
+(`select_nconf_auto`/`select_nconf_boltzmann`), no de la lectura de XYZ.
+Ver docstring de `io/xyz.py` para el detalle de la decisión.
+
 ## Notas por stage
 
 Ver los docstrings de cada archivo en `src/maaqc/stages/` — cada uno

@@ -4,6 +4,18 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+- `io/xyz.py` ya no tiene stubs (`NotImplementedError`): las 3 funciones
+  de I/O de XYZ (`atoms_to_xyz_block`, `read_all_conformers`,
+  `extract_conf_ids_from_xyz`) estaban duplicadas en
+  `system/_orca_shared.py`. Ahora `io/xyz.py` es la fuente única de
+  verdad y `_orca_shared.py` importa desde ahí (sin cambios para
+  `opt.py`/`sp.py`/`crest.py`/`tddft.py`/`adc2.py`, que siguen usando
+  `shared.atoms_to_xyz_block(...)` etc. vía re-export). Se descartó
+  formalmente la firma legacy `read_conformers(xyz_file, nconf)` — ver
+  `docs/stages.md` y el docstring de `io/xyz.py`. Agregado
+  `tests/test_io/test_xyz.py` (usa `tests/fixtures/glycine.xyz`).
+
 ### Added
 - Esqueleto inicial del paquete `maaqc` (src-layout, `pyproject.toml`,
   contrato `Stage` en `stages/base.py`).
