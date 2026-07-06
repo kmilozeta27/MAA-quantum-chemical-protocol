@@ -40,7 +40,7 @@ from typing import Optional
 from ase.io import read as ase_read
 from ase.io import write as ase_write
 
-from maaqc.stages._orca_shared import (
+from maaqc.system._orca_shared import (
     USE_NOHUP,
     _apply_nohup,
     build_omp_env,
