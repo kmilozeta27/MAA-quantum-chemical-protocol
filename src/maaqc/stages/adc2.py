@@ -22,7 +22,6 @@ from __future__ import annotations
 import datetime
 import json
 import logging
-import re
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -42,6 +41,7 @@ from maaqc.system._orca_shared import (
     run_orca,
     safe_copy,
 )
+from maaqc.io.parsing import extract_adc2_lambda
 
 log = logging.getLogger(__name__)
 
@@ -87,54 +87,6 @@ def load_exp_lambda(mol_name: str, config: RecipeConfig) -> Optional[float]:
         "[EXP_LAMBDA] λmax experimental no disponible para '%s'. "
         "Añádelo en config.adc2.exp_lambda_nm para obtener Δλ.", mol_name,
     )
-    return None
-
-
-def extract_adc2_lambda(out_file: Path) -> Optional[tuple[float, float, float]]:
-    """Extrae λmax (nm), E (eV) y fosc de un output ADC(2)/ORCA (nroots 1,
-    S0→S1). Migrado sin cambios de lógica desde pipeline.py:929-998.
-
-    Busca la tabla "SPECTRUM FOR RIGHT TRANSITION MOMENTS" /
-    "ABSORPTION SPECTRUM VIA TRANSITION ELECTRIC DIPOLE MOMENTS" y toma la
-    primera fila de datos (válido para nroots=1).
-    """
-    if not out_file.exists():
-        return None
-
-    _data_re = re.compile(
-        r"^\s*\S+\s+->\s+\S+"
-        r"\s+([\d.]+)"
-        r"\s+[\d.]+\s+([\d.]+)"
-        r"\s+([\d.]+)"
-    )
-    _right_header = "SPECTRUM FOR RIGHT TRANSITION MOMENTS"
-    _abs_header = "ABSORPTION SPECTRUM VIA TRANSITION ELECTRIC DIPOLE MOMENTS"
-
-    try:
-        text = out_file.read_text(errors="replace")
-    except OSError:
-        return None
-
-    right_pos = text.find(_right_header)
-    if right_pos == -1:
-        return None
-
-    abs_pos = text.find(_abs_header, right_pos)
-    if abs_pos == -1:
-        return None
-
-    segment = text[abs_pos:]
-    for line in segment.splitlines():
-        m = _data_re.match(line)
-        if m:
-            try:
-                energy_ev = float(m.group(1))
-                lambda_nm = float(m.group(2))
-                fosc = float(m.group(3))
-                return (lambda_nm, energy_ev, fosc)
-            except ValueError:
-                return None
-
     return None
 
 
