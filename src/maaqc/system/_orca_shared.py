@@ -12,6 +12,11 @@ según la skill maa-repackaging, `assign_cpu_lists`/`_check_cpu_budget`
 deberían mudarse ahí (son específicos del ThinkPad T14, no de ORCA en
 sí). Por ahora quedan acá para no inventar esa arquitectura sin que
 kmilozeta la pida explícitamente.
+
+`atoms_to_xyz_block`/`read_all_conformers`/`extract_conf_ids_from_xyz`
+YA NO se definen acá — viven en `maaqc.io.xyz` (fuente única de verdad)
+y se re-exportan acá vía import para no romper `opt.py`/`sp.py`, que
+las llaman como `shared.atoms_to_xyz_block(...)` etc.
 """
 
 from __future__ import annotations
@@ -26,7 +31,11 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from ase.io import read as ase_read
+from maaqc.io.xyz import (
+    atoms_to_xyz_block,
+    extract_conf_ids_from_xyz,
+    read_all_conformers,
+)
 
 # ─────────────────────────────────────────────
 #  RESOLUCIÓN DEL BINARIO ORCA
@@ -325,64 +334,6 @@ def safe_copy(src: Path, dst: Path) -> bool:
         return True
     except OSError:
         return False
-
-
-def atoms_to_xyz_block(atoms) -> str:
-    lines = []
-    for symbol, pos in zip(atoms.get_chemical_symbols(), atoms.get_positions()):
-        lines.append(f"  {symbol:<4s}  {pos[0]:14.8f}  {pos[1]:14.8f}  {pos[2]:14.8f}")
-    return "\n".join(lines)
-
-
-def read_all_conformers(xyz_file: Path) -> list:
-    """Lee todos los frames de un multi-XYZ (CREST/CENSO). A diferencia del
-    `read_conformers(xyz_file, nconf)` legacy, no trunca — la selección de
-    CUÁLES confórmeros optimizar es responsabilidad de la etapa anterior
-    (crest/censo), no de OPT (ver nota de diseño en opt.py)."""
-    try:
-        all_conf = ase_read(str(xyz_file), index=":")
-    except Exception as e:
-        raise RuntimeError(f"No se pudo leer {xyz_file}: {e}") from e
-    return all_conf if isinstance(all_conf, list) else [all_conf]
-
-
-def extract_conf_ids_from_xyz(source_xyz: Path) -> dict[int, str]:
-    """{índice_0based → 'CONF#'} leyendo los comentarios extXYZ/plain del
-    multi-XYZ. Preserva la trazabilidad CONF39 → conf_39 en vez de
-    re-etiquetar conf_001, conf_002, ... (ver docstring original en
-    pipeline.py, función `_extract_conf_ids_from_xyz`)."""
-    result: dict[int, str] = {}
-    try:
-        raw_lines = source_xyz.read_text(errors="replace").splitlines()
-    except OSError:
-        return result
-
-    frame_idx = 0
-    line_idx = 0
-    n_atoms: Optional[int] = None
-
-    while line_idx < len(raw_lines):
-        stripped = raw_lines[line_idx].strip()
-        if stripped.isdigit():
-            nat = int(stripped)
-            if n_atoms is None:
-                n_atoms = nat
-            if nat == n_atoms and line_idx + 1 < len(raw_lines):
-                comment = raw_lines[line_idx + 1].strip()
-                m = re.search(r"(CONF\d+)=", comment)
-                if m:
-                    result[frame_idx] = m.group(1)
-                else:
-                    for tok in comment.split():
-                        if tok.startswith("CONF"):
-                            result[frame_idx] = tok
-                            break
-                frame_idx += 1
-                line_idx += nat + 2
-                continue
-        line_idx += 1
-
-    return result
 
 
 # ─────────────────────────────────────────────
