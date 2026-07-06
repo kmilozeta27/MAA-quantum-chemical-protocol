@@ -55,6 +55,21 @@ class ResourceConfig(BaseModel):
     max_ram_mb: int = 28000
 
 
+class CrestConfig(BaseModel):
+    """Config de búsqueda conformacional CREST (GFN2-xTB/ALPB-water).
+
+    Timeout separado de `CensoConfig.timeout_hours`: en pipeline.py legacy
+    son dos constantes de módulo distintas (CREST_TIMEOUT_HOURS /
+    CENSO_TIMEOUT_HOURS) que hoy comparten default (24h) mas no motivo
+    para fusionarlas — un recipe debería poder ajustar una sin tocar la
+    otra (ej. CREST con ensembles grandes puede necesitar más margen que
+    el prescreening de CENSO).
+    """
+
+    timeout_hours: float = 24.0
+    alpb_solvent: str = "water"
+
+
 class CensoConfig(BaseModel):
     """Config de CENSO prescreen, incluye modo multi-temperatura."""
 
@@ -116,6 +131,7 @@ class RecipeConfig(BaseModel):
     multiplicity: int = 1            # MULT, siempre 1 en pipeline.py legacy
 
     resources: ResourceConfig = Field(default_factory=ResourceConfig)
+    crest: CrestConfig = Field(default_factory=CrestConfig)
     censo: CensoConfig = Field(default_factory=CensoConfig)
     tddft: TddftConfig = Field(default_factory=TddftConfig)
     adc2: Adc2Config = Field(default_factory=Adc2Config)
