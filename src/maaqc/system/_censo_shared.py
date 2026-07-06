@@ -29,7 +29,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
 import re
 import shutil
 import subprocess
@@ -46,6 +45,7 @@ from maaqc.system._orca_shared import (
     build_omp_env,
     safe_copy,
 )
+from maaqc.system.platform_detect import resolve_bin
 
 HARTREE_TO_KCAL = 627.5094740631
 
@@ -57,34 +57,6 @@ DEFAULT_NCONF_MAX = 20
 _WINDOW_SMALL = 2.0
 _WINDOW_MEDIUM = 3.0
 _WINDOW_LARGE = 5.0
-
-
-# ─────────────────────────────────────────────
-#  RESOLUCIÓN DE BINARIO (genérico — CENSO no vive en orca_6_1_1_avx2)
-# ─────────────────────────────────────────────
-
-def resolve_bin(name: str, conda_env: str = "sciencebitch") -> Path:
-    """Ported desde pipeline.py:_resolve_bin. Busca en PATH y, si no,
-    en <prefix del conda_env>/bin/<name> vía `conda env list --json`,
-    sin necesitar que el env esté activado."""
-    found = shutil.which(name)
-    if found:
-        return Path(found)
-    try:
-        result = subprocess.run(
-            ["conda", "env", "list", "--json"],
-            capture_output=True, text=True, timeout=15,
-        )
-        if result.returncode == 0:
-            envs = json.loads(result.stdout).get("envs", [])
-            for env_path in envs:
-                if Path(env_path).name == conda_env:
-                    candidate = Path(env_path) / "bin" / name
-                    if candidate.is_file() and os.access(candidate, os.X_OK):
-                        return candidate
-    except Exception:
-        pass
-    return Path(name)
 
 
 # ─────────────────────────────────────────────
