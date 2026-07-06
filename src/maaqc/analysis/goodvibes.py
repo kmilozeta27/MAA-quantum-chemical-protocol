@@ -51,11 +51,16 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+from ..constants import T_STD
+
 # ─────────────────────────────────────────────
-#  CONSTANTES  (idénticas a las que tenía pka_cycle.py antes de migrar)
+#  CONSTANTES PROPIAS DE GOODVIBES
+#  T_STD ya no se define acá (vivía duplicada, idéntica a la de
+#  pka_cycle.py/parsing.py) — se importa desde ..constants, fuente única.
+#  Las de abajo sí son específicas de esta integración con GoodVibes y
+#  no las usa ningún otro módulo migrado, así que se quedan acá.
 # ─────────────────────────────────────────────
 
-T_STD = 298.15             # K
 GV_CUTOFF = 100.0
 GV_QH = False
 GV_QS = "grimme"

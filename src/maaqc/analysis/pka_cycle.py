@@ -78,6 +78,13 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from ..constants import (
+    HARTREE_TO_KCAL,
+    KB_KCAL,
+    T_STD,
+    TEMP_LABELS,
+    TEMPS_K,
+)
 from ..io.parsing import (
     parse_charge_mult_natoms,
     parse_sp_energy,
@@ -92,13 +99,19 @@ from .goodvibes import (
 )
 
 # ─────────────────────────────────────────────
-#  CONSTANTES  (idénticas a protonation_cycle.py)
+#  CONSTANTES
+#  HARTREE_TO_KCAL, KB_KCAL, T_STD, TEMPS_K y TEMP_LABELS ahora se
+#  importan desde ..constants (antes vivían acá, duplicadas idénticas
+#  en io/parsing.py y/o sin exportar). KB_KCAL es la misma cantidad que
+#  este módulo llamaba R_KCAL antes de esta migración — ver ..constants
+#  para el porqué del renombre. Todos los usos de R_KCAL en este archivo
+#  se actualizaron a KB_KCAL; no debería quedar ningún "R_KCAL" residual.
+#
+#  LN10 y las constantes de G(H⁺) sí son específicas del ciclo de pKa
+#  (ningún otro módulo migrado las usa) y se quedan acá.
 # ─────────────────────────────────────────────
 
-HARTREE_TO_KCAL = 627.5094740631
-R_KCAL = 1.9872041e-3      # kcal/(mol·K)
 LN10 = 2.302585093
-T_STD = 298.15             # K
 
 # G(H⁺, aq) — dos convenciones NO intercambiables (ver docstring original,
 # protonation_cycle.py:160-193):
@@ -189,10 +202,6 @@ def get_thermochem(
 #  COLECTOR POR MOL (versión ligera para el ciclo de pKa)
 # ─────────────────────────────────────────────
 
-TEMPS_K = [250.0, 274.15, 298.15, 310.0]
-TEMP_LABELS = ["250K", "274K", "298K", "310K"]
-
-
 def collect_mol_data(
     mol_name: str, runs_root: Path, verbose: bool = False,
     gcorr_source: str = "harmonic",
@@ -263,12 +272,12 @@ def collect_mol_data(
             G_vals = df.loc[valid, col].values.astype(float)
             G_min = G_vals.min()
             dG_kcal = (G_vals - G_min) * HARTREE_TO_KCAL
-            weights = np.exp(-dG_kcal / (R_KCAL * T))
+            weights = np.exp(-dG_kcal / (KB_KCAL * T))
             weights /= weights.sum()
             df.loc[valid, f"boltz_{lbl}"] = weights
             df.loc[valid, f"dG_{lbl}_kcal"] = dG_kcal
-            ln_Z = np.log(np.sum(np.exp(-dG_kcal / (R_KCAL * T))))
-            G_boltz[lbl] = G_min - (R_KCAL * T * ln_Z) / HARTREE_TO_KCAL
+            ln_Z = np.log(np.sum(np.exp(-dG_kcal / (KB_KCAL * T))))
+            G_boltz[lbl] = G_min - (KB_KCAL * T * ln_Z) / HARTREE_TO_KCAL
         else:
             G_boltz[lbl] = None
             if not df["thermo_ok"].any():
@@ -424,15 +433,15 @@ def compute_tautomer_equilibrium(
     result["theory_R"], result["theory_D"] = gR["theory_sp"], gD["theory_sp"]
 
     dG_taut_kcal = (G_D - G_R) * HARTREE_TO_KCAL
-    K_taut = np.exp(-dG_taut_kcal / (R_KCAL * T))
+    K_taut = np.exp(-dG_taut_kcal / (KB_KCAL * T))
     f_R = 1.0 / (1.0 + K_taut)
     f_D = K_taut / (1.0 + K_taut)
 
     G_min = min(G_R, G_D)
     dG_R_kcal = (G_R - G_min) * HARTREE_TO_KCAL
     dG_D_kcal = (G_D - G_min) * HARTREE_TO_KCAL
-    lnZ = np.log(np.exp(-dG_R_kcal / (R_KCAL * T)) + np.exp(-dG_D_kcal / (R_KCAL * T)))
-    G_macro = G_min - (R_KCAL * T * lnZ) / HARTREE_TO_KCAL
+    lnZ = np.log(np.exp(-dG_R_kcal / (KB_KCAL * T)) + np.exp(-dG_D_kcal / (KB_KCAL * T)))
+    G_macro = G_min - (KB_KCAL * T * lnZ) / HARTREE_TO_KCAL
 
     result.update({
         "dG_taut_kcal": dG_taut_kcal, "K_taut": K_taut,
@@ -561,7 +570,7 @@ def compute_pka(
         dG_aq_kcal = (G_total_base - G_total_acid) * HARTREE_TO_KCAL + G_HPLUS_AQ_DIRECT
         result["dG_aq_kcal"] = dG_aq_kcal
         result["method"] = "direct"
-        result["pKa"] = dG_aq_kcal / (R_KCAL * T * LN10)
+        result["pKa"] = dG_aq_kcal / (KB_KCAL * T * LN10)
         result["ok"] = True
 
         if verbose:
@@ -678,7 +687,7 @@ def compute_pka(
         result["dG_aq_kcal"] = dG_aq_kcal
         result["method"] = "direct"
 
-    pKa = result["dG_aq_kcal"] / (R_KCAL * T * LN10)
+    pKa = result["dG_aq_kcal"] / (KB_KCAL * T * LN10)
     result["pKa"] = pKa
     result["ok"] = True
 
