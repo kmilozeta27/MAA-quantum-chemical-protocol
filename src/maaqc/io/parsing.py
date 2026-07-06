@@ -26,8 +26,9 @@ try:
 except ImportError:
     HAS_ASE = False
 
-HARTREE_TO_KCAL = 627.5094740631
-T_STD = 298.15  # K — temperatura de referencia para pKa
+# HARTREE_TO_KCAL y T_STD antes vivían acá duplicadas idénticas a
+# analysis/pka_cycle.py; ahora vienen de la fuente única en ..constants.
+from ..constants import HARTREE_TO_KCAL, T_STD
 
 
 def parse_sp_energy(out_file: Path) -> Optional[float]:
