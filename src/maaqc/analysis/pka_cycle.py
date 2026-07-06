@@ -19,16 +19,58 @@ módulo original — no solo las líneas 1174-1509 de compute_pka — excepto:
 Se incluye compute_tautomer_equilibrium() porque es el único productor de
 dicts con is_macrostate=True, que compute_pka() sabe consumir
 explícitamente (rama de macroestado combinado neutro+zwitterión).
+
+Issue C0 (dedupe de parsers) — aplicado:
+`parse_sp_energy`, `parse_theory_level`, `parse_charge_mult_natoms` y
+`parse_thermochem` ya NO están definidas acá; se importan desde
+`io/parsing.py`, que es donde vive la fuente de verdad post-dedupe entre
+results_collector.py y protonation_cycle.py.
+
+⚠️ CAMBIO DE COMPORTAMIENTO NO TRIVIAL (no es un dedupe puramente
+cosmético): la `parse_sp_energy` de io/parsing.py exige que el texto del
+.out contenga 'ORCA TERMINATED NORMALLY' antes de aceptar cualquier
+energía; la versión que tenía este módulo antes NO exigía eso y devolvía
+la última 'FINAL SINGLE POINT ENERGY' encontrada aunque el cálculo no
+hubiera terminado. Efecto práctico: cualquier conformero cuyo sp.out o
+sp_gas.out esté incompleto/todavía corriendo pasará de tener una energía
+(potencialmente parcial) a `None` en `collect_mol_data()` -- lo cual es
+lo correcto para no contaminar un pKa con una energía no convergida, pero
+si había pKas ya calculados con datos de un .out incompleto, conviene
+re-correrlos y comparar. `parse_theory_level` y `parse_charge_mult_natoms`
+eran idénticas carácter por carácter entre ambas variantes, sin sorpresas
+ahí. `parse_thermochem` de io/parsing.py es un superset estricto (agrega
+la clave `imag_freqs_cm1` y usa `warnings.warn` en vez de silenciar
+cuando no encuentra el bloque THERMOCHEMISTRY) -- no cambia ningún valor
+numérico ya calculado.
+
+Issue C1 (GoodVibes) — aplicado en su primera mitad:
+`_resolve_gv_python` y `run_goodvibes` se migraron a `analysis/goodvibes.py`
+como fuente canónica (eran la variante efectivamente en uso); acá se
+importan desde ahí. La segunda mitad de C1 -- decidir si
+`results_collector.py:1981-2181` / `protonation_cycle.py:588-708` aportan
+algo que esta versión no tenga -- sigue pendiente y vive documentada en
+`goodvibes.py`, no en este módulo.
+
+Issue C0 (WORK_ROOT) — aplicado:
+El global `WORK_ROOT` desaparece. `collect_mol_data()`, `compute_pka()`,
+`compute_tautomer_equilibrium()` y `_state_G_total_direct()` ahora reciben
+`runs_root: Path` explícito. Nombre elegido a propósito distinto de
+`workdir` (el de `stages/base.py:Stage.run(workdir=...)`): estas funciones
+de análisis operan sobre pares/tríos de moléculas (ácido+base, R+D) a la
+vez, así que necesitan la raíz `runs/` completa, no el workdir de un
+único Stage/molécula. Si el orchestrator expone ambos, pasar acá la raíz;
+si solo expone el workdir por-stage, quien orqueste el análisis (fuera de
+este módulo) es responsable de resolver `runs_root` (p.ej.
+`workdir.parent.parent` o el que corresponda a la estructura real del
+Stage) antes de llamar a estas funciones.
+⚠️ Esto rompe la firma de las 4 funciones para cualquier llamador
+existente (incluido el propio `protonation_cycle.py` legacy si alguna vez
+se apunta a importar desde acá en vez de sus copias locales -- hoy no lo
+hace, así que no hay call sites reales rotos todavía).
 """
 
 from __future__ import annotations
 
-import json
-import re
-import shutil
-import subprocess
-import sys
-import tempfile
 import warnings
 from pathlib import Path
 from typing import Optional
@@ -36,11 +78,23 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from ..io.parsing import (
+    parse_charge_mult_natoms,
+    parse_sp_energy,
+    parse_theory_level,
+    parse_thermochem,
+)
+from .goodvibes import (
+    GV_CUTOFF,
+    GV_QH,
+    GV_QS,
+    run_goodvibes,
+)
+
 # ─────────────────────────────────────────────
 #  CONSTANTES  (idénticas a protonation_cycle.py)
 # ─────────────────────────────────────────────
 
-WORK_ROOT = Path.cwd() / "runs"  # TODO: reemplazar por workdir explícito del Stage al integrar
 HARTREE_TO_KCAL = 627.5094740631
 R_KCAL = 1.9872041e-3      # kcal/(mol·K)
 LN10 = 2.302585093
@@ -58,97 +112,10 @@ SUBDIR_SP = "04_sp"
 SUBDIR_FREQ = "03_numfreq"
 SUBDIR_SP_GAS = "06_sp_gas"
 
-# ── GoodVibes (corrección cuasi-armónica opcional) ────────────────────────
-GV_CUTOFF = 100.0
-GV_QH = False
-GV_QS = "grimme"
-GV_CONDA_ENV = "sciencebitch"
-_GV_PYTHON_CACHE: Optional[str] = None
-
 
 # ─────────────────────────────────────────────
-#  PARSING DE .out DE ORCA
+#  VALIDACIÓN DE ESTADOS (usa los parsers importados de io/parsing.py)
 # ─────────────────────────────────────────────
-
-def parse_sp_energy(out_file: Path) -> Optional[float]:
-    """Energía SP (Hartree) desde 'FINAL SINGLE POINT ENERGY'."""
-    if not out_file.exists():
-        return None
-    try:
-        for line in out_file.read_text(errors="replace").splitlines():
-            if "FINAL SINGLE POINT ENERGY" in line:
-                try:
-                    return float(line.split()[-1])
-                except ValueError:
-                    pass
-    except OSError:
-        pass
-    return None
-
-
-def parse_theory_level(out_file: Path) -> Optional[str]:
-    """Línea de keywords ORCA ('! funcional base CPCM ...'), solo para
-    diagnóstico de consistencia entre estados."""
-    if not out_file.exists():
-        return None
-    pat = re.compile(r"^\s*\|\s*1>\s*!\s*(.+)$")
-    for line in out_file.read_text(errors="replace").splitlines():
-        m = pat.match(line)
-        if m:
-            return m.group(1).strip()
-    return None
-
-
-def parse_charge_mult_natoms(out_file: Path) -> dict:
-    """Carga total, multiplicidad y N° de átomos desde un .out de ORCA.
-    Usado por _validate_state_charges() para atrapar un mapeo de carpetas
-    desalineado antes de calcular ningún pKa."""
-    null = {"charge": None, "mult": None, "n_atoms": None}
-    if not out_file.exists():
-        return null
-    try:
-        lines = out_file.read_text(errors="replace").splitlines()
-    except OSError:
-        return null
-
-    charge: Optional[int] = None
-    mult: Optional[int] = None
-    n_atoms: Optional[int] = None
-
-    pat_echo = re.compile(r"^\s*\|\s*\d+>\s*\*\s*xyz\s+(-?\d+)\s+(\d+)", re.IGNORECASE)
-    for line in lines:
-        m = pat_echo.match(line)
-        if m:
-            charge, mult = int(m.group(1)), int(m.group(2))
-            break
-
-    if charge is None:
-        pat_q = re.compile(r"Total Charge\s+Charge\s+\.+\s*(-?\d+)", re.IGNORECASE)
-        for line in lines:
-            m = pat_q.search(line)
-            if m:
-                charge = int(m.group(1))
-                break
-    if mult is None:
-        pat_m = re.compile(r"Multiplicity\s+Mult\s+\.+\s*(\d+)", re.IGNORECASE)
-        for line in lines:
-            m = pat_m.search(line)
-            if m:
-                mult = int(m.group(1))
-                break
-
-    for idx, line in enumerate(lines):
-        if "CARTESIAN COORDINATES (ANGSTROEM)" in line.upper():
-            j = idx + 2
-            count = 0
-            while j < len(lines) and lines[j].strip():
-                count += 1
-                j += 1
-            n_atoms = count if count > 0 else None
-            break
-
-    return {"charge": charge, "mult": mult, "n_atoms": n_atoms}
-
 
 def _validate_state_charges(
     data_a: dict, data_b: dict, dq_expected: int, dn_expected: int,
@@ -191,210 +158,6 @@ def _validate_state_charges(
 #  TERMOQUÍMICA (RRHO armónico + GoodVibes cuasi-armónico)
 # ─────────────────────────────────────────────
 
-def parse_thermochem(freq_out: Path, T: float = T_STD) -> dict:
-    """Correcciones termoquímicas del bloque THERMOCHEMISTRY de ORCA 6
-    (RRHO puro). 'Final entropy term' es T·S, no S puro."""
-    null = {
-        "E_elec_freq": None, "ZPE": None, "H_corr": None,
-        "TS_total": None, "S_total": None, "G_corr": None,
-        "G_total_freq": None, "T_parsed": None,
-        "n_imag": 0, "ok": False,
-    }
-    if not freq_out.exists():
-        return null
-    try:
-        lines = freq_out.read_text(errors="replace").splitlines()
-    except OSError:
-        return null
-
-    n_imag = sum(1 for l in lines if re.match(r"\s+\d+:\s+(-\d+\.\d+)\s+cm", l))
-
-    E_elec_freq: Optional[float] = None
-    for line in lines:
-        if "FINAL SINGLE POINT ENERGY" in line:
-            try:
-                E_elec_freq = float(line.split()[-1])
-                break
-            except ValueError:
-                pass
-
-    thermo_start = -1
-    for idx, line in enumerate(lines):
-        if "THERMOCHEMISTRY AT" in line.upper():
-            thermo_start = idx
-
-    if thermo_start < 0:
-        result = dict(null)
-        result["E_elec_freq"] = E_elec_freq
-        result["n_imag"] = n_imag
-        return result
-
-    T_parsed: Optional[float] = None
-    m = re.search(r"THERMOCHEMISTRY AT\s+([\d.]+)\s*K", lines[thermo_start], re.IGNORECASE)
-    if m:
-        try:
-            T_parsed = float(m.group(1))
-        except ValueError:
-            pass
-
-    _pat_zpe = re.compile(r"Zero point energy\s+\.\.\.\s+([-\d.]+)\s*Eh", re.I)
-    _pat_h = re.compile(r"Total [Ee]nthalpy\s+\.\.\.\s+([-\d.]+)\s*Eh", re.I)
-    _pat_s = re.compile(r"Final entropy term\s+\.\.\.\s+([-\d.]+)\s*Eh", re.I)
-    _pat_g = re.compile(r"(?:Total|Final) Gibbs free energy\s+\.\.\.\s+([-\d.]+)\s*Eh", re.I)
-
-    ZPE = H_total = TS_total = G_total_freq = None
-    for line in lines[thermo_start:]:
-        if ZPE is None:
-            m = _pat_zpe.search(line)
-            if m:
-                try: ZPE = float(m.group(1))
-                except ValueError: pass
-        if H_total is None:
-            m = _pat_h.search(line)
-            if m:
-                try: H_total = float(m.group(1))
-                except ValueError: pass
-        if TS_total is None:
-            m = _pat_s.search(line)
-            if m:
-                try: TS_total = float(m.group(1))
-                except ValueError: pass
-        if G_total_freq is None:
-            m = _pat_g.search(line)
-            if m:
-                try: G_total_freq = float(m.group(1))
-                except ValueError: pass
-
-    H_corr = (H_total - E_elec_freq) if (H_total is not None and E_elec_freq is not None) else None
-    S_total = (TS_total / T_parsed) if (TS_total is not None and T_parsed) else None
-    G_corr = (H_corr - T * S_total) if (H_corr is not None and S_total is not None) else None
-
-    ok = all(x is not None for x in [ZPE, H_corr, TS_total, G_corr, G_total_freq])
-
-    return {
-        "E_elec_freq": E_elec_freq, "ZPE": ZPE, "H_corr": H_corr,
-        "TS_total": TS_total, "S_total": S_total, "G_corr": G_corr,
-        "G_total_freq": G_total_freq, "T_parsed": T_parsed,
-        "n_imag": n_imag, "ok": ok,
-    }
-
-
-def _resolve_gv_python(force: bool = False) -> str:
-    """Ruta al intérprete Python con goodvibes instalado. Cacheada."""
-    global _GV_PYTHON_CACHE
-    if _GV_PYTHON_CACHE is not None and not force:
-        return _GV_PYTHON_CACHE
-
-    if GV_CONDA_ENV:
-        home = Path.home()
-        for base in ["miniforge3", "miniconda3", "anaconda3", "conda"]:
-            candidate = home / base / "envs" / GV_CONDA_ENV / "bin" / "python"
-            if candidate.exists():
-                try:
-                    r = subprocess.run(
-                        [str(candidate), "-c", "import goodvibes"],
-                        capture_output=True, timeout=10,
-                    )
-                    if r.returncode == 0:
-                        _GV_PYTHON_CACHE = str(candidate)
-                        return _GV_PYTHON_CACHE
-                except (subprocess.TimeoutExpired, OSError):
-                    pass
-
-    try:
-        r = subprocess.run(
-            [sys.executable, "-c", "import goodvibes"],
-            capture_output=True, timeout=10,
-        )
-        if r.returncode == 0:
-            _GV_PYTHON_CACHE = sys.executable
-            return _GV_PYTHON_CACHE
-    except (subprocess.TimeoutExpired, OSError):
-        pass
-
-    gv_script = shutil.which("goodvibes")
-    if gv_script:
-        py_candidate = Path(gv_script).parent / "python"
-        if py_candidate.exists():
-            _GV_PYTHON_CACHE = str(py_candidate)
-            return _GV_PYTHON_CACHE
-
-    _GV_PYTHON_CACHE = sys.executable
-    return _GV_PYTHON_CACHE
-
-
-def run_goodvibes(
-    freq_out: Path, T: float = T_STD, cutoff: float = GV_CUTOFF,
-    qs: str = GV_QS, qh: bool = GV_QH,
-) -> dict:
-    """Corre GoodVibes sobre un freq.out y extrae G_corr cuasi-armónico
-    (mRRHO de Grimme, opcionalmente Head-Gordon en la entalpía si qh=True)."""
-    null = {
-        "G_corr": None, "H_corr": None, "S_total": None,
-        "scf_energy": None, "qh_gibbs_free_energy": None,
-        "n_imag": 0, "ok": False, "warning": None,
-    }
-    if not freq_out.exists():
-        return {**null, "warning": f"No existe {freq_out}"}
-
-    python_exe = _resolve_gv_python()
-
-    try:
-        r = subprocess.run([python_exe, "-c", "import goodvibes"], capture_output=True, timeout=10)
-        if r.returncode != 0:
-            return {**null, "warning": (
-                f"No se puede importar goodvibes con {python_exe}. "
-                f"conda activate {GV_CONDA_ENV or '<env>'} && pip install goodvibes --break-system-packages"
-            )}
-    except (subprocess.TimeoutExpired, OSError) as e:
-        return {**null, "warning": f"No se pudo verificar goodvibes con {python_exe}: {e}"}
-
-    with tempfile.TemporaryDirectory() as tmp:
-        json_path = Path(tmp) / "gv_result.json"
-        cmd = [python_exe, "-m", "goodvibes", "--temp", str(T), "-f", str(cutoff), "--qs", qs]
-        if qh:
-            cmd.append("--qh")
-        cmd += ["--json", str(json_path), str(freq_out)]
-
-        try:
-            proc = subprocess.run(cmd, cwd=tmp, capture_output=True, text=True, timeout=180)
-        except (subprocess.TimeoutExpired, OSError) as e:
-            return {**null, "warning": f"Fallo al ejecutar goodvibes: {e}"}
-
-        if not json_path.exists():
-            stderr_tail = (proc.stderr or "").strip()[-400:]
-            return {**null, "warning": f"goodvibes no generó JSON (returncode={proc.returncode}). {stderr_tail}"}
-
-        try:
-            payload = json.loads(json_path.read_text())
-        except (OSError, json.JSONDecodeError) as e:
-            return {**null, "warning": f"No se pudo leer el JSON de goodvibes: {e}"}
-
-    results = payload.get("results") or []
-    if not results:
-        return {**null, "warning": "goodvibes no devolvió resultados para este archivo."}
-
-    thermo = results[0].get("thermo") or {}
-    scf_energy = thermo.get("scf_energy")
-    qh_gibbs = thermo.get("qh_gibbs_free_energy")
-    enthalpy = thermo.get("qh_enthalpy") if qh else thermo.get("enthalpy")
-    entropy = thermo.get("qh_entropy")
-    im_freqs = thermo.get("im_frequency_wn") or []
-    n_imag = len(im_freqs) if isinstance(im_freqs, list) else 0
-
-    if scf_energy is None or qh_gibbs is None:
-        return {**null, "warning": "goodvibes no reportó scf_energy/qh_gibbs_free_energy."}
-
-    G_corr = qh_gibbs - scf_energy
-    H_corr = (enthalpy - scf_energy) if enthalpy is not None else None
-
-    return {
-        "G_corr": G_corr, "H_corr": H_corr, "S_total": entropy,
-        "scf_energy": scf_energy, "qh_gibbs_free_energy": qh_gibbs,
-        "n_imag": n_imag, "ok": True, "warning": None,
-    }
-
-
 def get_thermochem(
     freq_out: Path, T: float = T_STD, source: str = "harmonic",
     gv_cutoff: float = GV_CUTOFF, gv_qs: str = GV_QS, gv_qh: bool = GV_QH,
@@ -430,11 +193,18 @@ TEMPS_K = [250.0, 274.15, 298.15, 310.0]
 TEMP_LABELS = ["250K", "274K", "298K", "310K"]
 
 
-def collect_mol_data(mol_name: str, verbose: bool = False, gcorr_source: str = "harmonic") -> dict:
+def collect_mol_data(
+    mol_name: str, runs_root: Path, verbose: bool = False,
+    gcorr_source: str = "harmonic",
+) -> dict:
     """Recolecta datos termodinámicos de todos los confórmeros de una
     molécula: E_sp_aq, E_sp_gas (opcional), G_corr(T), G_total(T). Produce
-    el dict que compute_pka() espera como data_acid/data_base."""
-    mol_dir = WORK_ROOT / mol_name
+    el dict que compute_pka() espera como data_acid/data_base.
+
+    `runs_root` reemplaza el antiguo global WORK_ROOT (Issue C0): es la
+    raíz `runs/` bajo la cual vive `runs_root / mol_name / 04_sp/ ...`.
+    """
+    mol_dir = runs_root / mol_name
     warns: list[str] = []
 
     if not mol_dir.exists():
@@ -549,10 +319,14 @@ def collect_mol_data(mol_name: str, verbose: bool = False, gcorr_source: str = "
 #  ENERGÍA LIBRE REPRESENTATIVA DE UN ESTADO (método directo)
 # ─────────────────────────────────────────────
 
-def _state_G_total_direct(data: dict, T: float = T_STD, gcorr_source: str = "harmonic") -> dict:
+def _state_G_total_direct(
+    data: dict, runs_root: Path, T: float = T_STD, gcorr_source: str = "harmonic",
+) -> dict:
     """G_total_CPCM del confórmero representativo, para el método directo.
     Soporta dicts normales (de collect_mol_data) y macroestados combinados
-    (data["is_macrostate"]=True, de compute_tautomer_equilibrium)."""
+    (data["is_macrostate"]=True, de compute_tautomer_equilibrium).
+
+    `runs_root` reemplaza el antiguo global WORK_ROOT (Issue C0)."""
     if data.get("is_macrostate"):
         return {
             "G_total_Eh": data["G_total_direct_Eh"],
@@ -573,7 +347,7 @@ def _state_G_total_direct(data: dict, T: float = T_STD, gcorr_source: str = "har
     if E_aq is None or pd.isna(E_aq):
         return {"ok": False, "warn": f"Sin SP acuoso para {mol}/{conf}."}
 
-    freq_file = WORK_ROOT / mol / SUBDIR_FREQ / conf / "freq.out"
+    freq_file = runs_root / mol / SUBDIR_FREQ / conf / "freq.out"
     tc = get_thermochem(freq_file, T=T, source=gcorr_source,
                          gv_cutoff=GV_CUTOFF, gv_qs=GV_QS, gv_qh=GV_QH)
     G_corr = tc["G_corr"] if tc["ok"] else None
@@ -583,7 +357,7 @@ def _state_G_total_direct(data: dict, T: float = T_STD, gcorr_source: str = "har
         warn = f"G_corr ({gcorr_source}) no disponible para {mol}/{conf}.{extra}"
 
     G_total = E_aq + (G_corr if G_corr is not None else 0.0)
-    theory_sp = parse_theory_level(WORK_ROOT / mol / SUBDIR_SP / conf / "sp.out")
+    theory_sp = parse_theory_level(runs_root / mol / SUBDIR_SP / conf / "sp.out")
     theory_freq = parse_theory_level(freq_file)
 
     return {
@@ -597,12 +371,15 @@ def _state_G_total_direct(data: dict, T: float = T_STD, gcorr_source: str = "har
 # ─────────────────────────────────────────────
 
 def compute_tautomer_equilibrium(
-    data_R: dict, data_D: dict, T: float = T_STD,
+    data_R: dict, data_D: dict, runs_root: Path, T: float = T_STD,
     verbose: bool = False, gcorr_source: str = "harmonic",
 ) -> dict:
     """Compara neutro (R) y zwitterión (D) como tautómeros (mismo q, mismo
     N° de átomos) y construye el macroestado combinado que compute_pka()
-    usa como 'neutro' frente a catión/anión."""
+    usa como 'neutro' frente a catión/anión.
+
+    `runs_root` reemplaza el antiguo global WORK_ROOT (Issue C0); se
+    reenvía tal cual a `_state_G_total_direct()`."""
     mol_R, mol_D = data_R["mol_name"], data_D["mol_name"]
     warns: list[str] = []
     result: dict = {
@@ -624,8 +401,8 @@ def compute_tautomer_equilibrium(
         _warn(f"Abortando equilibrio de tautómeros ({mol_R}⇌{mol_D}) por inconsistencia de carga/N° de átomos.")
         return result
 
-    gR = _state_G_total_direct(data_R, T=T, gcorr_source=gcorr_source)
-    gD = _state_G_total_direct(data_D, T=T, gcorr_source=gcorr_source)
+    gR = _state_G_total_direct(data_R, runs_root, T=T, gcorr_source=gcorr_source)
+    gD = _state_G_total_direct(data_D, runs_root, T=T, gcorr_source=gcorr_source)
 
     if not gR.get("ok"):
         _warn(gR.get("warn") or f"No se pudo obtener G_total para {mol_R}.")
@@ -693,8 +470,8 @@ def _print_tautomer_cycle(r: dict):
 # ─────────────────────────────────────────────
 
 def compute_pka(
-    data_acid: dict, data_base: dict, T: float = T_STD, verbose: bool = False,
-    method: str = "auto", gcorr_source: str = "harmonic",
+    data_acid: dict, data_base: dict, runs_root: Path, T: float = T_STD,
+    verbose: bool = False, method: str = "auto", gcorr_source: str = "harmonic",
 ) -> dict:
     """Calcula el pKa de AH → A⁻ + H⁺.
 
@@ -705,6 +482,9 @@ def compute_pka(
     method="auto"   — "born" si hay SP gas para ambos estados; si no, cae
                        a "direct" automáticamente (registrado en
                        result["method"] / result["warnings"]).
+
+    `runs_root` reemplaza el antiguo global WORK_ROOT (Issue C0): es la
+    raíz `runs/` compartida por `mol_acid` y `mol_base`.
     """
     mol_acid = data_acid["mol_name"]
     mol_base = data_base["mol_name"]
@@ -751,8 +531,8 @@ def compute_pka(
                 f"para una mezcla; se usa el método directo."
             )
 
-        g_acid = _state_G_total_direct(data_acid, T=T, gcorr_source=gcorr_source)
-        g_base = _state_G_total_direct(data_base, T=T, gcorr_source=gcorr_source)
+        g_acid = _state_G_total_direct(data_acid, runs_root, T=T, gcorr_source=gcorr_source)
+        g_base = _state_G_total_direct(data_base, runs_root, T=T, gcorr_source=gcorr_source)
 
         result["conf_acid"] = g_acid.get("conf")
         result["conf_base"] = g_base.get("conf")
@@ -804,10 +584,10 @@ def compute_pka(
     row_acid = df_acid[df_acid["conformer"] == conf_acid].iloc[0]
     row_base = df_base[df_base["conformer"] == conf_base].iloc[0]
 
-    sp_acid_file = WORK_ROOT / mol_acid / SUBDIR_SP / conf_acid / "sp.out"
-    sp_base_file = WORK_ROOT / mol_base / SUBDIR_SP / conf_base / "sp.out"
-    freq_acid_lvl = parse_theory_level(WORK_ROOT / mol_acid / SUBDIR_FREQ / conf_acid / "freq.out")
-    freq_base_lvl = parse_theory_level(WORK_ROOT / mol_base / SUBDIR_FREQ / conf_base / "freq.out")
+    sp_acid_file = runs_root / mol_acid / SUBDIR_SP / conf_acid / "sp.out"
+    sp_base_file = runs_root / mol_base / SUBDIR_SP / conf_base / "sp.out"
+    freq_acid_lvl = parse_theory_level(runs_root / mol_acid / SUBDIR_FREQ / conf_acid / "freq.out")
+    freq_base_lvl = parse_theory_level(runs_root / mol_base / SUBDIR_FREQ / conf_base / "freq.out")
     sp_acid_lvl = parse_theory_level(sp_acid_file)
     sp_base_lvl = parse_theory_level(sp_base_file)
 
@@ -854,8 +634,8 @@ def compute_pka(
             f"{mol_base}/{conf_base}. Se usa el método directo (solo CPCM)."
         )
 
-    freq_acid = WORK_ROOT / mol_acid / SUBDIR_FREQ / conf_acid / "freq.out"
-    freq_base = WORK_ROOT / mol_base / SUBDIR_FREQ / conf_base / "freq.out"
+    freq_acid = runs_root / mol_acid / SUBDIR_FREQ / conf_acid / "freq.out"
+    freq_base = runs_root / mol_base / SUBDIR_FREQ / conf_base / "freq.out"
     tc_acid = get_thermochem(freq_acid, T=T, source=gcorr_source,
                               gv_cutoff=GV_CUTOFF, gv_qs=GV_QS, gv_qh=GV_QH)
     tc_base = get_thermochem(freq_base, T=T, source=gcorr_source,
