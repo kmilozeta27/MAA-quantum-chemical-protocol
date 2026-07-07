@@ -13,6 +13,14 @@ Cablea, sin reinventar interfaces:
                                  print_comparison(), export_results(),
                                  export_comparison() (ya migrado 1:1 del
                                  legacy, ver docstring del módulo)
+    analysis/adc2_compare.py -> collect_adc2_results(), print_adc2_summary(),
+                                 compare_adc2_tddft(),
+                                 print_adc2_tddft_comparison(),
+                                 export_adc2_comparison() (ya migrado 1:1
+                                 del legacy; results_collector.py ya tenía
+                                 export_adc2_mol() migrado, pero cmd_collect
+                                 no lo invocaba porque no había de dónde
+                                 sacar df_adc2 — este módulo lo resuelve)
     analysis/report.py       -> build_report_data(), write_report()
                                  (interfaz NUEVA, no existía en el legacy;
                                  definida acá porque `report` no tenía
@@ -40,6 +48,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from maaqc.analysis import adc2_compare as adc2
 from maaqc.analysis import report as report_mod
 from maaqc.analysis import results_collector as rc
 from maaqc.config.schema import RecipeConfig, load_recipe
@@ -312,8 +321,23 @@ def cmd_collect(args: argparse.Namespace) -> int:
             any_error = True
             continue
         rc.print_summary(df_conf, df_tddft, mol_name=state_name)
+
+        # ADC2 (opcional, por estado): arma df_adc2 vía
+        # adc2_compare.collect_adc2_results() — vacío si el estado todavía
+        # no corrió 07_adc2/, lo cual es normal (ADC2 es la etapa final).
+        # Se imprime igual que print_summary, sin depender de --export,
+        # para que `maaqc collect` sin --export ya muestre ADC2 si existe
+        # (mismo criterio que confórmeros/TDDFT arriba). export_adc2_mol()
+        # ya estaba migrado en results_collector.py pero nada lo invocaba
+        # porque no había de dónde sacar df_adc2 hasta ahora.
+        df_adc2 = adc2.collect_adc2_results(mol_dir, mol_name=state_name)
+        if not df_adc2.empty:
+            adc2.print_adc2_summary(df_adc2, mol_name=state_name, df_conf=df_conf)
+
         if args.export:
             rc.export_results(mol_dir, df_conf, df_tddft, mol_name=state_name, fmt=args.export)
+            if not df_adc2.empty:
+                rc.export_adc2_mol(mol_dir, df_adc2, mol_name=state_name, fmt=args.export)
 
     # Comparación entre estados. compare_protonation_states redescubre
     # TODOS los subdirs con 04_sp/ bajo run_root; se filtra después a los
@@ -324,8 +348,18 @@ def cmd_collect(args: argparse.Namespace) -> int:
         df_cmp = df_cmp[df_cmp["molecule"].isin(states)].reset_index(drop=True)
     rc.print_comparison(df_cmp, ref_mol=ref_mol)
 
+    # Comparación ADC2 vs TDDFT (el benchmark central del paper). A
+    # diferencia de compare_protonation_states, compare_adc2_tddft() ya
+    # acepta `mols` explícito, así que se le pasan directo los --states
+    # resueltos en vez de filtrar después.
+    df_adc2_cmp = adc2.compare_adc2_tddft(run_root, mols=states)
+    if not df_adc2_cmp.empty:
+        adc2.print_adc2_tddft_comparison(df_adc2_cmp)
+
     if args.export:
         rc.export_comparison(run_root, df_cmp, fmt=args.export)
+        if not df_adc2_cmp.empty:
+            adc2.export_adc2_comparison(run_root, df_adc2_cmp, fmt=args.export)
 
     return 1 if any_error else 0
 

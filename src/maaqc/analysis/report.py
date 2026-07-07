@@ -21,6 +21,15 @@ Contrato:
 Si más adelante se necesitan reportes por-molécula individual (no solo la
 comparación entre estados), extender `ReportData` con lo que haga falta en
 vez de introducir una segunda clase paralela.
+
+ADC2 (ver skill maa-repackaging, tarea B1): SÍ entra en `ReportData`, como
+sección nueva (`df_adc2_cmp`), en vez de quedar fuera de alcance de
+`report`. Se decidió así porque `compare_adc2_tddft()` ya devuelve un
+DataFrame por-estado con la misma forma que `df_cmp` (una fila por
+molécula/estado) — es una comparación más entre estados, no un artefacto
+por-confórmero como `dfs_conf`/`dfs_tddft`, así que encaja en el mismo
+nivel que la sección "Comparación entre estados" ya existente en vez de
+justificar una salida aparte de `collect`.
 """
 
 from __future__ import annotations
@@ -32,6 +41,7 @@ from typing import Optional
 
 import pandas as pd
 
+from . import adc2_compare as adc2
 from . import results_collector as rc
 
 
@@ -43,6 +53,11 @@ class ReportData:
     df_cmp: pd.DataFrame
     dfs_conf: dict[str, pd.DataFrame] = field(default_factory=dict)
     dfs_tddft: dict[str, pd.DataFrame] = field(default_factory=dict)
+    # Comparación ADC2 vs TDDFT (compare_adc2_tddft), una fila por estado.
+    # Vacío (DataFrame sin filas) si ningún estado corrió 07_adc2/ todavía
+    # — ADC2 es la etapa final de la cadena, así que esto es normal en
+    # corridas parciales, no un error.
+    df_adc2_cmp: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 # Columnas de detalle por confórmero que se muestran en MD/HTML/JSON.
@@ -67,9 +82,17 @@ def build_report_data(
         df_cmp = df_cmp[df_cmp["molecule"].isin(states)].reset_index(drop=True)
     dfs_conf = {k: v for k, v in dfs_conf.items() if k in states}
     dfs_tddft = {k: v for k, v in dfs_tddft.items() if k in states}
+
+    # compare_adc2_tddft() ya acepta `mols` explícito (mismo patrón que
+    # collect_results(workdir) con workdir explícito), así que se le pasan
+    # directo los `states` resueltos en vez de filtrar después como con
+    # df_cmp arriba.
+    df_adc2_cmp = adc2.compare_adc2_tddft(run_root, mols=states)
+
     return ReportData(
         run_root=run_root, states=states, ref_mol=ref_mol,
         df_cmp=df_cmp, dfs_conf=dfs_conf, dfs_tddft=dfs_tddft,
+        df_adc2_cmp=df_adc2_cmp,
     )
 
 
@@ -89,6 +112,15 @@ def render_markdown(data: ReportData) -> str:
     else:
         lines.append("```")
         lines.append(data.df_cmp.to_string(index=False, float_format=lambda x: f"{x:.3f}"))
+        lines.append("```")
+    lines.append("")
+
+    lines += ["## Comparación ADC2 vs TDDFT", ""]
+    if data.df_adc2_cmp.empty:
+        lines.append("_Sin datos ADC2 (ningún estado corrió 07_adc2/ todavía)._")
+    else:
+        lines.append("```")
+        lines.append(data.df_adc2_cmp.to_string(index=False, float_format=lambda x: f"{x:.3f}"))
         lines.append("```")
     lines.append("")
 
@@ -129,6 +161,12 @@ def render_html(data: ReportData) -> str:
     else:
         parts.append(data.df_cmp.to_html(index=False, float_format=lambda x: f"{x:.3f}"))
 
+    parts.append("<h2>Comparación ADC2 vs TDDFT</h2>")
+    if data.df_adc2_cmp.empty:
+        parts.append("<p><em>Sin datos ADC2 (ningún estado corrió 07_adc2/ todavía).</em></p>")
+    else:
+        parts.append(data.df_adc2_cmp.to_html(index=False, float_format=lambda x: f"{x:.3f}"))
+
     for state_name, df in data.dfs_conf.items():
         parts.append(f"<h2>Estado {state_name}</h2>")
         if df.empty:
@@ -147,6 +185,7 @@ def render_json(data: ReportData) -> str:
         "states": data.states,
         "reference": data.ref_mol,
         "comparison": data.df_cmp.to_dict(orient="records"),
+        "comparison_adc2_tddft": data.df_adc2_cmp.to_dict(orient="records"),
         "conformers": {
             state_name: (
                 df.drop(columns=["_thermochem"], errors="ignore")
