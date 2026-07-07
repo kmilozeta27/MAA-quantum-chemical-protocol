@@ -8,6 +8,15 @@ Cablea, sin reinventar interfaces:
                                  is_standalone_entry(), validate_stage_ready()
     orchestrator/state.py    -> resolve_resume_index(), needs_rerun(),
                                  record_stage_result()
+    analysis/results_collector.py -> collect_results(), print_summary(),
+                                 compare_protonation_states(),
+                                 print_comparison(), export_results(),
+                                 export_comparison() (ya migrado 1:1 del
+                                 legacy, ver docstring del módulo)
+    analysis/report.py       -> build_report_data(), write_report()
+                                 (interfaz NUEVA, no existía en el legacy;
+                                 definida acá porque `report` no tenía
+                                 contrato previo)
 
 Reemplaza los flags sueltos de pipeline.py legacy (--start adc2,
 --skipnumfreq, --expand-crest) por subcomandos + --entry + recipe YAML,
@@ -31,6 +40,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from maaqc.analysis import report as report_mod
+from maaqc.analysis import results_collector as rc
 from maaqc.config.schema import RecipeConfig, load_recipe
 from maaqc.orchestrator import dag, state
 from maaqc.stages.base import Stage
@@ -233,27 +244,116 @@ def cmd_resume(args: argparse.Namespace) -> int:
     return _execute_chain(workdir, config, start_index, registry, pending)
 
 
+def _resolve_states(run_root: Path, states_arg: str, purpose: str) -> Optional[list[str]]:
+    """Parsea `--states a,b,c`, avisa (sin abortar) de los que no tienen
+    subdir bajo `run_root`, y devuelve la lista final. `None` si no queda
+    ningún estado usable (el caller debe abortar el comando en ese caso).
+
+    Compartido por `collect` y `report`: ambos reciben el mismo
+    `run_root` (dir que contiene un subdir por estado, ej. runs/A,
+    runs/B) y el mismo criterio de qué estados existen de verdad.
+    """
+    states = [s.strip() for s in states_arg.split(",") if s.strip()]
+    if not states:
+        print(f"[maaqc] '--states' vacío, no hay nada que {purpose}.", file=sys.stderr)
+        return None
+
+    missing = [s for s in states if not (run_root / s).exists()]
+    if missing:
+        print(
+            f"[maaqc] Aviso: no se encontró subdir para los estados {missing} "
+            f"bajo {run_root}; se omiten.",
+            file=sys.stderr,
+        )
+        states = [s for s in states if s not in missing]
+
+    if not states:
+        print(f"[maaqc] Ningún estado disponible para {purpose}.", file=sys.stderr)
+        return None
+    return states
+
+
+def _resolve_reference(ref_arg: Optional[str], states: list[str]) -> Optional[str]:
+    """None si no hay --reference o si no pertenece a --states (con
+    aviso); si no, el nombre de estado a usar como referencia."""
+    if ref_arg is None:
+        return None
+    if ref_arg not in states:
+        print(
+            f"[maaqc] Aviso: --reference '{ref_arg}' no está en --states "
+            f"{states}; se continúa sin referencia.",
+            file=sys.stderr,
+        )
+        return None
+    return ref_arg
+
+
 def cmd_collect(args: argparse.Namespace) -> int:
-    # TODO: cablear analysis/results_collector.py una vez migrado desde
-    # results_collector.py legacy (mismo patrón que load_recipe: no
-    # inventar la interfaz acá, esperar el módulo real). Estados
-    # esperados vía --states A,B,C,D,R (ver protonation_cycle.py).
-    print(
-        "[maaqc] 'collect' pendiente: falta migrar "
-        "analysis/results_collector.py.",
-        file=sys.stderr,
-    )
-    return 1
+    run_root = Path(args.workdir)
+    if not run_root.exists():
+        print(f"[maaqc] '--workdir {run_root}' no existe.", file=sys.stderr)
+        return 1
+
+    states = _resolve_states(run_root, args.states, "consolidar")
+    if states is None:
+        return 1
+    ref_mol = _resolve_reference(args.reference, states)
+
+    # Recolección + impresión por estado individual (mol_dir = run_root/
+    # <estado>, mismo patrón que Stage.outputs(workdir)). Un estado con
+    # error no aborta a los demás; se reporta y se sigue.
+    any_error = False
+    for state_name in states:
+        mol_dir = run_root / state_name
+        try:
+            df_conf, df_tddft = rc.collect_results(mol_dir)
+        except FileNotFoundError as exc:
+            print(f"[maaqc] {state_name}: {exc}", file=sys.stderr)
+            any_error = True
+            continue
+        rc.print_summary(df_conf, df_tddft, mol_name=state_name)
+        if args.export:
+            rc.export_results(mol_dir, df_conf, df_tddft, mol_name=state_name, fmt=args.export)
+
+    # Comparación entre estados. compare_protonation_states redescubre
+    # TODOS los subdirs con 04_sp/ bajo run_root; se filtra después a los
+    # --states pedidos para no comparar estados que el usuario no pidió
+    # aunque existan en disco (ej. una corrida vieja abandonada al lado).
+    df_cmp, _dfs_conf, _dfs_tddft = rc.compare_protonation_states(run_root, ref_mol=ref_mol)
+    if not df_cmp.empty:
+        df_cmp = df_cmp[df_cmp["molecule"].isin(states)].reset_index(drop=True)
+    rc.print_comparison(df_cmp, ref_mol=ref_mol)
+
+    if args.export:
+        rc.export_comparison(run_root, df_cmp, fmt=args.export)
+
+    return 1 if any_error else 0
 
 
 def cmd_report(args: argparse.Namespace) -> int:
-    # TODO: mismo caso que collect — pendiente de un módulo de reporte
-    # real (analysis/ o un report.py nuevo) antes de fijar la interfaz.
-    print(
-        "[maaqc] 'report' pendiente: falta definir el módulo de reporte.",
-        file=sys.stderr,
-    )
-    return 1
+    run_root = Path(args.workdir)
+    if not run_root.exists():
+        print(f"[maaqc] '--workdir {run_root}' no existe.", file=sys.stderr)
+        return 1
+
+    states = _resolve_states(run_root, args.states, "reportar")
+    if states is None:
+        return 1
+    ref_mol = _resolve_reference(args.reference, states)
+
+    # Interfaz de `report` (nueva, no migrada del legacy: pipeline.py no
+    # tenía generación de reportes, solo print_summary/print_comparison a
+    # stdout). Definida en analysis/report.py, reutilizando los DataFrames
+    # de results_collector.py sin reimplementar collect/compare.
+    data = report_mod.build_report_data(run_root, states, ref_mol=ref_mol)
+    try:
+        out_path = report_mod.write_report(data, run_root, args.format)
+    except ValueError as exc:
+        print(f"[maaqc] {exc}", file=sys.stderr)
+        return 1
+
+    print(f"[maaqc] Reporte generado: {out_path}")
+    return 0
 
 
 DOCTOR_BINARIES: dict[str, list[str]] = {
@@ -373,13 +473,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_resume.set_defaults(func=cmd_resume)
 
     p_collect = subparsers.add_parser("collect", help="Consolida resultados entre estados de protonación")
-    p_collect.add_argument("--workdir", required=True)
+    p_collect.add_argument("--workdir", required=True, help="Dir que contiene un subdir por estado (ej. runs/A, runs/B)")
     p_collect.add_argument("--states", default="A,B,C,D,R", help="Estados a consolidar, separados por coma")
-    p_collect.add_argument("--output", default=None)
+    p_collect.add_argument(
+        "--reference", default=None,
+        help="Estado a usar como referencia para ΔE (ej. R). Debe estar en --states",
+    )
+    p_collect.add_argument(
+        "--export", choices=["csv", "xlsx", "both"], default=None,
+        help="Además de imprimir, exportar resultados por estado y la comparación (export_results/export_comparison)",
+    )
     p_collect.set_defaults(func=cmd_collect)
 
     p_report = subparsers.add_parser("report", help="Genera un reporte de la corrida")
-    p_report.add_argument("--workdir", required=True)
+    p_report.add_argument("--workdir", required=True, help="Dir que contiene un subdir por estado (ej. runs/A, runs/B)")
+    p_report.add_argument("--states", default="A,B,C,D,R", help="Estados a incluir en el reporte, separados por coma")
+    p_report.add_argument(
+        "--reference", default=None,
+        help="Estado a usar como referencia para ΔE (ej. R). Debe estar en --states",
+    )
     p_report.add_argument("--format", choices=["html", "md", "json"], default="html")
     p_report.set_defaults(func=cmd_report)
 
