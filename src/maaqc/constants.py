@@ -36,6 +36,24 @@ Historial de cada constante (para trazabilidad, no borrar):
 
 from __future__ import annotations
 
+from pathlib import Path
+
+# Directorio raíz de corridas por DEFAULT (legacy: Path("runs") global fijo).
+#
+# NO es equivalente al WORK_ROOT que analysis/results_collector.py importaba
+# antes de esta migración. Ese uso quedó reemplazado: collect_results() y
+# compare_protonation_states() ahora reciben workdir/run_root como parámetro
+# explícito (mismo patrón que orchestrator/state.py y el contrato de Stage:
+# is_complete(workdir), outputs(workdir), etc.), en vez de derivarlo de una
+# constante de módulo — necesario para correr varios estados de protonación
+# (A/B/C/D/R) en paralelo con workdirs distintos.
+#
+# DEFAULT_RUN_ROOT existe solo como valor por default para el CLI (cli.py):
+# si el usuario no pasa --workdir/--run-root explícito, el CLI resuelve acá
+# y pasa el Path resultante a las funciones de análisis. Ningún módulo bajo
+# analysis/ debería importar esta constante directamente.
+DEFAULT_RUN_ROOT: Path = Path("runs")
+
 # Conversión de energía
 HARTREE_TO_KCAL: float = 627.5094740631
 

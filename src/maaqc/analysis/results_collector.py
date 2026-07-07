@@ -15,29 +15,27 @@ cambiaron de CamelCase a snake_case (`compute_G_total` → `compute_g_total`,
 `compute_boltzmann_multiT` → `compute_boltzmann_multi_t`); las llamadas
 abajo ya usan los nombres nuevos.
 
-⚠️ TODO(kmilozeta) — dependencia sin resolver, no incluida en el alcance
-de este issue, que hay que verificar antes de que este módulo corra en
-producción con workdirs dinámicos:
-
-1. `WORK_ROOT`: en el legacy es un `Path("runs")` global fijo. Acá lo
-   importo desde `..constants` igual que en boltzmann.py, pero en la
-   arquitectura nueva (orchestrator/state.py con workdir por
-   molécula/estado) probablemente `collect_results` y
-   `compare_protonation_states` deberían recibir el workdir como
-   parámetro en vez de derivarlo de una constante global — no lo cambié
-   acá para no mezclar refactor de arquitectura con migración 1:1, pero
-   quedó pendiente de decidir.
+RESUELTO (ver constants.py / issue "Bug bloqueante — constants.py"):
+`WORK_ROOT` global fijo se elimina de este módulo. `collect_results` y
+`export_*` reciben `workdir: Path` explícito (el dir de una molécula/
+estado, igual que Stage.outputs(workdir) en la nueva arquitectura);
+`compare_protonation_states` y `export_comparison` reciben `run_root: Path`
+explícito (el dir que contiene los subdirs de cada estado). El default de
+conveniencia para el CLI cuando no se pasa --workdir vive en
+`constants.DEFAULT_RUN_ROOT`, pero se resuelve una sola vez en cli.py — no
+se importa acá.
 """
 
 from __future__ import annotations
 
 import warnings
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 
-from ..constants import HARTREE_TO_KCAL, T_STD, WORK_ROOT
+from ..constants import HARTREE_TO_KCAL, T_STD
 from ..io.parsing import (
     parse_imaginary_freqs,
     parse_opt_energy,
@@ -57,13 +55,18 @@ from .crest_dft import analyze_crest_to_dft, print_crest_dft_analysis
 #  RECOLECCIÓN DE RESULTADOS
 # ─────────────────────────────────────────────
 
-def collect_results(mol_name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+def collect_results(workdir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Devuelve (df_conf, df_tddft) con todos los campos enriquecidos:
       df_conf  — una fila por confórmero
       df_tddft — una fila por excitación TDDFT de cada confórmero
+
+    `workdir` es el directorio de la molécula/estado (ej. runs/A, runs/B),
+    pasado explícito por el caller (mismo patrón que Stage.outputs(workdir)
+    en orchestrator/). No se deriva de ninguna constante global.
     """
-    mol_dir = WORK_ROOT / mol_name
+    mol_dir = workdir
+    mol_name = mol_dir.name
     if not mol_dir.exists():
         raise FileNotFoundError(f"No se encontró {mol_dir}")
 
@@ -215,11 +218,17 @@ def print_summary(df_conf: pd.DataFrame, df_tddft: pd.DataFrame, mol_name: str):
 # ─────────────────────────────────────────────
 
 def compare_protonation_states(
+    run_root: Path,
     ref_mol: Optional[str] = None,
 ) -> pd.DataFrame:
     """
-    Recopila resultados de todos los estados de protonación disponibles en runs/
-    y construye una tabla comparativa.
+    Recopila resultados de todos los estados de protonación disponibles bajo
+    `run_root` y construye una tabla comparativa.
+
+    `run_root` es el directorio que contiene un subdir por estado de
+    protonación (ej. run_root/A, run_root/B, ...), pasado explícito por el
+    caller — el CLI resuelve el default (constants.DEFAULT_RUN_ROOT) una
+    sola vez si el usuario no pasa --run-root.
 
     La tabla incluye por mol:
       - Número de confórmeros con SP completado
@@ -235,20 +244,22 @@ def compare_protonation_states(
 
     Retorna DataFrame de comparación.
     """
-    mols = sorted(p.name for p in WORK_ROOT.iterdir()
-                  if p.is_dir() and (p / "04_sp").exists())
+    mol_dirs = sorted((p for p in run_root.iterdir()
+                        if p.is_dir() and (p / "04_sp").exists()),
+                       key=lambda p: p.name)
 
-    if not mols:
-        print("No se encontraron resultados SP en ninguna molécula bajo runs/")
+    if not mol_dirs:
+        print(f"No se encontraron resultados SP en ninguna molécula bajo {run_root}")
         return pd.DataFrame()
 
     rows = []
     dfs_conf: dict[str, pd.DataFrame] = {}
     dfs_tddft: dict[str, pd.DataFrame] = {}
 
-    for mol in mols:
+    for mol_dir in mol_dirs:
+        mol = mol_dir.name
         try:
-            df_c, df_t = collect_results(mol)
+            df_c, df_t = collect_results(mol_dir)
         except Exception as e:
             print(f"  ⚠  {mol}: error al leer resultados — {e}")
             continue
@@ -367,9 +378,9 @@ def print_comparison(df_cmp: pd.DataFrame, ref_mol: Optional[str] = None):
 #  EXPORTACIÓN
 # ─────────────────────────────────────────────
 
-def export_results(df_conf: pd.DataFrame, df_tddft: pd.DataFrame,
+def export_results(workdir: Path, df_conf: pd.DataFrame, df_tddft: pd.DataFrame,
                    mol_name: str, fmt: str):
-    mol_dir = WORK_ROOT / mol_name
+    mol_dir = workdir
 
     # Añadir columnas de Boltzmann para todas las temperaturas a df_tddft
     if not df_tddft.empty and not df_conf.empty:
@@ -411,11 +422,11 @@ def export_results(df_conf: pd.DataFrame, df_tddft: pd.DataFrame,
         print(f"  Excel guardado en: {xlsx_path}")
 
 
-def export_adc2_mol(df_adc2: "pd.DataFrame", mol_name: str, fmt: str):
+def export_adc2_mol(workdir: Path, df_adc2: "pd.DataFrame", mol_name: str, fmt: str):
     """Exporta excitaciones ADC2 de una molecula al CSV/XLSX del estado."""
     if df_adc2.empty:
         return
-    mol_dir = WORK_ROOT / mol_name
+    mol_dir = workdir
     if fmt in ("csv", "both"):
         out = mol_dir / "adc2_excitations.csv"
         df_adc2.to_csv(out, index=False)
@@ -432,10 +443,10 @@ def export_adc2_mol(df_adc2: "pd.DataFrame", mol_name: str, fmt: str):
             warnings.warn(f"[ADC2 export] {exc}")
 
 
-def export_comparison(df_cmp: pd.DataFrame, fmt: str):
+def export_comparison(run_root: Path, df_cmp: pd.DataFrame, fmt: str):
     if df_cmp.empty:
         return
-    out = WORK_ROOT / "comparison_protonation_states"
+    out = run_root / "comparison_protonation_states"
     if fmt in ("csv", "both"):
         df_cmp.to_csv(out.with_suffix(".csv"), index=False)
         print(f"  CSV comparativo guardado en: {out.with_suffix('.csv')}")
