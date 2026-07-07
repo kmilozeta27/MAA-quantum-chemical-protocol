@@ -33,6 +33,7 @@ from typing import Optional
 from maaqc.config.schema import RecipeConfig, load_recipe
 from maaqc.orchestrator import dag, state
 from maaqc.stages.base import Stage
+from maaqc.system.platform_detect import resolve_bin
 
 # Nombre de clase esperado por módulo de stage (confirmado por dag.py,
 # que ya nombra "SpStage" y "Adc2Stage" en su propio docstring).
@@ -262,9 +263,16 @@ DOCTOR_BINARIES: dict[str, list[str]] = {
 
 
 def _check_binary(name: str, version_cmd: list[str]) -> tuple[bool, str]:
-    path = shutil.which(version_cmd[0])
-    if path is None:
-        return False, "no encontrado en PATH"
+    # resolve_bin busca, en orden: override MAAQC_<NAME>_BIN -> PATH
+    # actual -> TODOS los envs de conda (no uno hardcodeado) -> rutas
+    # típicas de instalación manual (~, /opt, /usr/local, /Applications).
+    # Esto reemplaza el shutil.which() sobre el PATH crudo, que fallaba
+    # para crest (vive en el env base de conda, no en el env `maaqc`
+    # activo) y para orca (instalación manual fuera del PATH).
+    resolved = resolve_bin(version_cmd[0])
+    if not (resolved.is_absolute() and resolved.is_file()):
+        return False, "no encontrado en PATH, en ningún env de conda, ni en rutas típicas"
+    version_cmd = [str(resolved)] + version_cmd[1:]
     try:
         proc = subprocess.run(
             version_cmd, capture_output=True, text=True, timeout=10,
@@ -272,8 +280,8 @@ def _check_binary(name: str, version_cmd: list[str]) -> tuple[bool, str]:
         first_line = (proc.stdout or proc.stderr).strip().splitlines()
         version = first_line[0] if first_line else "(sin salida de versión)"
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return True, f"encontrado en {path}, pero no se pudo consultar versión ({exc})"
-    return True, f"{path} — {version}"
+        return True, f"encontrado en {resolved}, pero no se pudo consultar versión ({exc})"
+    return True, f"{resolved} — {version}"
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
