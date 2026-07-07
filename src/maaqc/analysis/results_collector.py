@@ -15,21 +15,11 @@ cambiaron de CamelCase a snake_case (`compute_G_total` → `compute_g_total`,
 `compute_boltzmann_multiT` → `compute_boltzmann_multi_t`); las llamadas
 abajo ya usan los nombres nuevos.
 
-⚠️ TODO(kmilozeta) — dos dependencias sin resolver, no incluidas en el
-alcance de este issue, que hay que verificar antes de que este módulo
-corra:
+⚠️ TODO(kmilozeta) — dependencia sin resolver, no incluida en el alcance
+de este issue, que hay que verificar antes de que este módulo corra en
+producción con workdirs dinámicos:
 
-1. `analyze_crest_to_dft()` / `print_crest_dft_analysis()` (legacy
-   results_collector.py:524-642): `collect_results()` y `print_summary()`
-   las llaman pero no están en la lista de funciones migradas a
-   `io/parsing.py` que se mencionó en sesiones previas, ni tienen issue
-   propio en las notas que tengo. Asumí un import desde `.crest_dft`
-   (módulo nuevo, no confirmado) — hay que decidir dónde viven
-   realmente (¿`analysis/crest_dft.py`? ¿parte de `censo.py` /
-   `CensoStage`, dado que ahí es donde se compara ranking CREST vs DFT?)
-   antes de que el import de abajo funcione.
-
-2. `WORK_ROOT`: en el legacy es un `Path("runs")` global fijo. Acá lo
+1. `WORK_ROOT`: en el legacy es un `Path("runs")` global fijo. Acá lo
    importo desde `..constants` igual que en boltzmann.py, pero en la
    arquitectura nueva (orchestrator/state.py con workdir por
    molécula/estado) probablemente `collect_results` y
@@ -60,7 +50,7 @@ from .boltzmann import (
     compute_g_total,
     print_boltzmann_analysis,
 )
-from .crest_dft import analyze_crest_to_dft, print_crest_dft_analysis  # TODO: confirmar ubicación real
+from .crest_dft import analyze_crest_to_dft, print_crest_dft_analysis
 
 
 # ─────────────────────────────────────────────

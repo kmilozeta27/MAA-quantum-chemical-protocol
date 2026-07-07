@@ -38,6 +38,9 @@ de migración maa-repackaging para detalle línea por línea):
                        plot_distribution_5, plot_conformer_boltzmann
                        reales; plot_spectrum, plot_comparison,
                        plot_adc2_tddft_comparison -> NotImplementedError)
+  - crest_dft.py     : migrado completo (analyze_crest_to_dft,
+                       print_crest_dft_analysis)
+  - results_collector.py : migrado completo (depende de crest_dft.py)
 """
 
 from __future__ import annotations
@@ -56,6 +59,8 @@ ANALYSIS_MODULES = [
     "monte_carlo",
     "parse_uvvis",
     "plots",
+    "crest_dft",
+    "results_collector",
 ]
 
 
