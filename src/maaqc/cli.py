@@ -24,6 +24,7 @@ ImportError críptico al armar el parser.
 from __future__ import annotations
 
 import argparse
+import platform
 import shutil
 import subprocess
 import sys
@@ -258,8 +259,42 @@ def cmd_report(args: argparse.Namespace) -> int:
 DOCTOR_BINARIES: dict[str, list[str]] = {
     "orca": ["orca", "--version"],
     "crest": ["crest", "--version"],
+    "censo": ["censo", "--version"],
     "xtb": ["xtb", "--version"],
 }
+
+
+# Instrucciones de instalación por binario faltante, mostradas por
+# `maaqc doctor` cuando `_check_binary` no lo encuentra. crest/censo/xtb
+# tienen paquete conda-forge (mismo comando en ThinkPad Ubuntu y en el
+# MacBook Air institucional, porque `conda`/`mamba` no dependen del SO);
+# ORCA es la excepción real — requiere licencia académica y se
+# descarga a mano, no hay gestor de paquetes que lo resuelva. Por eso
+# para ORCA el hint no es un comando, sino los pasos + la env var que
+# `resolve_bin` ya sabe leer (MAAQC_ORCA_BIN, ver platform_detect.py).
+def _install_hint(name: str) -> str:
+    is_macos = platform.system() == "Darwin"
+
+    if name == "orca":
+        return (
+            "ORCA no tiene gestor de paquetes (requiere licencia académica):\n"
+            "      1. Registrate y descargá el tarball en https://orcaforum.kofo.mpg.de/\n"
+            "         (sección 'ORCA downloads', elegí la versión para "
+            + ("macOS" if is_macos else "Linux")
+            + ").\n"
+            "      2. Descomprimilo donde te resulte cómodo (no requiere instalación).\n"
+            "      3. Si el ejecutable `orca` no queda en tu PATH, fijalo explícito:\n"
+            "         export MAAQC_ORCA_BIN=/ruta/a/orca_6_1_1/orca\n"
+            "         (resolve_bin() respeta esta variable antes que cualquier búsqueda)."
+        )
+
+    if name in ("crest", "censo", "xtb"):
+        # Paquete conda-forge disponible para los tres — mismo comando
+        # en ambas máquinas. Se sugiere el env activo si hay uno, o
+        # 'sciencebitch' (env de referencia de kmilo) como default.
+        return f"conda install -c conda-forge {name}   # (o: mamba install -c conda-forge {name})"
+
+    return "sin instrucciones de instalación registradas para este binario."
 
 
 def _check_binary(name: str, version_cmd: list[str]) -> tuple[bool, str]:
@@ -291,6 +326,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         ok, detail = _check_binary(name, version_cmd)
         status = "OK" if ok else "FALTA"
         print(f"  [{status}] {name}: {detail}")
+        if not ok:
+            print(f"      -> instalar: {_install_hint(name)}")
         all_ok = all_ok and ok
 
     print("[maaqc] Chequeando stages migrados...")
