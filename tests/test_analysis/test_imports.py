@@ -28,10 +28,6 @@ de migración maa-repackaging para detalle línea por línea):
   - goodvibes.py     : migrado completo (Issue C1 cerrado íntegro,
                        incluyendo run_goodvibes_on_mol)
   - adc2_compare.py  : migrado completo (compare_adc2_tddft())
-  - monte_carlo.py   : stub vacío -- ni siquiera tiene funciones
-                       (ver docstring del propio archivo: puede que ni
-                       corresponda a código real, a confirmar con
-                       kmilozeta). Igual debe importar limpio.
   - parse_uvvis.py   : stub, extract_lambda_max() -> NotImplementedError
   - plots.py         : migrado completo (plot_distribution,
                        plot_distribution_5, plot_conformer_boltzmann,
@@ -47,6 +43,12 @@ completos pero todavía solo tienen cobertura de "importa sin
 explotar" acá abajo. Tests de contrato reales (que ejerciten estas
 funciones con datos) quedan pendientes -- ver TODO al final del
 archivo.
+
+NOTA (fix): `monte_carlo.py` se descartó y se eliminó del repo (no era
+código real, ver decisión de kmilozeta). Se sacó de `ANALYSIS_MODULES`
+más abajo -- antes de este fix el módulo seguía en la lista pese a no
+existir el archivo, y `test_analysis_module_imports[monte_carlo]`
+fallaba con `ModuleNotFoundError`.
 """
 
 from __future__ import annotations
@@ -62,7 +64,6 @@ ANALYSIS_MODULES = [
     "boltzmann",
     "goodvibes",
     "adc2_compare",
-    "monte_carlo",
     "parse_uvvis",
     "plots",
     "crest_dft",

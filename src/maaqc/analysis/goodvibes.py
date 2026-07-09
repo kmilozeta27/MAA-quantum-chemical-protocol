@@ -802,9 +802,9 @@ def compute_gv_appendix(
     Construye el DataFrame del apéndice GoodVibes, comparando G_ORCA vs G_GV
     para cada confórmero a todas las temperaturas.
 
-    Requiere que df_conf tenga las columnas producidas por compute_G_total()
+    Requiere que df_conf tenga las columnas producidas por compute_g_total()
     (G_total_{label}, dG_{label}_kcal, boltz_{label}, H_corr, S_total_EhK).
-    Si compute_G_total() no fue llamado previamente (el flujo normal de
+    Si compute_g_total() no fue llamado previamente (el flujo normal de
     collect_results no lo llama), este módulo lo invoca internamente.
 
     Columnas del DataFrame resultante:
@@ -840,24 +840,25 @@ def compute_gv_appendix(
     Migrado desde results_collector.py:2284-2465 (Issue C1, segunda mitad).
     `WORK_ROOT` reemplazado por `runs_root: Path` explícito (Issue C0).
 
-    ⚠️ DEPENDENCIA PENDIENTE DE VERIFICAR: cuando df_conf todavía no trae
-    las columnas de compute_G_total() (rama por defecto si nadie lo llamó
-    antes), el legacy invoca `parse_thermochem`, `compute_G_total()` y
-    `compute_boltzmann_multiT()` -- las dos últimas viven en
-    `results_collector.py` en el legacy y, según el esqueleto de la skill
-    maa-repackaging, deberían terminar en `analysis/boltzmann.py`. Ese
-    módulo todavía no está confirmado como migrado al momento de escribir
-    esto, así que el import de abajo asume esa ruta (`.boltzmann`) y
-    lanzará un ImportError explícito si no existe todavía -- no se
-    silencia el problema ni se reimplementa esa lógica acá para no
-    duplicarla otra vez.
+    Migrado desde results_collector.py:2284-2465 (Issue C1, segunda mitad).
+    `WORK_ROOT` reemplazado por `runs_root: Path` explícito (Issue C0).
+
+    `compute_g_total()` y `compute_boltzmann_multi_t()` viven en
+    `analysis/boltzmann.py` (migración C2, que las renombró de
+    `compute_G_total`/`compute_boltzmann_multiT` a snake_case). Fix
+    (2026-07-08): este import usaba todavía los nombres camelCase viejos
+    y rompía con ImportError en cuanto se llegaba a esta rama —
+    detectado por
+    `tests/test_analysis/test_goodvibes.py::test_compute_gv_appendix_boltzmann_import_names_bug`.
+    Corregido a los nombres reales; no se reimplementa esa lógica acá
+    para no duplicarla.
     """
     try:
-        from .boltzmann import compute_G_total, compute_boltzmann_multiT
+        from .boltzmann import compute_boltzmann_multi_t, compute_g_total
     except ImportError as exc:
         raise ImportError(
-            "compute_gv_appendix() necesita compute_G_total() y "
-            "compute_boltzmann_multiT() desde analysis/boltzmann.py, que "
+            "compute_gv_appendix() necesita compute_g_total() y "
+            "compute_boltzmann_multi_t() desde analysis/boltzmann.py, que "
             "todavía no parece estar migrado (o vive en otra ruta). "
             "Migrar results_collector.py -> analysis/boltzmann.py primero, "
             "o ajustar este import si el módulo quedó en otro lugar."
@@ -868,7 +869,7 @@ def compute_gv_appendix(
     mol_dir = runs_root / mol_name
 
     # ── Asegurar correcciones térmicas ORCA en df_conf ────────────────────
-    # Si compute_G_total ya fue llamado, G_total_298K existirá.
+    # Si compute_g_total ya fue llamado, G_total_298K existirá.
     # Si no (flujo normal), lo recalculamos internamente aquí.
     if "G_total_298K" not in df_conf.columns or "H_corr" not in df_conf.columns:
         # Cargar termoquímica ORCA para cada confórmero
@@ -880,8 +881,8 @@ def compute_gv_appendix(
             tc = parse_thermochem(freq_out, T=T_STD)
             _thermochem_cache.append(tc if tc.get("ok") else None)
         df_work["_thermochem"] = _thermochem_cache
-        df_work = compute_G_total(df_work)
-        df_work = compute_boltzmann_multiT(df_work)
+        df_work = compute_g_total(df_work)
+        df_work = compute_boltzmann_multi_t(df_work)
     else:
         df_work = df_conf.copy()
 

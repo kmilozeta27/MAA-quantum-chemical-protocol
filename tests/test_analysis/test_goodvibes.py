@@ -14,17 +14,21 @@ tarea de docstring+contrato mínimo).
 
 Incluye además un test de regresión (test_compute_gv_appendix_*) para el
 bug ya identificado en la migración: compute_gv_appendix() (línea ~856)
-importa `compute_G_total, compute_boltzmann_multiT` (camelCase) desde
+importaba `compute_G_total, compute_boltzmann_multiT` (camelCase) desde
 .boltzmann, pero boltzmann.py migró a snake_case
-(compute_g_total, compute_boltzmann_multi_t). Este test debe FALLAR
-hasta que se corrija el import en goodvibes.py -- es intencional, mismo
-patrón que test_goodvibes_symbols_used_by_pka_cycle_exist() en
-test_imports.py.
+(compute_g_total, compute_boltzmann_multi_t). Corregido (2026-07-08) --
+ver también el fix en el propio docstring/import de
+goodvibes.py::compute_gv_appendix(). El test se reescribió porque su
+versión original afirmaba (mal) que debía fallar chequeando si
+`boltzmann.py` tenía el nombre camelCase viejo -- eso apuntaba al
+módulo equivocado y nunca iba a pasar. Ahora inspecciona el import real
+dentro de compute_gv_appendix().
 """
 
 from __future__ import annotations
 
 import importlib
+import inspect
 import json
 import tempfile
 from pathlib import Path
@@ -221,34 +225,72 @@ def test_parse_goodvibes_json_prefers_ts_over_direct_s():
 #  (ver "Top of mind" -- goodvibes.py::compute_gv_appendix())
 # ─────────────────────────────────────────────
 
-def test_compute_gv_appendix_boltzmann_import_names_bug():
-    """compute_gv_appendix() (goodvibes.py, línea ~856) hace:
+def test_compute_gv_appendix_imports_boltzmann_with_correct_names():
+    """Regresión del bug de import camelCase/snake_case en
+    `compute_gv_appendix()` (goodvibes.py, línea ~856).
 
-        from .boltzmann import compute_G_total, compute_boltzmann_multiT
+    NOTA sobre la versión anterior de este test: afirmaba (mal) que
+    debía FALLAR hasta que se corrigiera el import en goodvibes.py, pero
+    su assert real chequeaba `hasattr(boltzmann, "compute_G_total")` --
+    es decir, testeaba si `boltzmann.py` tenía el nombre camelCase
+    VIEJO. Eso nunca iba a pasar (ni debía pasar: boltzmann.py está bien
+    como está, en snake_case desde la migración C2) sin importar si
+    alguien arreglaba goodvibes.py o no. El bug real vivía en el import
+    de `compute_gv_appendix()`, no en `boltzmann.py`, así que el test
+    apuntaba al módulo equivocado.
 
-    pero boltzmann.py fue migrado a snake_case
-    (compute_g_total, compute_boltzmann_multi_t, ver Completed migrations
-    / C2). Este test debe FALLAR hasta que se corrija esa línea de
-    import en goodvibes.py -- es la misma clase de bug que D0 (nombres
-    viejos sobreviviendo a una migración de convención), solo que en
-    goodvibes.py en vez de boltzmann.py, y en sentido inverso (goodvibes
-    todavía usa el nombre viejo).
-
-    Fix sugerido: cambiar el import a
-        from .boltzmann import compute_g_total, compute_boltzmann_multi_t
-    y renombrar los dos usos locales (líneas ~883-884) a snake_case.
+    Este test corregido valida el lugar real del bug: que
+    `compute_gv_appendix()` importa `compute_g_total`/
+    `compute_boltzmann_multi_t` (snake_case, los nombres reales que
+    expone boltzmann.py) y ya no los nombres camelCase viejos.
     """
+    goodvibes = importlib.import_module("maaqc.analysis.goodvibes")
     boltzmann = importlib.import_module("maaqc.analysis.boltzmann")
 
-    assert hasattr(boltzmann, "compute_G_total"), (
-        "maaqc.analysis.boltzmann.compute_G_total no existe -- fue "
-        "renombrado a compute_g_total en la migración C2. "
-        "goodvibes.py:~856 (compute_gv_appendix) todavía importa con el "
-        "nombre camelCase viejo; actualizar ese import a snake_case."
+    # boltzmann.py es la fuente de verdad: debe exponer los nombres
+    # snake_case (migración C2) y NUNCA los alias camelCase viejos.
+    assert hasattr(boltzmann, "compute_g_total")
+    assert hasattr(boltzmann, "compute_boltzmann_multi_t")
+    assert not hasattr(boltzmann, "compute_G_total")
+    assert not hasattr(boltzmann, "compute_boltzmann_multiT")
+
+    # El bug real: el import DENTRO de compute_gv_appendix() en
+    # goodvibes.py debe referenciar los nombres snake_case correctos.
+    # Se busca la línea de import real (no el docstring de la función,
+    # que legítimamente menciona el nombre viejo en la explicación del
+    # fix) para no generar falsos positivos por coincidencia de texto.
+    source_lines = inspect.getsource(goodvibes.compute_gv_appendix).splitlines()
+    import_lines = [ln for ln in source_lines if ln.strip().startswith("from .boltzmann import")]
+    assert import_lines, (
+        "compute_gv_appendix() ya no tiene un 'from .boltzmann import ...' "
+        "-- revisar si el import se movió de lugar."
     )
-    assert hasattr(boltzmann, "compute_boltzmann_multiT"), (
-        "maaqc.analysis.boltzmann.compute_boltzmann_multiT no existe -- "
-        "fue renombrado a compute_boltzmann_multi_t en la migración C2. "
-        "goodvibes.py:~856 (compute_gv_appendix) todavía importa con el "
-        "nombre camelCase viejo; actualizar ese import a snake_case."
+    import_line = import_lines[0]
+
+    assert "compute_g_total" in import_line, (
+        "compute_gv_appendix() ya no importa compute_g_total() desde "
+        ".boltzmann -- revisar si el fix se revirtió."
     )
+    assert "compute_boltzmann_multi_t" in import_line, (
+        "compute_gv_appendix() ya no importa compute_boltzmann_multi_t() "
+        "desde .boltzmann -- revisar si el fix se revirtió."
+    )
+    assert "compute_G_total" not in import_line, (
+        "compute_gv_appendix() todavía importa compute_G_total() "
+        "(camelCase) desde .boltzmann -- ese nombre no existe en "
+        "boltzmann.py (fue renombrado a compute_g_total en la "
+        "migración C2); esto revienta con ImportError en cuanto se "
+        "invoca la función."
+    )
+    assert "compute_boltzmann_multiT" not in import_line, (
+        "compute_gv_appendix() todavía importa compute_boltzmann_multiT() "
+        "(camelCase) desde .boltzmann -- ese nombre no existe en "
+        "boltzmann.py (fue renombrado a compute_boltzmann_multi_t en la "
+        "migración C2); esto revienta con ImportError en cuanto se "
+        "invoca la función."
+    )
+
+    # Prueba directa (no solo de texto): el import real que hace
+    # goodvibes.py contra boltzmann.py debe poder ejecutarse sin
+    # ImportError -- esto es lo que antes reventaba en producción.
+    from maaqc.analysis.boltzmann import compute_boltzmann_multi_t, compute_g_total  # noqa: F401
