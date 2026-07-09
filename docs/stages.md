@@ -107,23 +107,44 @@ no en `Stage.requires`.
 - `atoms_to_xyz_block()`, `read_all_conformers()`, `extract_conf_ids_from_xyz()`.
 
 ### `io/parsing.py`
-- Parsers de salidas: energía DFT, frecuencias imaginarias, espectro ADC2 (RIGHT).
-- `extract_sp_energy()`, `check_no_imaginary()`, `extract_adc2_lambda()`, etc.
+- Parsers de salidas: energía DFT, frecuencias imaginarias, espectro ADC2 (bloque LEFT-RIGHT con fallback a RIGHT) y espectro TDDFT.
+- `extract_sp_energy()`, `check_no_imaginary()`, `parse_adc2_excitations()`, `parse_tddft_excitations()`, `extract_adc2_lambda()`, etc.
 
 ### `analysis/results_collector.py`
 - Consolidación de resultados entre estados de protonación (A, B, C, D, R).
 - Integración con `orchestrator/state.py` para resume.
 
-### `analysis/protonation_cycle.py`
+### `analysis/pka_cycle.py`
 - Cálculo de ciclo pKa vía Boltzmann con correcciones de goodvibes.
+
+## Capa `analysis/` — estado de migración
+
+Esta capa es post-procesamiento (reporte, comparación, ploteo): no bloquea
+`maaqc doctor` ni `maaqc run`/`resume`, pero sí `maaqc report` y el análisis
+final del paper. Fuente de verdad: `tests/test_analysis/test_imports.py`.
+
+| Módulo | Estado | Notas |
+|---|---|---|
+| `pka_cycle.py` | ✅ migrado completo | |
+| `boltzmann.py` | ✅ migrado completo | |
+| `goodvibes.py` | ✅ migrado completo | ⚠️ bug de import conocido en `compute_gv_appendix()` — ver "Issues pendientes" |
+| `adc2_compare.py` | ✅ migrado completo | `compare_adc2_tddft()` sin test de contrato todavía |
+| `plots.py` | ✅ migrado completo | 6/6 funciones de ploteo reales |
+| `crest_dft.py` | ✅ migrado completo | |
+| `results_collector.py` | ✅ migrado completo | |
+| `monte_carlo.py` | ❌ descartado | archivo eliminado del repo — pendiente sacarlo de `ANALYSIS_MODULES` en `test_imports.py` (el test todavía lo referencia y falla) |
+| `parse_uvvis.py` | ❌ descartado | queda el stub (`NotImplementedError`), sin llamadores en el repo; no bloquea nada |
 
 ## Issues pendientes antes de mergear a main
 
-1. **Validación end-to-end:** Comparar outputs de `maaqc run` contra `pipeline.py` legacy con moléculas reales de PAPER1.
-2. **Tests de integración:** Mock ORCA outputs, flujos completos (CREST → ADC2).
-3. **Documentación de deployment:** Instrucciones conda, conda-forge, reproducibilidad.
-4. **Tag v0-legacy:** Crear tag git sobre la versión pre-migración de `main` para preservar historial.
-5. **Review de templates:** Validar que los templates ORCA (hardcodeados en `system/constants.py`) coincidan 100% con los del legacy.
+1. **Dos bugs triviales encontrados por los tests nuevos de `analysis/` (arreglar primero, son minutos):**
+   - `tests/test_analysis/test_imports.py::ANALYSIS_MODULES` todavía lista `"monte_carlo"`, que ya no existe como archivo → `test_analysis_module_imports[monte_carlo]` falla. Sacarlo de la lista (y evaluar si `parse_uvvis` también sale, ya que está descartado igual).
+   - `analysis/goodvibes.py::compute_gv_appendix()` (línea ~856) importa `compute_G_total`/`compute_boltzmann_multiT` (camelCase) desde `.boltzmann`, pero la migración C2 renombró esos símbolos a `compute_g_total`/`compute_boltzmann_multi_t`. Revienta con `ImportError` al invocarse por la rama normal. Detectado por `test_goodvibes.py::test_compute_gv_appendix_boltzmann_import_names_bug` (falla a propósito hasta el fix).
+2. **Validación end-to-end:** Comparar outputs de `maaqc run` contra `pipeline.py` legacy con moléculas reales de PAPER1.
+3. **Tests de integración:** Mock ORCA outputs, flujos completos (CREST → ADC2). En particular `compare_adc2_tddft()` en `adc2_compare.py` sigue sin test de contrato (depende de un layout de directorio real no disponible como fixture).
+4. **Documentación de deployment:** Instrucciones conda, conda-forge, reproducibilidad.
+5. **Tag v0-legacy:** Crear tag git sobre la versión pre-migración de `main` para preservar historial.
+6. **Review de templates:** Validar que los templates ORCA (hardcodeados en `constants.py`, raíz de `src/maaqc/`) coincidan 100% con los del legacy.
 
 ## Notas de diseño y cambios respecto al legacy
 

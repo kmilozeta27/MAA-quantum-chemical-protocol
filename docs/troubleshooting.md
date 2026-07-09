@@ -63,11 +63,23 @@ conocimiento real ya validado.
 
 ## GoodVibes
 
-- Dos resoluciones independientes del intérprete Python de GoodVibes
-  (`results_collector.py:_resolve_gv_python` y
-  `protonation_cycle.py:_resolve_gv_python`) — revisar si son idénticas
-  antes de migrar a `analysis/goodvibes.py`, puede ser otra duplicación
-  del mismo tipo que los parsers de ORCA.
+- Las dos resoluciones independientes del intérprete Python de GoodVibes
+  que tenía el legacy (`results_collector.py:_resolve_gv_python` y
+  `protonation_cycle.py:_resolve_gv_python`) ya se unificaron en
+  `analysis/goodvibes.py::_resolve_gv_python()` — migración completa,
+  una sola fuente de verdad.
+
+- ⚠️ **Bug de import activo (sin corregir):** `compute_gv_appendix()`
+  (línea ~856) importa `compute_G_total`/`compute_boltzmann_multiT`
+  (camelCase) desde `analysis/boltzmann.py`, pero esos símbolos se
+  renombraron a `compute_g_total`/`compute_boltzmann_multi_t`
+  (snake_case) en la migración C2. El `try/except ImportError` de la
+  función atrapa su propio bug y reporta un mensaje engañoso ("todavía
+  no parece estar migrado") — en realidad boltzmann.py sí está migrado,
+  solo que con otro nombre. Efecto: `compute_gv_appendix()` revienta al
+  invocarse por la rama que recalcula `G_total_298K` (el flujo normal).
+  Cubierto por un test de regresión que falla a propósito hasta el fix:
+  `tests/test_analysis/test_goodvibes.py::test_compute_gv_appendix_boltzmann_import_names_bug`.
 
 ## Disco
 

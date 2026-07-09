@@ -22,22 +22,25 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es/1.0.0/).
   - `system/_orca_shared.py` — Helpers genéricos de ORCA (templates, subprocess, parsing).
   - `system/_censo_shared.py` — Helpers de CENSO (prescreen, multitemp, selección Boltzmann/auto).
   - `io/xyz.py` — I/O de XYZ unificado (lectura/escritura de confórmeros, extracción de IDs).
-  - `io/parsing.py` — Parsers de salidas ORCA/CREST/CENSO (energías, frecuencias, espectro ADC2).
+  - `io/parsing.py` — Parsers de salidas ORCA/CREST/CENSO (energías, frecuencias, espectro ADC2 y TDDFT).
   - `analysis/results_collector.py` — Consolidación de resultados entre estados de protonación.
-  - `analysis/protonation_cycle.py` — Cálculo de ciclo pKa vía Boltzmann con goodvibes.
+  - `analysis/pka_cycle.py` — Cálculo de ciclo pKa vía Boltzmann con goodvibes.
 
 - **Configuración y utilidades:**
   - `config/schema.py` — Modelos pydantic completos (RecipeConfig, ResourceConfig, CensoConfig, etc.).
   - `config/presets/` — Presets YAML de recipes (quick/standard/publication).
-  - `config/constants.py` — Constantes unificadas (templates ORCA, paths, defaults).
-  - `system/goodvibes.py` — Interfaz a goodvibes para correcciones termoquímicas.
-  - `system/xyz.py` — Utilidades de geometría (centro de masa, RMSD).
+  - `constants.py` — Constantes unificadas (templates ORCA, paths, defaults).
+  - `analysis/goodvibes.py` — Interfaz a GoodVibes para correcciones termoquímicas (`run_goodvibes`, `run_goodvibes_on_mol`, `compute_gv_appendix`). **Migración completa** — ver "Known issues" más abajo para un bug de import detectado por su propio test de regresión.
+  - `analysis/adc2_compare.py` — Comparación ADC2 vs TDDFT (`compare_adc2_tddft`, `compute_adc2_lambda_max`). **Migración completa.**
+  - `analysis/plots.py` — Las 6 funciones de ploteo (`plot_spectrum`, `plot_comparison`, `plot_adc2_tddft_comparison`, `plot_distribution`, `plot_distribution_5`, `plot_conformer_boltzmann`). **Migración completa.**
 
 - **CLI y testing:**
   - `cli.py` actualizado — busca amplia de CENSO, instrucciones de instalación de binarios faltantes.
-  - `tests/test_stages/test_opt.py`, `test_sp.py`, `test_numfreq.py` — Cobertura de migración.
-  - `tests/test_io/test_xyz.py` — Tests de I/O con fixtures (glycine).
-  - `tests/test_affinity.py` — Tests de distribución de CPU.
+  - `tests/test_stages/test_opt.py`, `test_numfreq.py`, `test_xyz.py` — Cobertura de migración.
+  - `tests/test_stages/test_affinity.py` — Tests de distribución de CPU.
+  - `tests/test_analysis/test_adc2_compare.py` — Tests de contrato para `compute_adc2_lambda_max()`/`_boltz_weighted_lmax()`, anclados a valores reales de ORCA (357.8 nm/0.416153266 ADC2, 299.2 nm/0.772302746 TDDFT). `compare_adc2_tddft()` en sí queda fuera de alcance (depende de un layout de directorio real no disponible como fixture).
+  - `tests/test_analysis/test_plots.py` — Tests de `_build_spectrum()` y las 6 funciones de ploteo (vía `pytest.importorskip("matplotlib")`, generan PNG real).
+  - `tests/test_analysis/test_goodvibes.py` — Tests de `_parse_goodvibes_dat()` (v3/v4) y `_parse_goodvibes_json()`, más un test de regresión que documenta el bug de import (ver "Known issues").
 
 ### Fixed
 - `io/xyz.py` ya no tiene stubs (`NotImplementedError`): las 3 funciones
@@ -49,11 +52,37 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es/1.0.0/).
   `shared.atoms_to_xyz_block(...)` etc. vía re-export). Se descartó
   formalmente la firma legacy `read_conformers(xyz_file, nconf)` — ver
   `docs/stages.md` y el docstring de `io/xyz.py`. Agregado
-  `tests/test_io/test_xyz.py` (usa `tests/fixtures/glycine.xyz`).
+  `tests/test_stages/test_xyz.py` (usa `tests/fixtures/glycine.xyz`).
 
 - `cmd_collect()` y `cmd_report()` en `cli.py` ahora tienen implementaciones
   reales cableadas a `analysis/results_collector.py` (para consolidar estados
   A,B,C,D,R) y módulo de reporte (HTML/MD/JSON).
+
+### Descartado (fuera de alcance de PAPER1)
+- `analysis/monte_carlo.py` — descartado, **archivo eliminado** del repo.
+- `analysis/parse_uvvis.py` — descartado, sigue como stub (`extract_lambda_max()`
+  → `NotImplementedError`) sin llamadores en ningún lado del repo; no bloquea
+  nada porque `maaqc doctor` no lo chequea.
+
+### Known issues (detectados en esta sesión, sin corregir todavía)
+- **`test_analysis_module_imports[monte_carlo]` FALLA.** `monte_carlo.py` se
+  eliminó del repo pero `tests/test_analysis/test_imports.py::ANALYSIS_MODULES`
+  todavía lo lista — el test intenta importar un módulo que ya no existe.
+  Fix: sacar `"monte_carlo"` de esa lista (y decidir si `parse_uvvis` se saca
+  también, ya que está descartado igual que monte_carlo).
+- **Bug de import real en `analysis/goodvibes.py::compute_gv_appendix()`
+  (línea ~856).** Importa `compute_G_total`/`compute_boltzmann_multiT`
+  (camelCase) desde `.boltzmann`, pero la migración C2 renombró esos símbolos
+  a `compute_g_total`/`compute_boltzmann_multi_t` (snake_case) en
+  `analysis/boltzmann.py`. El `try/except ImportError` de la función atrapa
+  su propio bug y lo reporta con un mensaje engañoso ("todavía no parece
+  estar migrado") — en realidad sí está migrado, solo que con otro nombre.
+  Efecto real: `compute_gv_appendix()` revienta con `ImportError` en cuanto
+  se la invoca por la rama que recalcula `G_total_298K` (el flujo normal).
+  Detectado y documentado por
+  `tests/test_analysis/test_goodvibes.py::test_compute_gv_appendix_boltzmann_import_names_bug`
+  (test de regresión que falla a propósito hasta que se corrija). Fix:
+  actualizar el import y los dos usos locales a snake_case.
 
 ### Migration status (legacy -> maaqc)
 Ver `docs/stages.md` para detalle por stage. **Estado actual: 7 de 7 stages 
@@ -61,9 +90,21 @@ migrados con lógica completa** (según `maaqc doctor`). La migración está
 funcional para correr el pipeline completo (CREST → CENSO → OPT → NumFreq → 
 SP → TDDFT → ADC2) con outputs equivalentes a `pipeline.py` legacy.
 
+`analysis/` (capa de post-procesamiento, no bloquea `maaqc doctor`):
+`pka_cycle.py`, `boltzmann.py`, `goodvibes.py`, `adc2_compare.py`, `plots.py`,
+`crest_dft.py`, `results_collector.py` — todos migrados completos.
+`monte_carlo.py` y `parse_uvvis.py` — descartados (ver arriba).
+
+Suite de tests: 65 tests, **63 pasan / 2 fallan** (ver "Known issues" arriba;
+ninguno de los dos bloquea `maaqc run`/`maaqc doctor`, pero sí bloquean un uso
+real de `compute_gv_appendix()` y dejan el propio test suite en rojo).
+
 Los siguientes issues quedan pendientes antes de mergear a `main`:
+- Corregir los 2 "Known issues" de arriba (triviales, minutos de trabajo).
 - Validación end-to-end con moléculas de PAPER1 reales (comparación contra legacy).
-- Tests de integración completos (mock ORCA outputs).
+- Tests de integración completos (mock ORCA outputs); en particular
+  `compare_adc2_tddft()` sigue sin test de contrato (depende de un layout de
+  directorio real no disponible como fixture todavía).
 - Documentación de deployment (conda, conda-forge).
 - Tag `v0-legacy` sobre commit HEAD de main (preservar estado pre-migración).
 
