@@ -25,22 +25,28 @@ Estado de cada módulo al momento de escribir este test (ver conversación
 de migración maa-repackaging para detalle línea por línea):
   - pka_cycle.py     : migrado completo
   - boltzmann.py     : migrado completo
-  - goodvibes.py     : migrado completo (parte 1 del Issue C1; la
-                       segunda mitad -- run_goodvibes_on_mol -- sigue
-                       siendo NotImplementedError a propósito)
-  - adc2_compare.py  : stub, compare_adc2_tddft() -> NotImplementedError
+  - goodvibes.py     : migrado completo (Issue C1 cerrado íntegro,
+                       incluyendo run_goodvibes_on_mol)
+  - adc2_compare.py  : migrado completo (compare_adc2_tddft())
   - monte_carlo.py   : stub vacío -- ni siquiera tiene funciones
                        (ver docstring del propio archivo: puede que ni
                        corresponda a código real, a confirmar con
                        kmilozeta). Igual debe importar limpio.
   - parse_uvvis.py   : stub, extract_lambda_max() -> NotImplementedError
-  - plots.py         : parcialmente migrado (plot_distribution,
-                       plot_distribution_5, plot_conformer_boltzmann
-                       reales; plot_spectrum, plot_comparison,
-                       plot_adc2_tddft_comparison -> NotImplementedError)
+  - plots.py         : migrado completo (plot_distribution,
+                       plot_distribution_5, plot_conformer_boltzmann,
+                       plot_spectrum, plot_comparison,
+                       plot_adc2_tddft_comparison, todas reales)
   - crest_dft.py     : migrado completo (analyze_crest_to_dft,
                        print_crest_dft_analysis)
   - results_collector.py : migrado completo (depende de crest_dft.py)
+
+NOTA (2026-07-08): este bloque describe estado de migración, no
+contrato -- goodvibes.py, adc2_compare.py y plots.py ya están
+completos pero todavía solo tienen cobertura de "importa sin
+explotar" acá abajo. Tests de contrato reales (que ejerciten estas
+funciones con datos) quedan pendientes -- ver TODO al final del
+archivo.
 """
 
 from __future__ import annotations
@@ -108,3 +114,30 @@ def test_constants_symbols_used_by_boltzmann_exist() -> None:
             f"maaqc.constants.{symbol} no existe; boltzmann.py depende "
             f"de este nombre exacto."
         )
+
+
+# --------------------------------------------------------------------
+# Tests de contrato reales (Tarea A, punto 2) -- HECHO, ver archivos separados
+# --------------------------------------------------------------------
+# Los tests que ejercitan las funciones reales (no solo "importa sin
+# explotar") de adc2_compare.py, plots.py y goodvibes.py viven en:
+#   - test_adc2_compare.py : compute_adc2_lambda_max(), _boltz_weighted_lmax(),
+#                            anclados con los números reales de adc2.out/
+#                            tddft.out (357.8 nm / 299.2 nm) subidos en esta
+#                            sesión. compare_adc2_tddft() en sí queda fuera
+#                            de alcance -- depende de collect_results() y de
+#                            un layout de directorio real no disponible acá.
+#   - test_plots.py        : _build_spectrum() (pura) + las 6 funciones de
+#                            ploteo, verificando que producen PNG real dado
+#                            output_path. Usa pytest.importorskip("matplotlib").
+#   - test_goodvibes.py    : _parse_goodvibes_dat() (v3 y v4 con/sin offset
+#                            de símbolo de estado) y _parse_goodvibes_json().
+#                            Incluye además un test de REGRESIÓN que debe
+#                            fallar hasta corregir el import camelCase/
+#                            snake_case en compute_gv_appendix() (ver "Top
+#                            of mind" en el contexto del proyecto).
+#
+# No se testea acá (fuera de alcance de esta tarea): run_goodvibes(),
+# run_goodvibes_on_mol() y _resolve_gv_python(), porque llaman a
+# subprocess/goodvibes real y necesitarían el binario instalado o mockear
+# subprocess.run.
