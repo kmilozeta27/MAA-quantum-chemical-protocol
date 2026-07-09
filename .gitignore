@@ -27,6 +27,7 @@ NORMAL_TERMINATION
 *.pyc
 __pycache__/
 .ipynb_checkpoints/
+*.zip
 
 # Entornos
 .venv/
