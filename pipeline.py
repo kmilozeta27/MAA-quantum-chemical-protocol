@@ -2557,19 +2557,34 @@ def stage_opt(conformers_xyz: Path, mol_dir: Path,
         for crest_lbl, atoms in zip(_crest_labels, conformers)
     ]
 
-    n_lotes = -(-len(tasks_all) // OPT_BATCH_SIZE)   # ceiling division
+    n_lotes_est = -(-len(tasks_all) // OPT_BATCH_SIZE)   # ceiling division (estimado)
     _check_cpu_budget(OPT_BATCH_SIZE, NPROCS, log)
 
-    for b_start in range(0, len(tasks_all), OPT_BATCH_SIZE):
-        batch    = tasks_all[b_start : b_start + OPT_BATCH_SIZE]
-        lote_num = b_start // OPT_BATCH_SIZE + 1
+    # BUGFIX: assign_cpu_lists() puede devolver MENOS listas que el batch_size
+    # pedido cuando no hay suficientes cores físicos independientes (está
+    # documentado en su docstring). El código anterior hacía zip(batch,
+    # cpu_lists) y lanzaba max_workers=len(batch) de todas formas — los
+    # tasks que quedaban fuera del zip nunca recibían "cpu_list" y
+    # run_orca() los lanzaba SIN taskset (mpirun "pelado", compitiendo con
+    # los jobs sí pineados). Ahora el tamaño real del lote se recorta al
+    # número de cpu_lists efectivamente disponibles, y solo se lanzan esos.
+    idx      = 0
+    lote_num = 0
+    while idx < len(tasks_all):
+        want      = min(OPT_BATCH_SIZE, len(tasks_all) - idx)
+        cpu_lists = assign_cpu_lists(want, NPROCS)
+        if not cpu_lists:
+            log.error("[OPT] no hay suficientes cores físicos independientes "
+                       "para asignar ni un solo job — abortando etapa OPT")
+            break
+        batch    = tasks_all[idx: idx + len(cpu_lists)]
+        lote_num += 1
         ids      = [t["conf_id"] for t in batch]
 
-        cpu_lists = assign_cpu_lists(len(batch), NPROCS)
         for t, cl in zip(batch, cpu_lists):
             t["cpu_list"] = cl
 
-        log.info(f"[OPT] ── Lote {lote_num}/{n_lotes}: {ids}  "
+        log.info(f"[OPT] ── Lote {lote_num}/~{n_lotes_est}: {ids}  "
                  f"(cores: {[','.join(map(str, cl)) for cl in cpu_lists]})")
 
         with ThreadPoolExecutor(max_workers=len(batch)) as pool:
@@ -2593,6 +2608,8 @@ def stage_opt(conformers_xyz: Path, mol_dir: Path,
                 pool.shutdown(wait=False, cancel_futures=True)
                 _kill_active_procs()
                 sys.exit(130)
+
+        idx += len(cpu_lists)
 
     log.info(f"[OPT] {len(successful)}/{len(conformers)} confórmeros optimizados")
     return successful
@@ -2712,16 +2729,27 @@ def stage_sp(freq_dirs: list[Path], mol_dir: Path,
 
     _check_cpu_budget(_batch, _nprocs, log)
 
-    for b_start in range(0, len(tasks_all), _batch):
-        batch    = tasks_all[b_start : b_start + _batch]
-        lote_num = b_start // _batch + 1
+    # BUGFIX: ver comentario equivalente en stage_opt — assign_cpu_lists()
+    # puede devolver menos listas que _batch; recortamos el lote real al
+    # número de cpu_lists disponibles para que ningún job se lance sin
+    # taskset asignado.
+    idx      = 0
+    lote_num = 0
+    while idx < len(tasks_all):
+        want      = min(_batch, len(tasks_all) - idx)
+        cpu_lists = assign_cpu_lists(want, _nprocs)
+        if not cpu_lists:
+            log.error("[SP] no hay suficientes cores físicos independientes "
+                       "para asignar ni un solo job — abortando etapa SP")
+            break
+        batch    = tasks_all[idx: idx + len(cpu_lists)]
+        lote_num += 1
         ids      = [t["conf_id"] for t in batch]
 
-        cpu_lists = assign_cpu_lists(len(batch), _nprocs)
         for t, cl in zip(batch, cpu_lists):
             t["cpu_list"] = cl
 
-        log.info(f"[SP] ── Lote {lote_num}/{n_lotes}: {ids}  "
+        log.info(f"[SP] ── Lote {lote_num}/~{n_lotes}: {ids}  "
                  f"(cores: {[','.join(map(str, cl)) for cl in cpu_lists]})")
 
         with ThreadPoolExecutor(max_workers=len(batch)) as pool:
@@ -2740,6 +2768,8 @@ def stage_sp(freq_dirs: list[Path], mol_dir: Path,
                 pool.shutdown(wait=False, cancel_futures=True)
                 _kill_active_procs()
                 sys.exit(130)
+
+        idx += len(cpu_lists)
 
     log.info(f"[SP] {len(successful)}/{len(freq_dirs)} completados")
     return successful
@@ -2838,19 +2868,30 @@ def stage_tddft(sp_dirs: list[Path], mol_dir: Path,
         for d in sp_dirs
     ]
 
-    n_lotes = -(-len(tasks_all) // TDDFT_BATCH_SIZE)
+    n_lotes_est = -(-len(tasks_all) // TDDFT_BATCH_SIZE)   # ceiling division (estimado)
     _check_cpu_budget(TDDFT_BATCH_SIZE, NPROCS_TDDFT, log)
 
-    for b_start in range(0, len(tasks_all), TDDFT_BATCH_SIZE):
-        batch    = tasks_all[b_start : b_start + TDDFT_BATCH_SIZE]
-        lote_num = b_start // TDDFT_BATCH_SIZE + 1
+    # BUGFIX: ver comentario equivalente en stage_opt/stage_sp — assign_cpu_lists()
+    # puede devolver menos listas que TDDFT_BATCH_SIZE; recortamos el lote real al
+    # número de cpu_lists disponibles para que ningún job se lance sin taskset
+    # asignado (el mpirun "pelado" visto en ps -eLf).
+    idx      = 0
+    lote_num = 0
+    while idx < len(tasks_all):
+        want      = min(TDDFT_BATCH_SIZE, len(tasks_all) - idx)
+        cpu_lists = assign_cpu_lists(want, NPROCS_TDDFT)
+        if not cpu_lists:
+            log.error("[TDDFT] no hay suficientes cores físicos independientes "
+                       "para asignar ni un solo job — abortando etapa TDDFT")
+            break
+        batch    = tasks_all[idx: idx + len(cpu_lists)]
+        lote_num += 1
         ids      = [t["conf_id"] for t in batch]
 
-        cpu_lists = assign_cpu_lists(len(batch), NPROCS_TDDFT)
         for t, cl in zip(batch, cpu_lists):
             t["cpu_list"] = cl
 
-        log.info(f"[TDDFT] ── Lote {lote_num}/{n_lotes}: {ids}  "
+        log.info(f"[TDDFT] ── Lote {lote_num}/~{n_lotes_est}: {ids}  "
                  f"(cores: {[','.join(map(str, cl)) for cl in cpu_lists]})")
 
         with ThreadPoolExecutor(max_workers=len(batch)) as pool:
@@ -2869,6 +2910,8 @@ def stage_tddft(sp_dirs: list[Path], mol_dir: Path,
                 pool.shutdown(wait=False, cancel_futures=True)
                 _kill_active_procs()
                 sys.exit(130)
+
+        idx += len(cpu_lists)
 
     log.info(f"[TDDFT] {len(successful)}/{len(sp_dirs)} completados")
     return successful
@@ -3336,8 +3379,21 @@ def assign_cpu_lists(batch_size: int, nprocs_per_job: int) -> list[list[int]]:
             lists.append([cpu])
 
     else:
-        full_pool = [c for block in P_CORE_BLOCKS for c in block] + \
-                    E_CORE_SINGLES + LP_CORE_SINGLES
+        # BUGFIX: para nprocs_per_job >= 3 NO se puede meter los P_CORE_BLOCKS
+        # combinados en el mismo pool secuencial que los E-cores. Cada bloque
+        # P-core son 2 CPUs lógicas (SMT) respaldadas por 1 solo core físico;
+        # los dos bloques juntos ([0,1,2,3]) son 4 CPUs lógicas pero solo 2
+        # cores físicos. Trocear ese pool en chunks de nprocs_per_job=4 le
+        # asignaba a un job 4 "cores" que en realidad son 2 físicos con HT,
+        # produciendo oversubscription 2x (el patrón de utilización 66/33
+        # observado: ese job compite consigo mismo por 2 cores reales
+        # mientras los otros jobs, en E-cores reales, sí rinden ~100%).
+        # Para trabajos anchos (nprocs_per_job >= 3) solo se reparten cores
+        # físicamente independientes: E-cores primero, LP E-cores como
+        # último recurso. Los P-core blocks quedan excluidos aquí — no hay
+        # forma de darle 3+ hilos a un job y que sigan siendo físicamente
+        # reales dentro de un bloque de 2 hilos SMT.
+        full_pool = list(E_CORE_SINGLES) + list(LP_CORE_SINGLES)
         idx = 0
         for _ in range(batch_size):
             chunk = full_pool[idx: idx + nprocs_per_job]
