@@ -39,6 +39,7 @@ from typing import Optional
 from ase.io import read as ase_read
 from ase.io import write as ase_write
 
+from maaqc.io.xyz import conf_token_from_comment
 from maaqc.system._orca_shared import (
     USE_NOHUP,
     _apply_nohup,
@@ -272,8 +273,8 @@ def extract_conformers_by_id(
             line = raw_lines[li].strip()
             if line.isdigit() and int(line) == n_atoms:
                 comment = raw_lines[li + 1].strip() if li + 1 < len(raw_lines) else ""
-                token = comment.split()[0] if comment.split() else ""
-                if token.startswith("CONF"):
+                token = conf_token_from_comment(comment)
+                if token:
                     frame_index[token] = all_frames[fi]
                 fi += 1
                 li += n_atoms + 2
@@ -281,9 +282,9 @@ def extract_conformers_by_id(
                 li += 1
     except Exception:
         for atoms in all_frames:
-            comment = atoms.info.get("comment", "") or atoms.info.get("description", "")
-            token = str(comment).split()[0] if comment else ""
-            if token.startswith("CONF"):
+            comment = str(atoms.info.get("comment", "") or atoms.info.get("description", ""))
+            token = conf_token_from_comment(comment)
+            if token:
                 frame_index[token] = atoms
 
     selected = []
@@ -335,14 +336,9 @@ def select_nconf_boltzmann(
                     n_atoms = nat
                 if nat == n_atoms and li + 1 < len(lines):
                     comment = lines[li + 1].strip()
-                    m = re.search(r'(CONF\d+)=', comment)
-                    if m:
-                        xyz_conf_ids.append(m.group(1))
-                    else:
-                        for tok in comment.split():
-                            if tok.startswith("CONF"):
-                                xyz_conf_ids.append(tok)
-                                break
+                    token = conf_token_from_comment(comment)
+                    if token:
+                        xyz_conf_ids.append(token)
                     li += nat + 2
                     continue
             li += 1
