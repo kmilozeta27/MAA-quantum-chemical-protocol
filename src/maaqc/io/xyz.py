@@ -65,6 +65,34 @@ def read_all_conformers(xyz_file: Path) -> list:
     return all_conf if isinstance(all_conf, list) else [all_conf]
 
 
+def conf_token_from_comment(comment: str) -> Optional[str]:
+    """Extrae el token 'CONF#' de una línea de comentario XYZ, sea cual
+    sea su formato:
+      - extended-XYZ de ASE (CENSO 3.x): 'Properties=species:S:1:pos:R:3
+        CONF1=T pbc="F F F"' -> el token es un par key=value que puede
+        estar en cualquier posición, no necesariamente la primera.
+      - plain XYZ con CONF# como primera palabra del comentario.
+    CREST crudo (crest_conformers.xyz) NUNCA tiene este token — el
+    mapeo ahí es puramente posicional (frame N -> CONF{N+1}), y esta
+    función correctamente devuelve None en ese caso; el llamador debe
+    tener su propio fallback posicional, no asumir que esto siempre
+    matchea.
+
+    Regla: buscar primero el patrón 'CONF#=' en cualquier parte del
+    comentario (formato ASE), y solo si eso falla, caer al chequeo de
+    primera-palabra (formato plain). NO usar únicamente
+    `comment.split()[0].startswith("CONF")` — eso rompe con extended-XYZ
+    porque la primera palabra ahí es 'Properties=...', no 'CONF#'.
+    """
+    m = re.search(r"(CONF\d+)=", comment)
+    if m:
+        return m.group(1)
+    for tok in comment.split():
+        if tok.startswith("CONF"):
+            return tok
+    return None
+
+
 def extract_conf_ids_from_xyz(source_xyz: Path) -> dict[int, str]:
     """{índice_0based → 'CONF#'} leyendo los comentarios extXYZ/plain del
     multi-XYZ. Preserva la trazabilidad CONF39 → conf_39 en vez de
@@ -88,14 +116,9 @@ def extract_conf_ids_from_xyz(source_xyz: Path) -> dict[int, str]:
                 n_atoms = nat
             if nat == n_atoms and line_idx + 1 < len(raw_lines):
                 comment = raw_lines[line_idx + 1].strip()
-                m = re.search(r"(CONF\d+)=", comment)
-                if m:
-                    result[frame_idx] = m.group(1)
-                else:
-                    for tok in comment.split():
-                        if tok.startswith("CONF"):
-                            result[frame_idx] = tok
-                            break
+                token = conf_token_from_comment(comment)
+                if token:
+                    result[frame_idx] = token
                 frame_idx += 1
                 line_idx += nat + 2
                 continue
