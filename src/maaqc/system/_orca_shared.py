@@ -25,6 +25,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -66,6 +67,29 @@ def _apply_nohup(cmd: list[str]) -> list[str]:
     return ["nohup"] + cmd if USE_NOHUP else cmd
 
 
+def _kill_one(p: subprocess.Popen, sig: "signal.Signals") -> None:
+    """Manda `sig` al proceso registrado en `_active_procs`.
+
+    Si se lanzó con `start_new_session=True` (USE_NOHUP), `p.pid` es el
+    PGID del grupo completo (nohup → taskset → orca → hijos MPI internos
+    de ORCA), así que usamos `os.killpg` para llegar a todo el árbol de
+    una sola vez — `p.terminate()`/`p.kill()` solo le pegan a `nohup`,
+    dejando el resto huérfano y reparentado a init (bug original).
+
+    Si USE_NOHUP es False, `p.pid` vive en el mismo grupo de procesos que
+    el propio intérprete Python (no hay start_new_session), así que NO
+    usamos killpg acá — mataría potencialmente al proceso padre también.
+    En ese caso se manda la señal solo al PID directo.
+    """
+    try:
+        if USE_NOHUP:
+            os.killpg(os.getpgid(p.pid), sig)
+        else:
+            p.send_signal(sig)
+    except (ProcessLookupError, OSError):
+        pass
+
+
 def kill_active_procs() -> None:
     """Mata todos los subprocesos ORCA/taskset activos registrados.
 
@@ -76,18 +100,12 @@ def kill_active_procs() -> None:
     with _procs_lock:
         procs = list(_active_procs)
     for p in procs:
-        try:
-            p.terminate()
-        except OSError:
-            pass
+        _kill_one(p, signal.SIGTERM)
     for p in procs:
         try:
             p.wait(timeout=3)
         except subprocess.TimeoutExpired:
-            try:
-                p.kill()
-            except OSError:
-                pass
+            _kill_one(p, signal.SIGKILL)
 
 
 # ─────────────────────────────────────────────
@@ -455,8 +473,15 @@ def run_orca(
         try:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+            # Mismo bug que kill_active_procs(): proc.kill() solo mataría
+            # a "nohup", dejando taskset/orca/hijos MPI huérfanos. Usamos
+            # el mismo helper que manda la señal a todo el grupo.
+            _kill_one(proc, signal.SIGTERM)
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                _kill_one(proc, signal.SIGKILL)
+                proc.wait()
             log.error(f"  ✗  {inp_file.name} TIMEOUT ({timeout_hours} h)")
             return False
         finally:
