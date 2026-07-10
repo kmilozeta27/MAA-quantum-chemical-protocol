@@ -53,6 +53,7 @@ from maaqc.analysis import report as report_mod
 from maaqc.analysis import results_collector as rc
 from maaqc.config.schema import RecipeConfig, load_recipe
 from maaqc.orchestrator import dag, state
+from maaqc.orchestrator.input_resolver import materialize_entry_input
 from maaqc.stages.base import Stage
 from maaqc.system.platform_detect import resolve_bin
 
@@ -221,6 +222,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     error = _require_stages(stage_names, registry, pending)
     if error:
         print(f"[maaqc] {error}", file=sys.stderr)
+        return 1
+
+    input_error = materialize_entry_input(
+        args.input, workdir, config, ensemble_arg=getattr(args, "ensemble", None),
+    )
+    if input_error:
+        print(f"[maaqc] {input_error}", file=sys.stderr)
         return 1
 
     start_index = state.resolve_resume_index(workdir, stage_names, registry, config)
@@ -494,6 +502,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--workdir", default=None, help="Directorio de trabajo (default: junto al input)")
     p_run.add_argument("--entry", choices=entry_choices, default=None, help="Override de config.entry")
     p_run.add_argument("--reference", default=None, help="Para --entry calibrated (ej. shinorine)")
+    p_run.add_argument(
+        "--ensemble", default=None,
+        help="Multi-XYZ de confórmeros ya generado (requerido si --entry crest-ensemble)",
+    )
     p_run.set_defaults(func=cmd_run)
 
     p_resume = subparsers.add_parser("resume", help="Retoma una corrida existente en --workdir")
