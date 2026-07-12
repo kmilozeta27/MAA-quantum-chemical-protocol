@@ -174,6 +174,14 @@ MULT       = 1                      # multiplicidad siempre 1
 CREST_TIMEOUT_HOURS = 24.0          # timeout CREST (horas)
 CENSO_TIMEOUT_HOURS = 24.0          # timeout CENSO pre-screening (horas)
 
+# Número de slots de cores para coordinar los SP/OPT paralelos internos
+# de CENSO (ver MAAQC_CENSO_SLOTS junto a build_omp_env() y
+# partition_cpu_pool_into_slots()). Requiere el parche local en
+# orca_processor.py (censo_patch/) para tener efecto — sin el parche,
+# esta variable no hace nada dañino (fail-open del lado de CENSO), pero
+# tampoco resuelve la colisión de cores entre sub-jobs paralelos.
+MAAQC_CENSO_N_SLOTS = 2
+
 # Los defaults de recursos (NPROCS, MAXCORE, etc.) se inicializan más abajo
 # por ResourceProfile.detect() tras leer la topología real del sistema.
 # Estos valores son placeholders que main() sobreescribe siempre.
@@ -194,29 +202,184 @@ TDDFT_BATCH_SIZE = 2
 # OMP_ENV se construye bajo demanda en build_omp_env() para que siempre
 # refleje el valor actualizado de NPROCS (nunca queda obsoleto si el
 # usuario pasa --nprocs desde CLI).
-def build_omp_env(nprocs: int) -> dict:
-    return {
+#
+# ── Historial del fix de binding MPI (OpenMPI 5.0.10 / PRTE) ──────────────
+# Las variables OMPI_MCA_hwloc_base_binding_policy / rmaps_base_mapping_policy
+# usadas hasta ahora son el namespace VIEJO (pre-5.0, runtime ORTE). Desde
+# que Open MPI ≥5.0 migró el runtime a PRTE, esas variables se renombraron
+# y viven bajo el prefijo PRTE_MCA_ — pero además, fijar la política de
+# mapping vía PRTE_MCA_rmaps_default_mapping_policy=pe-list=... como
+# "default" del DVM tampoco sirve: PRTE lo rechaza explícitamente con el
+# error "unsupported-default-policy" (confirmado empíricamente en este
+# equipo). La única vía que PRTE acepta para un pe-list explícito es
+# --map-by en la línea de comandos de mpirun/prterun — que es justamente
+# lo que ORCA invoca internamente sin exponer flags.
+#
+# Solución: un wrapper de `mpirun` (ver scripts/mpirun-wrapper.sh, symlink
+# en PATH antes que el mpirun real) que lee la variable MAAQC_PE_LIST y le
+# inyecta `--map-by pe-list=<lista>:ORDERED:hwtcpus --bind-to hwthread` al
+# mpirun real. build_omp_env() solo necesita setear esa variable — el
+# ORDERED es imprescindible (sin él, pe-list solo restringe el CONJUNTO de
+# CPUs disponibles para el grupo de ranks, no asigna 1 CPU por rank, que
+# es el bug original que motivó todo este historial).
+#
+# ── Bug #2 del mismo mecanismo (julio 2026) ────────────────────────────
+# Con el wrapper instalado, ORCA seguía usando solo 6/12 cores en batches
+# que deberían repartirse en 12. Diagnóstico con `mpirun --display-map
+# --do-not-launch`, `lstopo` y pruebas directas de `pe-list`/`rankfile`
+# contra /proc/<pid>/status: PRTE interpreta CUALQUIER lista numérica que
+# le pases (pe-list=, rankfile con PU:N, rankfile con slots=N) como
+# ÍNDICE DE CORE, nunca como PU/hilo de hardware — confirmado en
+# `mpirun --display map`: `Cpu Type: CORE`. Esto es independiente del
+# flag de --bind-to; ese flag solo controla la granularidad DEL BINDING
+# una vez que el core ya fue resuelto, no qué tabla usa el mapper para
+# leer los números de la lista.
+#
+# taskset -c, en cambio, sí usa números de CPU lógica (PU) directos —
+# confirmado siempre correcto vía /proc/<pid>/status en todos los tests.
+# Como MAAQC_PE_LIST se construía con la MISMA lista que taskset (números
+# de PU), y PRTE la leía como índices de Core, cada PU pedida terminaba
+# resolviendo a un core físico distinto — en la zona E-core (1 PU por
+# core) esto se manifestaba como un offset de +2 constante; en la zona
+# P-core (2 PUs por core, SMT) como un agrupamiento inesperado.
+#
+# Fix: MAAQC_PE_LIST se arma traduciendo cada PU de cpu_list a su índice
+# de Core vía PU_TO_CORE (tabla derivada de `lstopo`, ver junto a
+# P_CORE_BLOCKS/E_CORE_SINGLES/LP_CORE_SINGLES). taskset sigue recibiendo
+# cpu_list crudo — esa ruta nunca tuvo el bug.
+#
+# ── Bug #1 del mismo mecanismo (julio 2026) — pe-list compartido entre
+#    subjobs paralelos de CENSO ───────────────────────────────────────────
+# Con bind-to hwthread ya corregido en el wrapper, CENSO seguía saturando
+# solo 2 cores físicos (4/12 hilos) al correr sus SP internos en paralelo,
+# con throttling térmico medido (102°C). Diagnóstico vía `ps --forest` +
+# /proc/<pid>/environ: CENSO lanzaba 3 sub-jobs de SP en paralelo, cada
+# uno con su propio `mpirun -np 4`, y los TRES heredaban el MISMO
+# MAAQC_PE_LIST (idéntico string, ej. "0,0,1,1,2,3,4,5,6,7,8,9"). Con
+# :ORDERED, cada invocación de prterun con -np 4 solo consume los
+# primeros 4 elementos de la lista — los tres subjobs colapsaban sobre
+# el mismo Core 0/Core 1, mientras el resto del pool (Cores 2-9) quedaba
+# ocioso.
+#
+# Causa: MAAQC_PE_LIST se fija UNA sola vez, al lanzar el proceso `censo`
+# padre (ver _run_censo_locked() / stage_censo_prescreen()), vía el `env`
+# que se le pasa a subprocess.Popen. CENSO es quien decide internamente
+# (Dask + xtb --parallel) cuántos SP correr en paralelo y cuándo — esas
+# decisiones son opacas a pipeline.py, y cada `mpirun` que CENSO invoca
+# internamente hereda el entorno del proceso padre tal cual (fork/exec
+# copia el environ salvo que algo lo sobreescriba explícitamente, y nada
+# en el árbol de CENSO lo hace). Como MAAQC_PE_LIST es una única lista
+# fija pensada para 1 sola invocación de mpirun, no para N invocaciones
+# concurrentes que no coordinan entre sí qué porción del pool les toca,
+# el resultado es que las N invocaciones compiten por el mismo subconjunto
+# en vez de repartirse el pool completo.
+#
+# Fix (mitigación, no solución completa — ver nota en assign_cpu_pool()):
+# build_omp_env() ahora acepta set_pe_list=False para los llamados desde
+# el camino de CENSO (_run_censo_locked() vía stage_censo_prescreen()).
+# Con set_pe_list=False, taskset -c sigue aplicándose igual (ese es el
+# límite duro real, confina TODO el árbol de CENSO al pool asignado por
+# assign_cpu_pool()) pero MAAQC_PE_LIST no se setea — el wrapper de
+# mpirun hace no-op si la variable no está presente, así que cada
+# invocación interna de mpirun que CENSO lance queda libre de repartirse
+# dentro del pool completo (vía el scheduler del kernel + hwloc, sin
+# --map-by forzado), en vez de forzar los 4 primeros elementos de una
+# lista fija idéntica en las N invocaciones simultáneas.
+#
+# Esto NO es pinning óptimo (no hay garantía de que el kernel reparta
+# igual de bien que un --map-by explícito por-invocación), pero es
+# estrictamente mejor que el estado con el bug: antes, N invocaciones
+# garantizadamente colisionaban en el mismo subconjunto pequeño; con
+# set_pe_list=False, quedan libres de usar cualquier CPU del pool
+# confinado por taskset, sin colisión forzada.
+#
+# ── Solución completa (julio 2026): MAAQC_CENSO_SLOTS + parche en
+#    CENSO ──────────────────────────────────────────────────────────────
+# set_pe_list=False deja el reparto librado al kernel, que en la práctica
+# seguía mostrando colisión parcial entre 2 SP paralelos (ambos arrancando
+# su propio binding independiente desde Core 0). La solución completa
+# requiere coordinar los N sub-jobs de CENSO explícitamente, pero como
+# CENSO congela ENVIRON una sola vez (ver params.py: ENVIRON =
+# os.environ.copy()) y todas las llamadas paralelas a ORCA heredan ese
+# mismo diccionario, no hay forma de diferenciar el entorno por sub-job
+# sin modificar CENSO — no existe ningún gancho de env-por-tarea expuesto
+# (confirmado leyendo censo/parallel.py, processing/processor.py y
+# processing/orca_processor.py: LocalCluster corre con n_workers=1 y un
+# solo pool de hilos; cada llamada a _make_call() cae a env=ENVIRON salvo
+# que _sp()/opt() en orca_processor.py pasen un env explícito, que en el
+# código stock NO hacen).
+#
+# Por eso además de este env global (para CREST, ORCA vía run_orca(), y
+# el taskset del proceso censo padre), se instaló un parche local en
+# CENSO (ver /home/kmilozeta/CENSO/... processing/orca_processor.py,
+# backup en orca_processor.py.bak-pre-slots-patch, README en
+# censo_patch/ del repo) que intercepta _sp()/opt() para construir un env
+# por-conformero, leyendo la variable MAAQC_CENSO_SLOTS que se fija aquí.
+#
+# MAAQC_CENSO_SLOTS particiona el pool total en N grupos de PUs,
+# separados por '|', ej. "0,1,4,5|2,3,6,7" para 2 slots de 4 PUs. El
+# parche de CENSO deriva el slot de cada conformero con un hash estable
+# de su nombre módulo N — determinístico, sin necesitar coordinación en
+# tiempo real entre los hilos internos de Dask.
+#
+# IMPORTANTE: el parche de CENSO vive fuera de este repo, en el paquete
+# instalado de sciencebitch — se pierde en cualquier reinstalación/update
+# de CENSO. Si algún día los SP de CENSO vuelven a mostrar el patrón de
+# colisión parcial (ver Cpus_allowed_list de orca_leanscf_mp con rangos
+# solapados entre 2 invocaciones de mpirun), lo primero a verificar es si
+# el parche sigue presente en orca_processor.py.
+def build_omp_env(nprocs: int, cpu_list: Optional[list[int]] = None,
+                   set_pe_list: bool = True,
+                   censo_slot_groups: Optional[list[list[int]]] = None) -> dict:
+    env = {
         **os.environ,
         "OMP_NUM_THREADS": str(nprocs),
         "MKL_NUM_THREADS": "1",
         "OPENBLAS_NUM_THREADS": "1",
-        # ── Fix para CPU híbrida P-core/E-core + taskset ──────────────
-        # Cuando taskset restringe el proceso a un subconjunto de cores,
-        # el mpirun interno de ORCA (orca_leanscf_mpi en la fase LEANSCF)
-        # invoca hwloc para detectar topología, y hwloc lee /sys/.../cluster
-        # directamente — sin filtrar por el cpuset heredado de taskset.
-        # En esta CPU híbrida eso produce cpusets de cluster L1d que no son
-        # subconjunto coherente del cpuset restringido ("intersection
-        # without inclusion"), y aunque hwloc dice que ignora el error y
-        # continúa, el reparto de trabajo entre ranks MPI en LEANSCF queda
-        # corrupto y aborta justo al iniciar la formación de Fock.
-        # Forzar el binding por núcleo en vez de por topología (que es lo
-        # que realmente queremos al usar taskset) evita que hwloc intente
-        # razonar sobre clusters L1d/L2 inconsistentes.
-        "OMPI_MCA_hwloc_base_binding_policy": "none",
-        "OMPI_MCA_rmaps_base_mapping_policy": "core",
-        "OMPI_MCA_hwloc_base_use_hwthreads_as_cpus": "1",
     }
+    # Limpiar las variables del namespace viejo si venían heredadas del
+    # entorno del proceso padre — PRTE las ignora silenciosamente, pero
+    # dejarlas sueltas es ruido y puede confundir a quien lea el entorno
+    # de un proceso ORCA con `/proc/<pid>/environ` en el futuro.
+    for stale_var in (
+        "OMPI_MCA_hwloc_base_binding_policy",
+        "OMPI_MCA_rmaps_base_mapping_policy",
+        "OMPI_MCA_hwloc_base_use_hwthreads_as_cpus",
+    ):
+        env.pop(stale_var, None)
+
+    if cpu_list and set_pe_list:
+        # `cpu_list` son PUs/CPUs lógicas OS — la MISMA lista que se usa
+        # para `taskset -c` en run_orca()/_run_censo_locked(). Pero PRTE
+        # espera índices de CORE en pe-list, no PUs (ver historial arriba
+        # y PU_TO_CORE junto a P_CORE_BLOCKS), así que hay que traducir
+        # antes de setear la env var. Sin deduplicar: si dos PUs de
+        # cpu_list caen en el mismo core físico (hilos SMT de un P-core),
+        # el índice de ese core debe repetirse una vez por PU/rank para
+        # que PRTE reparta un hilo SMT distinto a cada rank dentro del
+        # mismo core (--bind-to hwthread + :ORDERED en el wrapper).
+        pe_list = [PU_TO_CORE[pu] for pu in cpu_list]
+        env["MAAQC_PE_LIST"] = ",".join(str(c) for c in pe_list)
+    elif cpu_list and not set_pe_list:
+        # cpu_list se usa solo para taskset (aplicado por el caller, ver
+        # _run_censo_locked), NO para MAAQC_PE_LIST — ver Bug #1 arriba.
+        # Si el proceso padre heredó un MAAQC_PE_LIST de una invocación
+        # anterior (no debería, pero por si acaso), lo limpiamos para que
+        # el wrapper de mpirun no lo use por accidente.
+        env.pop("MAAQC_PE_LIST", None)
+
+    if censo_slot_groups:
+        # Cada grupo es una lista de PUs crudas (sin traducir a Core —
+        # esa traducción la hace el parche de CENSO en el momento de
+        # construir el MAAQC_PE_LIST real de cada llamada, reutilizando
+        # la misma tabla PU_TO_CORE duplicada localmente allá).
+        env["MAAQC_CENSO_SLOTS"] = "|".join(
+            ",".join(str(pu) for pu in group) for group in censo_slot_groups
+        )
+    else:
+        env.pop("MAAQC_CENSO_SLOTS", None)
+
+    return env
 
 # Alias global mantenido para compatibilidad con run_orca(env=None)
 OMP_ENV: dict = build_omp_env(NPROCS)
@@ -1435,6 +1598,155 @@ def _censo_prescreen_recover(
     return recovered_json
 
 
+# ─────────────────────────────────────────────
+#  LOCK de CENSO — evita relanzamientos duplicados sobre el mismo censo_dir
+# ─────────────────────────────────────────────
+#
+# Bug real observado (10 jul 2026, run A/MGLYVAL): stage_censo_prescreen()
+# decidía si "recuperar" un run mirando unicamente el contenido de
+# censo_dir (carpetas CONF* con .out parseables). Ese contenido NO indica
+# si CENSO sigue corriendo -- las carpetas CONF* sobreviven despues de que
+# CENSO termina un part y sigue de largo al siguiente. Resultado real:
+#   1. El proceso CENSO original (worker278785) termino prescreening solo,
+#      y avanzo organicamente a screening (13/192 gsolv ya calculados).
+#   2. Una segunda invocacion del pipeline, sobre el MISMO censo_dir, vio
+#      "192 CONF dirs completas" y disparo un --reload que relanzo un
+#      SEGUNDO proceso CENSO (worker349459) desde CONF1 -- descartando el
+#      progreso de screening del proceso 1, que seguia vivo.
+#   3. Lo mismo volvio a pasar con un TERCER proceso (worker409581).
+# Es decir: se lanzaron 3 CENSOs sucesivos rehaciendo prescreening desde
+# cero, sin que ninguno llegara nunca a terminar screening.
+#
+# La fija es un lockfile propio del pipeline (no confundir con censo.log,
+# que CENSO tambien escribe dentro de censo_dir): contiene el PID real del
+# proceso CENSO mientras corre, y se usa para NEGARSE a tocar censo_dir si
+# ya hay un CENSO vivo ahi, sin importar que haya en las carpetas CONF*.
+def _censo_lock_file(censo_dir: Path) -> Path:
+    return censo_dir / ".censo_pipeline.lock"
+
+
+def _censo_lock_owner(censo_dir: Path, log: logging.Logger) -> Optional[int]:
+    """
+    Devuelve el PID de un proceso CENSO activo sobre censo_dir, o None si
+    no hay ninguno corriendo (lock ausente, obsoleto, o de un PID reciclado
+    por el SO para otro programa).
+
+    IMPORTANTE: esta es la unica fuente de verdad sobre si CENSO sigue
+    vivo. El estado de las carpetas CONF*/*.out NO sirve para eso (ver
+    comentario arriba) -- por eso el lock se escribe con el PID real del
+    Popen, no se infiere del contenido del directorio.
+    """
+    lock = _censo_lock_file(censo_dir)
+    if not lock.exists():
+        return None
+    try:
+        pid = int(lock.read_text().strip())
+    except (OSError, ValueError):
+        log.warning(f"[CENSO-LOCK]  {lock.name} ilegible -- se ignora y se elimina")
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+        return None
+
+    try:
+        os.kill(pid, 0)   # no mata nada, solo comprueba si el PID existe
+    except ProcessLookupError:
+        log.debug(f"[CENSO-LOCK]  lock obsoleto (PID {pid} ya no existe) -- limpiando")
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+        return None
+    except PermissionError:
+        # el PID existe pero pertenece a otro usuario -- asumir vivo por seguridad
+        return pid
+
+    # PID vivo: si psutil esta disponible, confirmar que en efecto es un
+    # proceso de censo y no un PID reciclado por el SO para otro programa
+    # (evita falsos positivos que bloquearian el pipeline indefinidamente).
+    try:
+        import psutil
+        cmdline = " ".join(psutil.Process(pid).cmdline()).lower()
+        if "censo" not in cmdline:
+            log.debug(
+                f"[CENSO-LOCK]  PID {pid} vivo pero no parece ser censo "
+                f"(cmdline no contiene 'censo') -- lock obsoleto, limpiando"
+            )
+            try:
+                lock.unlink()
+            except OSError:
+                pass
+            return None
+    except Exception:
+        pass  # sin psutil o proceso inaccesible: confiar en la sola existencia del PID
+
+    return pid
+
+
+def _run_censo_locked(cmd: list[str], censo_dir: Path, log_file: Path,
+                       env: dict, timeout_hours: float,
+                       cpu_list: Optional[list[int]] = None) -> subprocess.CompletedProcess:
+    """
+    Reemplazo drop-in de subprocess.run() para lanzar CENSO: misma firma de
+    excepciones (subprocess.TimeoutExpired, FileNotFoundError) pero ademas
+    escribe .censo_pipeline.lock con el PID real apenas arranca el proceso
+    y lo borra siempre al terminar (exito, timeout, o error), via Popen en
+    vez de run() para poder conocer el PID antes de bloquear en wait().
+
+    Tambien registra el proceso en _active_procs para que Ctrl-C
+    (_sigint_handler) lo mate igual que a los procesos ORCA.
+
+    `cpu_list`: confina el proceso CENSO (y por herencia TODOS los xtb
+    que lanza internamente vía su propio scheduler Dask) a estas CPUs
+    lógicas mediante `taskset -c`. Sin esto, CENSO calcula correctamente
+    cuántos sub-jobs correr en paralelo y con cuántos hilos OpenMP cada
+    uno (respetando --maxcores), pero el kernel queda libre de repartir
+    esos hilos entre CUALQUIERA de las CPUs lógicas de la máquina —
+    incluyendo aterrizar hilos de sub-jobs *distintos* sobre el mismo
+    par SMT de un P-core, o sobre los LP E-cores lentos. Resultado
+    medido: varios procesos xtb paralelos compitiendo por los mismos
+    cores físicos, con solo ~6/12 cores realmente aprovechados aunque
+    CENSO cree estar usando 12. Ver assign_cpu_pool() para el porqué
+    de por qué este pinning es a nivel de proceso completo y no
+    por-sub-job (a diferencia de run_orca()/assign_cpu_lists()).
+    """
+    if cpu_list:
+        cpu_str = ",".join(str(c) for c in cpu_list)
+        cmd = ["taskset", "-c", cpu_str] + cmd
+
+    lock = _censo_lock_file(censo_dir)
+    with open(log_file, "w") as flog:
+        proc = subprocess.Popen(
+            _apply_nohup(cmd), stdout=flog, stderr=subprocess.STDOUT,
+            cwd=censo_dir, env=env, start_new_session=USE_NOHUP,
+        )
+        try:
+            lock.write_text(str(proc.pid))
+        except OSError:
+            pass
+        with _procs_lock:
+            _active_procs.append(proc)
+        try:
+            returncode = proc.wait(timeout=timeout_hours * 3600)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                pass
+            raise
+        finally:
+            with _procs_lock:
+                if proc in _active_procs:
+                    _active_procs.remove(proc)
+            try:
+                lock.unlink(missing_ok=True)
+            except OSError:
+                pass
+    return subprocess.CompletedProcess(cmd, returncode)
+
+
 def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
                            charge: int, log: logging.Logger,
                            temperature: float = 274.15,
@@ -1465,6 +1777,26 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
     base_censo_dir = mol_dir / "01b_censo_prescreen"
     censo_dir = (base_censo_dir / subdir) if subdir else base_censo_dir
     censo_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Guardia de concurrencia: ¿ya hay un CENSO vivo sobre censo_dir? ──────
+    # Esto va ANTES de cualquier diagnóstico o lectura de CONF*/*.out: el
+    # bug real (ver comentario sobre _censo_lock_owner más arriba) era que
+    # esta función juzgaba si CENSO estaba "atascado" mirando el contenido
+    # del directorio, que sigue existiendo aunque CENSO esté vivo y ya haya
+    # avanzado a screening. Si hay un PID vivo, no tocamos nada — ni
+    # diagnóstico, ni --reload, ni limpieza de carpetas — y devolvemos el
+    # ensemble sin filtrar tal cual llegó, para que el pipeline no bloquee
+    # ni piense que falló (fail-open, igual que el resto de esta función).
+    _owner_pid = _censo_lock_owner(censo_dir, log)
+    if _owner_pid is not None:
+        log.warning(
+            f"[CENSO]  ⏳  ya hay un proceso CENSO activo sobre {censo_dir.name}/ "
+            f"(PID {_owner_pid}) — no se toca nada para no pisarle el trabajo "
+            f"(este era el bug: relanzar --reload sobre un run que seguía vivo "
+            f"y ya había avanzado a screening). Vuelve a invocar el pipeline "
+            f"más tarde, cuando termine."
+        )
+        return conformers_xyz
 
     output_xyz = censo_dir / "censo_ensemble_sorted.xyz"
 
@@ -1585,8 +1917,23 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
             else:
                 cmd_reload = [
                     str(CENSO_BIN),
-                    "--prescreening",
-                    "--screening",   # FIX: misma corrección que en el cmd normal
+                    # FIX (bug del 10 jul): NO pasar "--prescreening" aquí.
+                    # _recovered_json ya contiene el part "prescreening"
+                    # COMPLETO para los n_full == n_total confórmeros (así
+                    # lo garantiza _censo_prescreen_recover, que devuelve
+                    # None si falta algún dato). Pero si además le decimos
+                    # a CENSO "--prescreening" en el CLI, CENSO ejecuta ese
+                    # part igual — el --reload no lo hace tratarlo como ya
+                    # resuelto, solo le da un punto de partida — y recalcula
+                    # xtb_gsolv + sp para las 192 CONF* desde cero. Eso era
+                    # exactamente lo que producía "Reloaded results..."
+                    # seguido inmediatamente de "Running xtb_gsolv... CONF1"
+                    # en censo.log: tres corridas completas de prescreening
+                    # (~2.5 h cada una) sin avanzar nunca a screening.
+                    # Con solo "--screening" + "--reload", CENSO toma el
+                    # prescreening ya resuelto como dado y arranca directo
+                    # en screening.
+                    "--screening",
                     "-i", local_input.name,
                     "-c", str(charge),
                     "-u", "0",
@@ -1597,18 +1944,34 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
                 ]
                 log.info(
                     f"[CENSO-RECOVER]  ▶  relanzando CENSO con --reload "
-                    f"({_recovered_json.name})"
+                    f"({_recovered_json.name}), solo --screening "
+                    f"(prescreening se toma del reload, no se recalcula)"
                     + ("  [nohup]" if USE_NOHUP else "")
                 )
                 try:
-                    with open(censo_dir / "censo_recover.log", "w") as _flog:
-                        _proc = subprocess.run(
-                            _apply_nohup(cmd_reload),
-                            stdout=_flog, stderr=subprocess.STDOUT,
-                            cwd=censo_dir, env=build_omp_env(NPROCS_CREST),
-                            timeout=CENSO_TIMEOUT_HOURS * 3600,
-                            start_new_session=USE_NOHUP,
-                        )
+                    _recover_cpu_pool = assign_cpu_pool(NPROCS_CREST)
+                    _recover_slot_groups = partition_cpu_pool_into_slots(
+                        _recover_cpu_pool, MAAQC_CENSO_N_SLOTS
+                    )
+                    _proc = _run_censo_locked(
+                        cmd_reload, censo_dir,
+                        censo_dir / "censo_recover.log",
+                        # set_pe_list=False: ver Bug #1 junto a build_omp_env().
+                        # taskset -c (abajo, cpu_list=) sigue confinando todo
+                        # el árbol de CENSO al pool; MAAQC_PE_LIST NO se fija
+                        # a nivel del proceso censo padre (evita el pe-list
+                        # compartido entre sub-jobs). censo_slot_groups fija
+                        # MAAQC_CENSO_SLOTS para que el parche de CENSO
+                        # (orca_processor.py, ver censo_patch/) asigne cada
+                        # conformero a uno de los MAAQC_CENSO_N_SLOTS slots
+                        # de forma determinística, evitando la colisión
+                        # parcial que quedaba con el binding libre del kernel.
+                        build_omp_env(NPROCS_CREST, cpu_list=_recover_cpu_pool,
+                                       set_pe_list=False,
+                                       censo_slot_groups=_recover_slot_groups),
+                        CENSO_TIMEOUT_HOURS,
+                        cpu_list=_recover_cpu_pool,
+                    )
                     # Buscar el ensemble de salida (mismo esquema que abajo)
                     _fixed = [
                         "censo_ensemble_sorted.xyz",
@@ -1743,21 +2106,41 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
              + ("  [nohup]" if USE_NOHUP else ""))
     t0 = time.time()
     try:
-        with open(censo_dir / "censo.log", "w") as flog:
-            proc = subprocess.run(
-                _apply_nohup(cmd), stdout=flog, stderr=subprocess.STDOUT,
-                cwd=censo_dir, env=build_omp_env(NPROCS_CREST),
-                timeout=CENSO_TIMEOUT_HOURS * 3600,
-                start_new_session=USE_NOHUP,
-            )
+        censo_cpu_pool = assign_cpu_pool(NPROCS_CREST)
+        censo_slot_groups = partition_cpu_pool_into_slots(
+            censo_cpu_pool, MAAQC_CENSO_N_SLOTS
+        )
+        # set_pe_list=False: ver Bug #1 junto a build_omp_env(). taskset -c
+        # (abajo, cpu_list=) sigue confinando todo el árbol de CENSO al
+        # pool; MAAQC_PE_LIST NO se fija a nivel del proceso censo padre
+        # (evita el pe-list compartido entre sub-jobs — bug medido: 3
+        # subjobs con el mismo pe-list, :ORDERED tomando solo los primeros
+        # 4 elementos, saturando 2 cores físicos con 102°C mientras el
+        # resto del pool quedaba ocioso). censo_slot_groups fija
+        # MAAQC_CENSO_SLOTS para que el parche de CENSO (orca_processor.py,
+        # ver censo_patch/) asigne cada conformero a uno de los
+        # MAAQC_CENSO_N_SLOTS slots de forma determinística.
+        proc = _run_censo_locked(
+            cmd, censo_dir, censo_dir / "censo.log",
+            build_omp_env(NPROCS_CREST, cpu_list=censo_cpu_pool,
+                           set_pe_list=False,
+                           censo_slot_groups=censo_slot_groups),
+            CENSO_TIMEOUT_HOURS,
+            cpu_list=censo_cpu_pool,
+        )
         returncode = proc.returncode
     except subprocess.TimeoutExpired:
         log.error(f"[CENSO]  ✗  TIMEOUT ({CENSO_TIMEOUT_HOURS} h) — "
                   f"usando ensemble CREST sin filtrar")
         return conformers_xyz
-    except FileNotFoundError:
-        log.error(f"[CENSO]  ✗  no se encontró el ejecutable ({CENSO_BIN}) — "
-                  f"¿'conda activate sciencebitch'? Usando ensemble CREST sin filtrar")
+    except FileNotFoundError as e:
+        if "taskset" in str(e):
+            log.error(f"  ✗  no se encontró 'taskset' en PATH — instálalo "
+                      f"(paquete util-linux) o llama a stage_censo_prescreen "
+                      f"sin cpu pinning")
+        else:
+            log.error(f"[CENSO]  ✗  no se encontró el ejecutable ({CENSO_BIN}) — "
+                      f"¿'conda activate sciencebitch'? Usando ensemble CREST sin filtrar")
         return conformers_xyz
     except Exception as e:
         log.error(f"[CENSO]  ✗  error inesperado: {e} — usando ensemble CREST sin filtrar")
@@ -2829,7 +3212,7 @@ def _tddft_worker(task: dict) -> dict:
         inp_file.write_text(inp_text)
 
     t0         = time.time()
-    worker_env = build_omp_env(nprocs)
+    worker_env = build_omp_env(nprocs, cpu_list=cpu_list)
     success    = run_orca(inp_file, out_file, log, env=worker_env, cpu_list=cpu_list)
     elapsed    = (time.time() - t0) / 60
 
@@ -3220,7 +3603,7 @@ def _opt_worker(task: dict) -> dict:
     t0      = time.time()
     # Env por worker: construido con el nprocs del task, no con el global.
     # Evita race conditions al modificar os.environ desde hilos concurrentes.
-    worker_env = build_omp_env(nprocs)
+    worker_env = build_omp_env(nprocs, cpu_list=cpu_list)
     success = run_orca(inp_file, out_file, log, env=worker_env, cpu_list=cpu_list)
     elapsed = (time.time() - t0) / 60
 
@@ -3287,7 +3670,7 @@ def _sp_worker(task: dict) -> dict:
         inp_file.write_text(inp_text)
 
     t0         = time.time()
-    worker_env = build_omp_env(nprocs)
+    worker_env = build_omp_env(nprocs, cpu_list=cpu_list)
     success    = run_orca(inp_file, out_file, log, env=worker_env, cpu_list=cpu_list)
     elapsed    = (time.time() - t0) / 60
 
@@ -3297,6 +3680,64 @@ def _sp_worker(task: dict) -> dict:
         "success": success,
         "elapsed": elapsed,
     }
+
+
+# ── Topología REAL de este ThinkPad T14 (Core Ultra 7), confirmada con
+#    `lscpu -e`. Elevada a nivel de módulo porque tanto assign_cpu_lists()
+#    (pinning por-job, usado por ORCA) como assign_cpu_pool() (pinning de
+#    un único proceso con paralelismo interno propio, usado por CENSO)
+#    necesitan partir de la misma tabla CPU lógica → core físico.
+#
+#    CPU lógica  →  CORE físico   →  tipo
+#    0, 1        →  CORE 0        →  P-core (2 hilos SMT, mismo L2)
+#    2, 3        →  CORE 1        →  P-core (2 hilos SMT, mismo L2)
+#    4           →  CORE 2        →  E-core
+#    5           →  CORE 3        →  E-core
+#    6           →  CORE 4        →  E-core
+#    7           →  CORE 5        →  E-core
+#    8           →  CORE 6        →  E-core
+#    9           →  CORE 7        →  E-core
+#    10          →  CORE 8        →  E-core
+#    11          →  CORE 9        →  E-core
+#    12          →  CORE 10       →  LP E-core (max 400 MHz — evitar)
+#    13          →  CORE 11       →  LP E-core (max ~1.3 GHz — evitar)
+P_CORE_BLOCKS   = [[0, 1], [2, 3]]                 # CORE 0, CORE 1 (SMT)
+E_CORE_SINGLES  = [4, 5, 6, 7, 8, 9, 10, 11]        # CORE 2-9
+LP_CORE_SINGLES = [12, 13]                          # CORE 10-11 (lentos)
+
+# ── Traducción PU (CPU lógica OS) → índice de Core, para PRTE ─────────────
+# Confirmado empíricamente (julio 2026, ver historial junto a
+# build_omp_env): PRTE interpreta los números de `pe-list=`/`rankfile`
+# como ÍNDICE DE CORE (Cpu Type: CORE en `mpirun --display map`), NUNCA
+# como PU/hilo de hardware — sin importar la sintaxis (pe-list, PU:N en
+# rankfile, slots=N) ni los flags (--bind-to hwthread, --use-hwthread-cpus).
+# taskset -c, en cambio, sí usa PU/CPU lógica OS directamente (confirmado
+# vía /proc/<pid>/status) — por eso taskset sigue recibiendo `cpu_list`
+# crudo, y solo lo que se manda a MAAQC_PE_LIST necesita esta traducción.
+#
+# Como los 2 P-cores tienen 2 PUs c/u (SMT) y el resto de los cores tiene
+# 1 PU c/u, la tabla no es un offset constante — hay que traducir PU a PU
+# contra la topología real (misma tabla que ya usa assign_cpu_lists,
+# invertida). Ejemplo: pedir PU 4 (taskset) requiere pedirle a PRTE
+# Core 4, no PU 4 — Core L#4 (P#6) en la tabla de `lstopo`.
+#
+# IMPORTANTE: esta traducción NO deduplica. Si cpu_list trae los 2 hilos
+# SMT de un mismo P-core (ej. [0, 1], el caso de P_CORE_BLOCKS), ambos
+# traducen al MISMO índice de Core (Core 0), y eso es intencional: con
+# `--bind-to hwthread` + `:ORDERED`, dos ranks pidiendo el mismo índice
+# de Core terminan cada uno en un hilo SMT distinto de ese core — es la
+# forma correcta de repartir 2 ranks MPI dentro de 1 P-core con SMT.
+# Deduplicar acá rompería esa asignación (le pasarías a PRTE 1 solo
+# índice para 2 ranks, no 2).
+CORE_TO_PUS: dict[int, list[int]] = {
+    0: [0, 1], 1: [2, 3],                        # P-cores, SMT
+    2: [4], 3: [5], 4: [6], 5: [7],
+    6: [8], 7: [9], 8: [10], 9: [11],            # E-cores
+    10: [12], 11: [13],                          # LP E-cores
+}
+PU_TO_CORE: dict[int, int] = {
+    pu: core for core, pus in CORE_TO_PUS.items() for pu in pus
+}
 
 
 def assign_cpu_lists(batch_size: int, nprocs_per_job: int) -> list[list[int]]:
@@ -3350,10 +3791,6 @@ def assign_cpu_lists(batch_size: int, nprocs_per_job: int) -> list[list[int]]:
     (el caller debe manejarlo o confiar en _check_cpu_budget para advertir
     antes de llegar aquí).
     """
-    P_CORE_BLOCKS   = [[0, 1], [2, 3]]                 # CORE 0, CORE 1 (SMT)
-    E_CORE_SINGLES  = [4, 5, 6, 7, 8, 9, 10, 11]        # CORE 2-9
-    LP_CORE_SINGLES = [12, 13]                          # CORE 10-11 (lentos)
-
     lists: list[list[int]] = []
 
     if nprocs_per_job == 2:
@@ -3403,6 +3840,123 @@ def assign_cpu_lists(batch_size: int, nprocs_per_job: int) -> list[list[int]]:
             idx += nprocs_per_job
 
     return lists
+
+
+def assign_cpu_pool(n_cores: int) -> list[int]:
+    """
+    Calcula una única lista plana de CPUs lógicas — no una lista por
+    worker como assign_cpu_lists() — para confinar vía `taskset -c` un
+    proceso PADRE que reparte su propio presupuesto de cores entre
+    sub-procesos internamente (caso CENSO).
+
+    Por qué esto es distinto de assign_cpu_lists():
+    assign_cpu_lists() reparte cores ENTRE jobs hermanos que el pipeline
+    lanza por separado (ej. 3 SP en paralelo), y por eso a partir de
+    nprocs_per_job >= 3 excluye los P_CORE_BLOCKS: un solo job de ese
+    tamaño no puede recibir 2 hilos SMT del mismo core físico y seguir
+    siendo "N cores físicos independientes" para su propio MPI/OpenMP.
+
+    CENSO es distinto: el proceso `censo` que lanzamos aquí NO es un
+    único cálculo monolítico — es un scheduler (Dask) que decide él
+    mismo cuántos conformeros corren en paralelo y con cuántos hilos
+    OpenMP cada uno (ver censo/parallel.py: get_cluster()/set_omp()),
+    y llama a xtb con `--parallel N` por cada sub-job. Lo único que
+    hace falta es confinar el ÁRBOL COMPLETO de procesos (censo +
+    todos los xtb que lanza) a un conjunto fijo de N cores físicamente
+    reales — sin esto, el kernel es libre de repartir los hilos OpenMP
+    de sub-jobs *distintos* sobre el mismo par SMT de un P-core (o
+    sobre los LP E-cores lentos), que es exactamente el patrón medido
+    de "varios procesos compitiendo por los mismos cores, 6/12 cores
+    aprovechados" — mismo problema estructural que el histórico bug de
+    ORCA (ver comentario en assign_cpu_lists), pero a nivel de proceso
+    completo en vez de por-job.
+
+    Por eso aquí SÍ se pueden incluir los P_CORE_BLOCKS completos como
+    unidades atómicas (2 hilos SMT juntos, nunca partidos): no importa
+    que sean "solo" 1 core físico con 2 hilos, porque es el propio
+    scheduler interno de CENSO (Dask + xtb --parallel) el que decide
+    cómo subdividir el presupuesto entre sub-jobs — nuestro taskset solo
+    fija el límite exterior, igual que --maxcores fija el límite lógico.
+
+    Orden de prioridad: P-core blocks completos primero (mayor
+    frecuencia), luego E-cores, y LP E-cores solo si no alcanza con lo
+    anterior (se avisa por log en el caller si esto ocurre).
+
+    Devuelve una lista de hasta n_cores CPUs lógicas. Si n_cores excede
+    las CPUs físicas reales de la máquina (12 en este ThinkPad: 2
+    P-cores + 8 E-cores, sin contar LP), la lista incluye también los
+    LP E-cores como último recurso y, si aún así no alcanza, se trunca
+    a las CPUs lógicas disponibles en el sistema.
+    """
+    pool: list[int] = []
+    for block in P_CORE_BLOCKS:
+        if len(pool) >= n_cores:
+            break
+        pool.extend(block)
+
+    for cpu in E_CORE_SINGLES:
+        if len(pool) >= n_cores:
+            break
+        pool.append(cpu)
+
+    for cpu in LP_CORE_SINGLES:
+        if len(pool) >= n_cores:
+            break
+        pool.append(cpu)
+
+    total_logical = os.cpu_count() or len(pool)
+    return [c for c in pool if c < total_logical][:n_cores]
+
+
+def partition_cpu_pool_into_slots(pool: list[int], n_slots: int) -> list[list[int]]:
+    """
+    Particiona un pool ya calculado (ej. por assign_cpu_pool()) en
+    `n_slots` grupos contiguos de PUs, cada uno destinado a un sub-job
+    paralelo de CENSO (ver MAAQC_CENSO_SLOTS junto a build_omp_env()).
+
+    Contexto (julio 2026): CENSO congela su entorno una sola vez
+    (ENVIRON en params.py) y no expone ningún mecanismo nativo para que
+    sub-jobs paralelos (2+ SP simultáneos, cada uno con su propio
+    mpirun) reciban listas de cores distintas — confirmado leyendo
+    censo/parallel.py (LocalCluster con n_workers=1, un solo pool de
+    hilos) y processing/orca_processor.py (_sp()/opt() llaman a
+    _make_call() sin env= explícito, cayendo siempre a ENVIRON global).
+    Un parche local en orca_processor.py (fuera de este repo, ver
+    censo_patch/README.md) intercepta esas llamadas y lee
+    MAAQC_CENSO_SLOTS para asignar cada conformero a un slot de forma
+    determinística (hash estable de job.conf.name módulo n_slots).
+
+    Esta función solo arma la partición del lado de pipeline.py — no
+    reparte P_CORE_BLOCKS/E_CORE_SINGLES con ninguna lógica especial de
+    prioridad (a diferencia de assign_cpu_lists()/assign_cpu_pool()):
+    simplemente corta `pool` (ya ordenado por assign_cpu_pool() con
+    P-cores primero) en `n_slots` trozos de tamaño lo más parejo
+    posible, preservando el orden. Si `pool` no es divisible
+    exactamente, los primeros slots reciben una PU extra antes que los
+    últimos (ej. pool de 10 PUs en 3 slots → tamaños [4, 3, 3], no
+    [3, 3, 4]) — irrelevante en la práctica porque el caso de uso real
+    es n_slots=2 con pool par (8 PUs → [4, 4]).
+
+    Devuelve una lista de `n_slots` listas de PUs. Si `pool` tiene menos
+    elementos que `n_slots`, algunos slots devueltos pueden quedar
+    vacíos (lista vacía) — el caller debe decidir si eso es aceptable
+    (build_omp_env() con censo_slot_groups conteniendo un grupo vacío
+    simplemente no fija MAAQC_PE_LIST para ese slot en el parche de
+    CENSO, ver fail-open en _maaqc_build_slot_env()).
+    """
+    if n_slots <= 0:
+        return []
+    if not pool:
+        return [[] for _ in range(n_slots)]
+
+    base_size, remainder = divmod(len(pool), n_slots)
+    slots: list[list[int]] = []
+    idx = 0
+    for i in range(n_slots):
+        size = base_size + (1 if i < remainder else 0)
+        slots.append(pool[idx: idx + size])
+        idx += size
+    return slots
 
 
 def _check_cpu_budget(batch_size: int, nprocs_per_job: int, log: logging.Logger) -> None:

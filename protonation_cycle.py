@@ -646,6 +646,12 @@ def run_goodvibes(
         cmd = [
             python_exe, "-m", "goodvibes",
             "--temp", str(T), "-f", str(cutoff), "--qs", qs,
+            "-v", "1.0",  # desactiva el auto-scaling de frecuencias de GoodVibes
+                          # (detectado por nivel de teoría vía tablas de Truhlar);
+                          # sin esto, el delta "harmónico vs. GoodVibes" mezcla el
+                          # efecto cuasi-armónico (mRRHO) con un factor de escalado
+                          # no controlado que parse_thermochem()/ORCA no aplican.
+                          # --zpe-vscal hereda este mismo valor si no se pasa aparte.
         ]
         if qh:
             cmd.append("--qh")
@@ -2248,11 +2254,15 @@ Ejemplos:
                         help="Carpeta en runs/ para el dianión C (q=−2), p. ej. 'C'")
     parser.add_argument("--protonated", metavar="DIR",
                         help="Carpeta en runs/ para el catión protonado A (q=+1), "
-                             "p. ej. 'A'. Requiere también --zwitterion.")
+                             "p. ej. 'A'. OPCIONAL: solo tiene efecto junto con "
+                             "--zwitterion. Si se omite, no se calcula pKa₀ y la "
+                             "cadena arranca en el macroestado neutro/zwitterión.")
     parser.add_argument("--zwitterion", metavar="DIR",
                         help="Carpeta en runs/ para el zwitterión D — TAUTÓMERO de "
                              "--neutral (mismo q=0, mismos átomos), p. ej. 'D'. "
-                             "Requiere también --protonated y --neutral.")
+                             "Activa la cadena extendida; requiere también "
+                             "--neutral. --protonated es opcional dentro de esta "
+                             "cadena.")
     parser.add_argument("--mol", metavar="MOL", default=None,
                         help="Nombre de la carpeta de la molécula dentro del "
                              "directorio actual, p. ej. 'MGLYVAL' o 'SHINORINE'. "
@@ -2331,17 +2341,29 @@ Ejemplos:
     if args.neutral is None and args.anion is None:
         parser.error("Debes proporcionar al menos --neutral y --anion.")
 
-    use_extended = args.protonated is not None or args.zwitterion is not None
+    # El catión protonado A⁺ (--protonated) es OPCIONAL dentro de la cadena
+    # extendida: si no se pasa, simplemente se omite pKa₀ y la distribución
+    # arranca en el macroestado neutro/zwitterión. Lo único que activa el
+    # modo extendido (con tautómero R⇌D) es --zwitterion.
+    use_extended = args.zwitterion is not None
     if use_extended:
         missing = [name for name, val in
-                   [("--protonated", args.protonated), ("--zwitterion", args.zwitterion),
-                    ("--neutral", args.neutral)] if val is None]
+                   [("--zwitterion", args.zwitterion), ("--neutral", args.neutral)]
+                   if val is None]
         if missing:
             parser.error(
-                "La cadena extendida (catión + zwitterión) requiere "
-                "--protonated, --zwitterion y --neutral simultáneamente. "
-                f"Falta(n): {', '.join(missing)}."
+                "La cadena extendida (zwitterión) requiere --zwitterion y "
+                "--neutral simultáneamente. Falta(n): " + ", ".join(missing) + ". "
+                "--protonated (catión A⁺, q=+1) es opcional: si se omite, "
+                "simplemente no se calcula pKa₀ y la cadena arranca en el "
+                "macroestado neutro/zwitterión."
             )
+    elif args.protonated is not None:
+        parser.error(
+            "--protonated (catión A⁺) solo tiene sentido junto con "
+            "--zwitterion (cadena extendida); para la cadena clásica de 3 "
+            "estados no se usa. Agrega --zwitterion o quita --protonated."
+        )
 
     print("\n" + "═" * 74)
     print("  PROTONATION CYCLE  —  FAE-MAA / kmilozeta")
@@ -2483,10 +2505,15 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
     gcorr_source: ver docstring de _run_classic(). Retorna dict con los
     resultados clave (pKa0/1/2, f_R, f_D, df_dist, ...) para _run_comparison().
     """
-    print(f"\n▸ Cargando catión protonado: {args.protonated}")
-    data_A = collect_mol_data(args.protonated, verbose=args.verbose,
-                              gcorr_source=gcorr_source)
-    print_mol_summary(data_A, verbose=args.verbose)
+    data_A = None
+    if args.protonated:
+        print(f"\n▸ Cargando catión protonado: {args.protonated}")
+        data_A = collect_mol_data(args.protonated, verbose=args.verbose,
+                                  gcorr_source=gcorr_source)
+        print_mol_summary(data_A, verbose=args.verbose)
+    else:
+        print("\n▸ Catión protonado A⁺ no proporcionado (--protonated omitido): "
+              "se omite pKa₀, la cadena arranca en el macroestado neutro/zwitterión.")
 
     print(f"\n▸ Cargando estado neutro: {args.neutral}")
     data_R = collect_mol_data(args.neutral, verbose=args.verbose,
@@ -2578,10 +2605,11 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
     # ── Cadena de pKa: A→[R/D], [R/D]→B, B→C ───────────────────────────────
     pka0_result = pka1_result = pka2_result = None
 
-    print(f"\n▸ Calculando pKa₀  ({args.protonated} → neutro/zwitterión + H⁺)")
-    pka0_result = compute_pka(data_A, data_neutral_macro,
-                              T=T_STD, verbose=args.verbose, method=args.method,
-                              gcorr_source=gcorr_source)
+    if data_A:
+        print(f"\n▸ Calculando pKa₀  ({args.protonated} → neutro/zwitterión + H⁺)")
+        pka0_result = compute_pka(data_A, data_neutral_macro,
+                                  T=T_STD, verbose=args.verbose, method=args.method,
+                                  gcorr_source=gcorr_source)
 
     if data_B:
         print(f"\n▸ Calculando pKa₁  (neutro/zwitterión → {args.anion} + H⁺)")
