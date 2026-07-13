@@ -70,6 +70,7 @@ Nota (--start adc2): caso especial, NO retoma la cadena normal. Solo requiere
 
 import argparse
 import datetime
+import fcntl
 import json
 import logging
 import os
@@ -174,12 +175,15 @@ MULT       = 1                      # multiplicidad siempre 1
 CREST_TIMEOUT_HOURS = 24.0          # timeout CREST (horas)
 CENSO_TIMEOUT_HOURS = 24.0          # timeout CENSO pre-screening (horas)
 
-# Número de slots de cores para coordinar los SP/OPT paralelos internos
-# de CENSO (ver MAAQC_CENSO_SLOTS junto a build_omp_env() y
-# partition_cpu_pool_into_slots()). Requiere el parche local en
-# orca_processor.py (censo_patch/) para tener efecto — sin el parche,
-# esta variable no hace nada dañino (fail-open del lado de CENSO), pero
-# tampoco resuelve la colisión de cores entre sub-jobs paralelos.
+# DEPRECADO (2026-07): reparto manual de slots de cores para los SP/OPT
+# paralelos internos de CENSO (ver MAAQC_CENSO_SLOTS junto a
+# build_omp_env() y partition_cpu_pool_into_slots()). Ya no se usa en
+# ningún llamado a stage_censo_prescreen() — seguía mostrando colisión
+# parcial entre sub-jobs pese al parche local en orca_processor.py, así
+# que se abandonó a favor de dejar que el kernel reparta libremente
+# dentro del pool confinado por taskset. build_omp_env() y
+# partition_cpu_pool_into_slots() se dejan intactas por si se retoma el
+# enfoque más adelante, pero ningún caller les pasa censo_slot_groups hoy.
 MAAQC_CENSO_N_SLOTS = 2
 
 # Los defaults de recursos (NPROCS, MAXCORE, etc.) se inicializan más abajo
@@ -535,24 +539,49 @@ def _apply_nohup(cmd: list[str]) -> list[str]:
 _active_procs: list[subprocess.Popen] = []   # procesos ORCA activos
 _procs_lock   = threading.Lock()
 
+def _signal_process_group(p: subprocess.Popen, sig: int) -> None:
+    """Envía `sig` a TODO el grupo de procesos de p, no solo a su PID líder.
+
+    Los procesos ORCA se lanzan con start_new_session=True, lo que los
+    convierte en líderes de su propio grupo (pgid == pid). Cuando el
+    comando real es mpirun (ORCA paralelo), mpirun lanza sus workers como
+    hijos suyos dentro de ese mismo grupo. p.terminate()/p.kill() solo
+    señalizan el PID de mpirun: si mpirun no alcanza a reenviar la señal
+    a sus workers antes de morir (p.ej. porque le llega un SIGKILL a los
+    3s), esos workers quedan huérfanos y siguen vivos consumiendo CPU —
+    exactamente el síntoma de "Ctrl-C corta el pipeline pero los procesos
+    siguen vivos". os.killpg() evita esto señalizando el grupo completo.
+    """
+    try:
+        pgid = os.getpgid(p.pid)
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        # El proceso ya no existe, o no se pudo resolver el pgid (p.ej. si
+        # algún día USE_NOHUP/start_new_session pasa a False) — fallback al
+        # comportamiento anterior de señalizar solo el PID directo.
+        try:
+            if sig == signal.SIGKILL:
+                p.kill()
+            else:
+                p.terminate()
+        except OSError:
+            pass
+
+
 def _kill_active_procs() -> None:
-    """Mata todos los subprocesos ORCA/taskset registrados en _active_procs."""
+    """Mata todos los subprocesos ORCA/taskset registrados en _active_procs,
+    incluyendo a los workers hijos que hayan lanzado (p.ej. mpirun), vía
+    señales a todo el process group."""
     with _procs_lock:
         procs = list(_active_procs)
     for p in procs:
-        try:
-            p.terminate()
-        except OSError:
-            pass
+        _signal_process_group(p, signal.SIGTERM)
     # Espera breve y SIGKILL si siguen vivos
     for p in procs:
         try:
             p.wait(timeout=3)
         except subprocess.TimeoutExpired:
-            try:
-                p.kill()
-            except OSError:
-                pass
+            _signal_process_group(p, signal.SIGKILL)
 
 def _sigint_handler(signum, frame) -> None:  # noqa: ANN001
     print("\n[pipeline] Ctrl-C recibido — terminando procesos ORCA activos…",
@@ -950,6 +979,19 @@ end
 * xyzfile {CHARGE} {MULT} opt_opt.xyz
 """
 
+TEMPLATE_SP_GAS = """\
+! wB97X-D3 def2-TZVPD def2/J RIJCOSX TightSCF defgrid3
+%scf
+  MaxIter 300
+end
+%maxcore {MAXCORE}
+%pal
+  nprocs {NPROCS}
+end
+
+* xyzfile {CHARGE} {MULT} opt_opt.xyz
+"""
+
 TEMPLATE_SP_NROOT = """\
 ! wB97X-D3 def2-TZVPD def2/J CPCM(water) RIJCOSX TightSCF defgrid3
 %scf
@@ -1027,6 +1069,7 @@ def get_template(step: str) -> str:
         "numfreq":         TEMPLATE_NUMFREQ,
         "numfreq_restart": TEMPLATE_NUMFREQ_RESTART,
         "sp":              TEMPLATE_SP,
+        "sp_gas":          TEMPLATE_SP_GAS,
         "sp_nroot":        TEMPLATE_SP_NROOT,
         "tddft":           TEMPLATE_TDDFT,
         "adc2":            TEMPLATE_ADC2,
@@ -1174,6 +1217,20 @@ def safe_copy(src: Path, dst: Path) -> bool:
         return True   # mismo archivo, no hay nada que hacer
     except OSError as e:
         return False
+
+
+def _parse_charge_mult_from_sp_inp(sp_inp: Path) -> Optional[tuple[int, int]]:
+    """
+    Extrae (charge, mult) directo de la línea '* xyzfile {CHARGE} {MULT} ...'
+    ya escrita en un sp.inp existente (04_sp/<conf_id>/sp.inp).
+
+    Usado por SP_GAS para garantizar que usa exactamente la misma carga/mult
+    que el SP CPCM que le dio origen, sin importar el modo de invocación
+    (evita desalineación con args.charge en modo batch, donde cada corrida
+    — B, C, D, R — tiene su propia carga).
+    """
+    m = re.search(r'^\*\s*xyzfile\s+(-?\d+)\s+(\d+)', sp_inp.read_text(), re.MULTILINE)
+    return (int(m.group(1)), int(m.group(2))) if m else None
 
 
 def resolve_opt_xyz(opt_dir: Path) -> Optional[Path]:
@@ -1949,26 +2006,20 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
                     + ("  [nohup]" if USE_NOHUP else "")
                 )
                 try:
-                    _recover_cpu_pool = assign_cpu_pool(NPROCS_CREST)
-                    _recover_slot_groups = partition_cpu_pool_into_slots(
-                        _recover_cpu_pool, MAAQC_CENSO_N_SLOTS
-                    )
+                    # 2026-07: mismo cambio que en el lanzamiento principal
+                    # (ver comentario junto a censo_cpu_pool más abajo en
+                    # stage_censo_prescreen) — se abandonó el reparto manual
+                    # vía MAAQC_CENSO_SLOTS; _recover_cpu_pool solo fija el
+                    # límite exterior vía taskset (necesario para coordinar
+                    # con otras instancias de pipeline.py corriendo en
+                    # paralelo), y el kernel reparte libremente los
+                    # sub-jobs internos de CENSO dentro de ese pool.
+                    _recover_cpu_pool = _acquire_cpu_pool(NPROCS_CREST, log, "CENSO-RECOVER")
                     _proc = _run_censo_locked(
                         cmd_reload, censo_dir,
                         censo_dir / "censo_recover.log",
-                        # set_pe_list=False: ver Bug #1 junto a build_omp_env().
-                        # taskset -c (abajo, cpu_list=) sigue confinando todo
-                        # el árbol de CENSO al pool; MAAQC_PE_LIST NO se fija
-                        # a nivel del proceso censo padre (evita el pe-list
-                        # compartido entre sub-jobs). censo_slot_groups fija
-                        # MAAQC_CENSO_SLOTS para que el parche de CENSO
-                        # (orca_processor.py, ver censo_patch/) asigne cada
-                        # conformero a uno de los MAAQC_CENSO_N_SLOTS slots
-                        # de forma determinística, evitando la colisión
-                        # parcial que quedaba con el binding libre del kernel.
                         build_omp_env(NPROCS_CREST, cpu_list=_recover_cpu_pool,
-                                       set_pe_list=False,
-                                       censo_slot_groups=_recover_slot_groups),
+                                       set_pe_list=False),
                         CENSO_TIMEOUT_HOURS,
                         cpu_list=_recover_cpu_pool,
                     )
@@ -2004,6 +2055,8 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
                     log.error("[CENSO-RECOVER]  ✗  TIMEOUT en --reload")
                 except Exception as _e:
                     log.error(f"[CENSO-RECOVER]  ✗  error en --reload: {_e}")
+                finally:
+                    _cpu_lock_release()
 
         # ── Limpieza de subcarpetas CONF* corruptas / no recuperables ───────
         # Solo se borran las carpetas CONF* individuales; el directorio
@@ -2106,25 +2159,24 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
              + ("  [nohup]" if USE_NOHUP else ""))
     t0 = time.time()
     try:
-        censo_cpu_pool = assign_cpu_pool(NPROCS_CREST)
-        censo_slot_groups = partition_cpu_pool_into_slots(
-            censo_cpu_pool, MAAQC_CENSO_N_SLOTS
-        )
-        # set_pe_list=False: ver Bug #1 junto a build_omp_env(). taskset -c
-        # (abajo, cpu_list=) sigue confinando todo el árbol de CENSO al
-        # pool; MAAQC_PE_LIST NO se fija a nivel del proceso censo padre
-        # (evita el pe-list compartido entre sub-jobs — bug medido: 3
-        # subjobs con el mismo pe-list, :ORDERED tomando solo los primeros
-        # 4 elementos, saturando 2 cores físicos con 102°C mientras el
-        # resto del pool quedaba ocioso). censo_slot_groups fija
-        # MAAQC_CENSO_SLOTS para que el parche de CENSO (orca_processor.py,
-        # ver censo_patch/) asigne cada conformero a uno de los
-        # MAAQC_CENSO_N_SLOTS slots de forma determinística.
+        # 2026-07: se abandonó el intento de repartir manualmente los
+        # sub-jobs internos de CENSO (MAAQC_CENSO_SLOTS + parche local en
+        # orca_processor.py) — seguía mostrando colisión parcial entre
+        # sub-jobs (Cpus_allowed_list solapados) pese a todas las capas de
+        # fix anteriores. En vez de seguir forzando la asignación a mano,
+        # censo_cpu_pool solo fija el LÍMITE EXTERIOR del árbol completo
+        # de CENSO vía taskset (esto sí es necesario: coordina con otras
+        # instancias de pipeline.py corriendo en paralelo, vía
+        # CPU_LOCK_FILE). Dentro de ese pool, el reparto entre los propios
+        # sub-jobs de CENSO (Dask + xtb --parallel) queda 100% a cargo del
+        # scheduler del kernel — set_pe_list=False evita que se le imponga
+        # un MAAQC_PE_LIST compartido entre sub-jobs (esa era la causa raíz
+        # original del solapamiento, ver Bug #1 junto a build_omp_env()).
+        censo_cpu_pool = _acquire_cpu_pool(NPROCS_CREST, log, "CENSO")
         proc = _run_censo_locked(
             cmd, censo_dir, censo_dir / "censo.log",
             build_omp_env(NPROCS_CREST, cpu_list=censo_cpu_pool,
-                           set_pe_list=False,
-                           censo_slot_groups=censo_slot_groups),
+                           set_pe_list=False),
             CENSO_TIMEOUT_HOURS,
             cpu_list=censo_cpu_pool,
         )
@@ -2145,6 +2197,8 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
     except Exception as e:
         log.error(f"[CENSO]  ✗  error inesperado: {e} — usando ensemble CREST sin filtrar")
         return conformers_xyz
+    finally:
+        _cpu_lock_release()
 
     elapsed = (time.time() - t0) / 60
 
@@ -2955,7 +3009,7 @@ def stage_opt(conformers_xyz: Path, mol_dir: Path,
     lote_num = 0
     while idx < len(tasks_all):
         want      = min(OPT_BATCH_SIZE, len(tasks_all) - idx)
-        cpu_lists = assign_cpu_lists(want, NPROCS)
+        cpu_lists = _acquire_cpu_lists(want, NPROCS, log, "OPT")
         if not cpu_lists:
             log.error("[OPT] no hay suficientes cores físicos independientes "
                        "para asignar ni un solo job — abortando etapa OPT")
@@ -2990,8 +3044,10 @@ def stage_opt(conformers_xyz: Path, mol_dir: Path,
                 log.warning("[OPT] Ctrl-C — cancelando lote, esperando workers…")
                 pool.shutdown(wait=False, cancel_futures=True)
                 _kill_active_procs()
+                _cpu_lock_release()
                 sys.exit(130)
 
+        _cpu_lock_release()
         idx += len(cpu_lists)
 
     log.info(f"[OPT] {len(successful)}/{len(conformers)} confórmeros optimizados")
@@ -3120,7 +3176,7 @@ def stage_sp(freq_dirs: list[Path], mol_dir: Path,
     lote_num = 0
     while idx < len(tasks_all):
         want      = min(_batch, len(tasks_all) - idx)
-        cpu_lists = assign_cpu_lists(want, _nprocs)
+        cpu_lists = _acquire_cpu_lists(want, _nprocs, log, "SP")
         if not cpu_lists:
             log.error("[SP] no hay suficientes cores físicos independientes "
                        "para asignar ni un solo job — abortando etapa SP")
@@ -3150,12 +3206,139 @@ def stage_sp(freq_dirs: list[Path], mol_dir: Path,
                 log.warning("[SP] Ctrl-C — cancelando lote, esperando workers…")
                 pool.shutdown(wait=False, cancel_futures=True)
                 _kill_active_procs()
+                _cpu_lock_release()
                 sys.exit(130)
 
+        _cpu_lock_release()
         idx += len(cpu_lists)
 
     log.info(f"[SP] {len(successful)}/{len(freq_dirs)} completados")
     return successful
+
+
+def stage_sp_gas(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
+                  batch_size: int = 0,
+                  nprocs_per_job: Optional[int] = None,
+                  maxcore_per_job: Optional[int] = None) -> list[Path]:
+    """
+    Etapa 04b_sp_gas (OPCIONAL — requiere --spgas): single point fase-gas
+    (idéntico al SP con CPCM(water) pero sin el bloque CPCM), sobre los
+    mismos confórmeros y con la misma geometría/charge/mult que un
+    04_sp/<conf_id>/ ya exitoso.
+
+    Devuelve directorios 04b_sp_gas/<conf_id>/ exitosos.
+
+    batch_size=0  → usa SP_BATCH_SIZE global (comparte recursos con SP normal).
+    nprocs_per_job / maxcore_per_job sobreescriben los globals NPROCS / MAXCORE
+    para cada worker paralelo; si son None se usan los globals vigentes.
+    """
+    _batch   = batch_size if batch_size > 0 else SP_BATCH_SIZE
+    _nprocs  = nprocs_per_job  if nprocs_per_job  is not None else NPROCS
+    _maxcore = maxcore_per_job if maxcore_per_job is not None else MAXCORE
+
+    log.info(f"[SP_GAS] single point fase-gas para {len(sp_dirs)} confórmeros "
+             f"(batch={_batch}, {_nprocs} cores/job)")
+    template   = get_template("sp_gas")
+    successful = []
+
+    n_lotes = -(-len(sp_dirs) // _batch)   # ceiling division
+    log.info(f"[SP_GAS] {len(sp_dirs)} SPs fase-gas en {n_lotes} lote(s) de ≤{_batch} "
+             f"(CPUs activos/lote: {_batch * _nprocs})")
+
+    tasks_all = [
+        {
+            "conf_id":  d.name,
+            "sp_dir":   d,
+            "template": template,
+            "nprocs":   _nprocs,
+            "maxcore":  _maxcore,
+            "mol_dir":  mol_dir,
+            "log":      log,
+        }
+        for d in sp_dirs
+    ]
+
+    _check_cpu_budget(_batch, _nprocs, log)
+
+    idx      = 0
+    lote_num = 0
+    while idx < len(tasks_all):
+        want      = min(_batch, len(tasks_all) - idx)
+        cpu_lists = _acquire_cpu_lists(want, _nprocs, log, "SP_GAS")
+        if not cpu_lists:
+            log.error("[SP_GAS] no hay suficientes cores físicos independientes "
+                       "para asignar ni un solo job — abortando etapa SP_GAS")
+            break
+        batch    = tasks_all[idx: idx + len(cpu_lists)]
+        lote_num += 1
+        ids      = [t["conf_id"] for t in batch]
+
+        for t, cl in zip(batch, cpu_lists):
+            t["cpu_list"] = cl
+
+        log.info(f"[SP_GAS] ── Lote {lote_num}/~{n_lotes}: {ids}  "
+                 f"(cores: {[','.join(map(str, cl)) for cl in cpu_lists]})")
+
+        with ThreadPoolExecutor(max_workers=len(batch)) as pool:
+            futures = {pool.submit(_sp_gas_worker, t): t["conf_id"] for t in batch}
+            try:
+                for fut in as_completed(futures):
+                    res = fut.result()
+                    tag = "✓" if res["success"] else "✗"
+                    log.info(f"[SP_GAS]   {tag} {res['conf_id']}  ({res['elapsed']:.1f} min)")
+                    if res["success"] and res["sp_gas_dir"] is not None:
+                        successful.append(res["sp_gas_dir"])
+                    else:
+                        log.warning(f"[SP_GAS] {res['conf_id']} falló — excluido")
+            except KeyboardInterrupt:
+                log.warning("[SP_GAS] Ctrl-C — cancelando lote, esperando workers…")
+                pool.shutdown(wait=False, cancel_futures=True)
+                _kill_active_procs()
+                _cpu_lock_release()
+                sys.exit(130)
+
+        _cpu_lock_release()
+        idx += len(cpu_lists)
+
+    log.info(f"[SP_GAS] {len(successful)}/{len(sp_dirs)} completados")
+    return successful
+
+
+def stage_spgas_batch(group_dir: Path, log: logging.Logger) -> None:
+    """
+    Modo batch de --spgas: recorre TODAS las corridas dentro de una carpeta
+    de grupo (<grupo>/runs/*/04_sp/conf_*) y calcula el SP_GAS que falte
+    para cada confórmero con SP CPCM ya exitoso, sin tocar CREST/OPT/
+    NUMFREQ/TDDFT de ninguna. Como stage_sp_gas usa check_success() para
+    saltar los ya hechos, correr el mismo comando dos veces es seguro
+    (solo procesa los faltantes).
+
+    Se invoca cuando --spgas se pasa con --mol apuntando a una carpeta de
+    grupo (ej. MGLYVAL) en vez de a un .xyz específico.
+    """
+    runs_dir = group_dir / "runs"
+    if not runs_dir.is_dir():
+        sys.exit(f"ERROR: no se encontró {runs_dir} — "
+                  f"¿'{group_dir.name}' es una carpeta de grupo válida?")
+
+    total_ok, total_pend = 0, 0
+    for mol_dir in sorted(runs_dir.iterdir()):
+        if not mol_dir.is_dir():
+            continue
+        sp_root = mol_dir / "04_sp"
+        if not sp_root.exists():
+            continue
+        sp_dirs = [d for d in sorted(sp_root.glob("conf_*"))
+                   if check_success(d / "sp.out")]
+        if not sp_dirs:
+            continue
+
+        log.info(f"[SP_GAS] {mol_dir.name}: {len(sp_dirs)} confórmeros con SP CPCM completo")
+        done = stage_sp_gas(sp_dirs, mol_dir, log)
+        total_ok += len(done)
+        total_pend += len(sp_dirs) - len(done)
+
+    log.info(f"[SP_GAS] batch finalizado: {total_ok} completados, {total_pend} pendientes/fallidos")
 
 
 def _tddft_worker(task: dict) -> dict:
@@ -3262,7 +3445,7 @@ def stage_tddft(sp_dirs: list[Path], mol_dir: Path,
     lote_num = 0
     while idx < len(tasks_all):
         want      = min(TDDFT_BATCH_SIZE, len(tasks_all) - idx)
-        cpu_lists = assign_cpu_lists(want, NPROCS_TDDFT)
+        cpu_lists = _acquire_cpu_lists(want, NPROCS_TDDFT, log, "TDDFT")
         if not cpu_lists:
             log.error("[TDDFT] no hay suficientes cores físicos independientes "
                        "para asignar ni un solo job — abortando etapa TDDFT")
@@ -3292,8 +3475,10 @@ def stage_tddft(sp_dirs: list[Path], mol_dir: Path,
                 log.warning("[TDDFT] Ctrl-C — cancelando lote, esperando workers…")
                 pool.shutdown(wait=False, cancel_futures=True)
                 _kill_active_procs()
+                _cpu_lock_release()
                 sys.exit(130)
 
+        _cpu_lock_release()
         idx += len(cpu_lists)
 
     log.info(f"[TDDFT] {len(successful)}/{len(sp_dirs)} completados")
@@ -3682,6 +3867,76 @@ def _sp_worker(task: dict) -> dict:
     }
 
 
+def _sp_gas_worker(task: dict) -> dict:
+    """
+    Worker para un único SP fase-gas (sin CPCM), diseñado para ejecutarse
+    en un hilo de ThreadPoolExecutor. Mismo patrón que _sp_worker, pero:
+      - parte de un 04_sp/<conf_id>/ ya exitoso (sp_dir), no de un freq_dir.
+      - charge/mult se leen de sp_dir/"sp.inp" (no de task["charge"]), para
+        garantizar que coincide exactamente con el SP CPCM que le dio origen.
+      - la geometría se copia desde sp_dir/"opt_opt.xyz" (la misma que usó
+        el SP CPCM), no desde 02_opt/ ni 03_numfreq/ directamente — así el
+        SP_GAS queda 100% trazable al mismo SP.
+
+    task debe contener:
+        conf_id, sp_dir, template, nprocs, maxcore, mol_dir, log
+    Opcional:
+        cpu_list: list[int] de CPUs lógicas exclusivas para este worker.
+
+    Devuelve:
+        dict con conf_id, sp_gas_dir (Path o None), success, elapsed (min)
+    """
+    conf_id  : str            = task["conf_id"]
+    sp_dir   : Path           = task["sp_dir"]
+    template : str            = task["template"]
+    nprocs   : int            = task["nprocs"]
+    maxcore  : int            = task["maxcore"]
+    mol_dir  : Path           = task["mol_dir"]
+    log      : logging.Logger = task["log"]
+    cpu_list : Optional[list[int]] = task.get("cpu_list")
+
+    sp_inp = sp_dir / "sp.inp"
+    charge_mult = _parse_charge_mult_from_sp_inp(sp_inp)
+    if charge_mult is None:
+        log.warning(f"[SP_GAS] {conf_id}: no se pudo leer charge/mult de "
+                    f"{sp_inp} — saltando")
+        return {"conf_id": conf_id, "sp_gas_dir": None, "success": False, "elapsed": 0.0}
+    charge, mult = charge_mult
+
+    opt_xyz = sp_dir / "opt_opt.xyz"
+    if not opt_xyz.exists():
+        log.warning(f"[SP_GAS] {conf_id}: no se encontró {opt_xyz} — saltando")
+        return {"conf_id": conf_id, "sp_gas_dir": None, "success": False, "elapsed": 0.0}
+
+    sp_gas_dir = mol_dir / "04b_sp_gas" / conf_id
+    sp_gas_dir.mkdir(parents=True, exist_ok=True)
+
+    out_file = sp_gas_dir / "sp_gas.out"
+    inp_file = sp_gas_dir / "sp_gas.inp"
+
+    if not check_success(out_file):
+        if not safe_copy(opt_xyz, sp_gas_dir / "opt_opt.xyz"):
+            log.warning(f"[SP_GAS] {conf_id}: error copiando opt_opt.xyz — saltando")
+            return {"conf_id": conf_id, "sp_gas_dir": None, "success": False, "elapsed": 0.0}
+        inp_text = template.format(
+            CHARGE=charge, MULT=mult,
+            NPROCS=nprocs, MAXCORE=maxcore,
+        )
+        inp_file.write_text(inp_text)
+
+    t0         = time.time()
+    worker_env = build_omp_env(nprocs, cpu_list=cpu_list)
+    success    = run_orca(inp_file, out_file, log, env=worker_env, cpu_list=cpu_list)
+    elapsed    = (time.time() - t0) / 60
+
+    return {
+        "conf_id":    conf_id,
+        "sp_gas_dir": sp_gas_dir if success else None,
+        "success":    success,
+        "elapsed":    elapsed,
+    }
+
+
 # ── Topología REAL de este ThinkPad T14 (Core Ultra 7), confirmada con
 #    `lscpu -e`. Elevada a nivel de módulo porque tanto assign_cpu_lists()
 #    (pinning por-job, usado por ORCA) como assign_cpu_pool() (pinning de
@@ -3740,7 +3995,153 @@ PU_TO_CORE: dict[int, int] = {
 }
 
 
-def assign_cpu_lists(batch_size: int, nprocs_per_job: int) -> list[list[int]]:
+# ── Coordinación de CPUs ENTRE PROCESOS (2026-07-12) ──────────────────────
+#
+# assign_cpu_lists()/assign_cpu_pool() reparten cores correctamente DENTRO
+# de un mismo proceso (todos los workers de un ThreadPoolExecutor comparten
+# el mismo cálculo), pero cada invocación de `python3 pipeline.py` es un
+# proceso independiente que arranca su cálculo SIEMPRE desde el mismo pool
+# estático (E_CORE_SINGLES = [4,5,6,7,8,9,10,11], empezando por el frente).
+#
+# Confirmado con `ps` + `/proc/<pid>/status`: corriendo SP_GAS (--cores 8)
+# en paralelo con otro SP (--cores 4) ya en curso, ambos procesos reclamaron
+# PUs 4-9 (oversuscritos 3-5x cada uno) mientras 10-11 nunca se usaron —
+# "7 cores en total" en vez de los ~12 esperados entre ambos. No hay nada
+# que le avise a un proceso que el otro ya reservó ciertos PUs.
+#
+# Fix: lock file compartido en /tmp (sobrevive solo mientras el sistema no
+# reinicia, lo cual es deseable — descarta reservas viejas automáticamente
+# en cada boot) con reservas por PID, protegido con flock para acceso
+# atómico. Cada proceso, antes de calcular su asignación, lee qué PUs
+# tienen reservados OTROS PIDs vivos (podando los de PIDs muertos) y los
+# excluye del pool disponible; después de calcular, registra su propia
+# reserva. Fail-open: si el lock file no se puede leer/escribir por
+# cualquier motivo, el pipeline sigue funcionando igual que antes (con
+# riesgo de colisión, pero sin abortar).
+CPU_LOCK_FILE = Path("/tmp/maaqc_cpu_lock.json")
+
+
+def _cpu_lock_busy_cpus() -> set[int]:
+    """
+    Devuelve el conjunto de CPUs lógicas reservadas AHORA MISMO por OTROS
+    procesos vivos (pipeline.py u otros que usen este lock), leyendo y
+    depurando CPU_LOCK_FILE. Nunca incluye la reserva del propio proceso.
+    """
+    if not CPU_LOCK_FILE.exists():
+        return set()
+    my_pid = str(os.getpid())
+    try:
+        with open(CPU_LOCK_FILE, "r+") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                raw = f.read().strip()
+                data = json.loads(raw) if raw else {}
+                alive: dict[str, list[int]] = {}
+                for pid_str, cpus in data.items():
+                    if pid_str == my_pid:
+                        continue
+                    try:
+                        os.kill(int(pid_str), 0)
+                    except (OSError, ValueError):
+                        continue   # PID muerto o inválido — se poda
+                    alive[pid_str] = cpus
+                # Reescribir depurado (poda de PIDs muertos), preservando
+                # la propia reserva si existía.
+                if my_pid in data:
+                    alive[my_pid] = data[my_pid]
+                f.seek(0)
+                json.dump(alive, f)
+                f.truncate()
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+        alive.pop(my_pid, None)
+        return {c for cpus in alive.values() for c in cpus}
+    except (OSError, ValueError, json.JSONDecodeError):
+        return set()   # fail-open
+
+
+def _cpu_lock_reserve(cpus: list[int]) -> None:
+    """Registra los CPUs que el proceso actual (PID) usará en este lote."""
+    try:
+        CPU_LOCK_FILE.touch(exist_ok=True)
+        with open(CPU_LOCK_FILE, "r+") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                raw = f.read().strip()
+                data = json.loads(raw) if raw else {}
+                data[str(os.getpid())] = cpus
+                f.seek(0)
+                json.dump(data, f)
+                f.truncate()
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass   # fail-open: sin coordinación, pero el pipeline sigue
+
+
+def _cpu_lock_release() -> None:
+    """Libera la reserva de CPUs del proceso actual (llamar al terminar cada lote)."""
+    if not CPU_LOCK_FILE.exists():
+        return
+    try:
+        with open(CPU_LOCK_FILE, "r+") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                raw = f.read().strip()
+                data = json.loads(raw) if raw else {}
+                data.pop(str(os.getpid()), None)
+                f.seek(0)
+                json.dump(data, f)
+                f.truncate()
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+
+
+def _acquire_cpu_lists(want: int, nprocs_per_job: int,
+                        log: logging.Logger, tag: str) -> list[list[int]]:
+    """
+    Wrapper de assign_cpu_lists() que coordina con OTRAS instancias de
+    pipeline.py corriendo en paralelo vía CPU_LOCK_FILE: excluye los PUs
+    que otro proceso vivo ya tiene reservados, calcula la asignación sobre
+    el resto, y registra la reserva propia bajo el PID actual.
+
+    El caller es responsable de llamar _cpu_lock_release() cuando el lote
+    termina (éxito, fallo o Ctrl-C) para liberar los PUs para otros procesos.
+    """
+    busy_others = _cpu_lock_busy_cpus()
+    cpu_lists = assign_cpu_lists(want, nprocs_per_job, exclude=busy_others)
+    if busy_others:
+        log.info(f"[{tag}] excluyendo PUs reservados por otra(s) instancia(s) "
+                 f"de pipeline.py: {sorted(busy_others)}")
+    if cpu_lists:
+        _cpu_lock_reserve([c for cl in cpu_lists for c in cl])
+    return cpu_lists
+
+
+def _acquire_cpu_pool(n_cores: int, log: logging.Logger, tag: str) -> list[int]:
+    """
+    Wrapper de assign_cpu_pool() — análogo a _acquire_cpu_lists() pero para
+    el pool "plano" que usa CENSO (un único proceso de larga duración, no
+    un lote de workers). Excluye los PUs que otra instancia de pipeline.py
+    ya tiene reservados y registra la reserva propia bajo el PID actual.
+
+    El caller es responsable de llamar _cpu_lock_release() cuando CENSO
+    termina (éxito, timeout, error o Ctrl-C) para liberar los PUs.
+    """
+    busy_others = _cpu_lock_busy_cpus()
+    cpu_pool = assign_cpu_pool(n_cores, exclude=busy_others)
+    if busy_others:
+        log.info(f"[{tag}] excluyendo PUs reservados por otra(s) instancia(s) "
+                 f"de pipeline.py: {sorted(busy_others)}")
+    if cpu_pool:
+        _cpu_lock_reserve(cpu_pool)
+    return cpu_pool
+
+
+def assign_cpu_lists(batch_size: int, nprocs_per_job: int,
+                      exclude: Optional[set[int]] = None) -> list[list[int]]:
     """
     Calcula listas explícitas de CPUs lógicas (no necesariamente
     contiguas) para cada worker de un lote, basadas en la topología REAL
@@ -3778,9 +4179,9 @@ def assign_cpu_lists(batch_size: int, nprocs_per_job: int) -> list[list[int]]:
     (todos los workers de un batch esperan al más lento).
 
     nprocs_per_job determina cuántas CPUs lógicas recibe cada worker:
-      - == 2: preferentemente 1 P-core completo (2 hilos SMT); si no
-        alcanzan los P-cores, 2 E-cores individuales (no comparten core
-        físico entre sí, pero tampoco se parte ningún core entre jobs).
+      - == 2: preferentemente 2 E-cores individuales (físicamente
+        independientes); los P-core blocks (2 hilos SMT de UN solo core
+        físico) se usan solo como último recurso — ver BUGFIX abajo.
       - == 1: 1 E-core (preferido) o, si no alcanzan, 1 hilo SMT de P-core.
       - otro valor (ej. 6 para NumFreq): reparto secuencial sobre el pool
         completo en el mismo orden de prioridad.
@@ -3790,26 +4191,63 @@ def assign_cpu_lists(batch_size: int, nprocs_per_job: int) -> list[list[int]]:
     batch_size workers, la lista devuelta es más corta que batch_size
     (el caller debe manejarlo o confiar en _check_cpu_budget para advertir
     antes de llegar aquí).
+
+    `exclude`, si se pasa, es un conjunto de PUs a NO usar — normalmente
+    los PUs que otra instancia de pipeline.py ya tiene reservados AHORA
+    MISMO (ver _acquire_cpu_lists() / CPU_LOCK_FILE). Un P_CORE_BLOCK se
+    descarta por completo si cualquiera de sus 2 PUs está excluido (no
+    tiene sentido partir un bloque SMT entre dos procesos distintos).
     """
+    excl        = exclude or set()
+    p_blocks    = [b for b in P_CORE_BLOCKS if not (set(b) & excl)]
+    e_singles   = [c for c in E_CORE_SINGLES if c not in excl]
+    lp_singles  = [c for c in LP_CORE_SINGLES if c not in excl]
+
     lists: list[list[int]] = []
 
     if nprocs_per_job == 2:
-        for block in P_CORE_BLOCKS:
+        # BUGFIX (2026-07-12, descubierto corriendo SP_GAS con --cores 8,
+        # pero afecta a CUALQUIER etapa con nprocs_per_job==2 — SP/OPT
+        # incluidos, simplemente no se había dado la combinación de
+        # --cores que fuerza nprocs=2 antes de ahora):
+        #
+        # La idea original era dar cada job de 2 ranks (mpirun -np 2) un
+        # P-core completo (sus 2 hilos SMT), asumiendo que
+        # --map-by pe-list=<core>,<core>:ORDERED:hwtcpus --bind-to hwthread
+        # (inyectado por el wrapper de mpirun vía MAAQC_PE_LIST) reparte
+        # cada rank a un hilo SMT distinto del MISMO índice de Core.
+        #
+        # En la práctica, PRTE round-robin-mapea por CORE por defecto: con
+        # pe-list="0,0" (2 entradas repitiendo el mismo índice de Core),
+        # PRTE ve un único objeto Core disponible para 2 ranks y aborta con
+        # "prte-rmaps-rr:not-enough-cpus" en Startup — el wrapper actual no
+        # fuerza --map-by a granularidad hwthread, solo --bind-to hwthread
+        # (que solo controla el binding DESPUÉS de mapear, no la unidad de
+        # mapeo). Confirmado con conf_001/conf_002 (cores 0,1 y 2,3 — ambos
+        # P_CORE_BLOCKS) fallando, mientras conf_003 (cores 4,5 — 2 E-cores
+        # físicamente independientes) corrió sin problema.
+        #
+        # Fix: para nprocs_per_job==2 priorizar 2 E-cores físicamente
+        # independientes (mismo patrón ya usado para nprocs_per_job>=3, ver
+        # comentario más abajo) y dejar los P_CORE_BLOCKS (SMT de 1 core)
+        # como último recurso, con advertencia — hasta que el wrapper de
+        # mpirun soporte --map-by hwthread explícito para este caso.
+        e_pool = list(e_singles)
+        while len(lists) < batch_size and len(e_pool) >= 2:
+            lists.append([e_pool.pop(0), e_pool.pop(0)])
+
+        for block in p_blocks:
             if len(lists) >= batch_size:
                 break
             lists.append(list(block))
 
-        e_pool = list(E_CORE_SINGLES)
-        while len(lists) < batch_size and len(e_pool) >= 2:
-            lists.append([e_pool.pop(0), e_pool.pop(0)])
-
-        lp_pool = list(LP_CORE_SINGLES)
+        lp_pool = list(lp_singles)
         while len(lists) < batch_size and len(lp_pool) >= 2:
             lists.append([lp_pool.pop(0), lp_pool.pop(0)])
 
     elif nprocs_per_job == 1:
-        pool = list(E_CORE_SINGLES) + list(LP_CORE_SINGLES) + \
-               [c for block in P_CORE_BLOCKS for c in block]
+        pool = list(e_singles) + list(lp_singles) + \
+               [c for block in p_blocks for c in block]
         for cpu in pool:
             if len(lists) >= batch_size:
                 break
@@ -3830,7 +4268,7 @@ def assign_cpu_lists(batch_size: int, nprocs_per_job: int) -> list[list[int]]:
         # último recurso. Los P-core blocks quedan excluidos aquí — no hay
         # forma de darle 3+ hilos a un job y que sigan siendo físicamente
         # reales dentro de un bloque de 2 hilos SMT.
-        full_pool = list(E_CORE_SINGLES) + list(LP_CORE_SINGLES)
+        full_pool = list(e_singles) + list(lp_singles)
         idx = 0
         for _ in range(batch_size):
             chunk = full_pool[idx: idx + nprocs_per_job]
@@ -3842,7 +4280,7 @@ def assign_cpu_lists(batch_size: int, nprocs_per_job: int) -> list[list[int]]:
     return lists
 
 
-def assign_cpu_pool(n_cores: int) -> list[int]:
+def assign_cpu_pool(n_cores: int, exclude: Optional[set[int]] = None) -> list[int]:
     """
     Calcula una única lista plana de CPUs lógicas — no una lista por
     worker como assign_cpu_lists() — para confinar vía `taskset -c` un
@@ -3882,24 +4320,35 @@ def assign_cpu_pool(n_cores: int) -> list[int]:
     frecuencia), luego E-cores, y LP E-cores solo si no alcanza con lo
     anterior (se avisa por log en el caller si esto ocurre).
 
+    `exclude`, si se pasa, son PUs reservados por OTRA instancia de
+    pipeline.py AHORA MISMO (ver _acquire_cpu_lists()/CPU_LOCK_FILE) —
+    se descartan del pool antes de repartir. Igual que en
+    assign_cpu_lists(), un P_CORE_BLOCK se descarta completo si
+    cualquiera de sus 2 PUs está excluido.
+
     Devuelve una lista de hasta n_cores CPUs lógicas. Si n_cores excede
     las CPUs físicas reales de la máquina (12 en este ThinkPad: 2
     P-cores + 8 E-cores, sin contar LP), la lista incluye también los
     LP E-cores como último recurso y, si aún así no alcanza, se trunca
     a las CPUs lógicas disponibles en el sistema.
     """
+    excl = exclude or set()
+    p_blocks   = [b for b in P_CORE_BLOCKS if not (set(b) & excl)]
+    e_singles  = [c for c in E_CORE_SINGLES if c not in excl]
+    lp_singles = [c for c in LP_CORE_SINGLES if c not in excl]
+
     pool: list[int] = []
-    for block in P_CORE_BLOCKS:
+    for block in p_blocks:
         if len(pool) >= n_cores:
             break
         pool.extend(block)
 
-    for cpu in E_CORE_SINGLES:
+    for cpu in e_singles:
         if len(pool) >= n_cores:
             break
         pool.append(cpu)
 
-    for cpu in LP_CORE_SINGLES:
+    for cpu in lp_singles:
         if len(pool) >= n_cores:
             break
         pool.append(cpu)
@@ -4000,7 +4449,7 @@ def print_status():
             if not mol_dir.is_dir():
                 continue
             print(f"\n  📁 {group_dir.name}/{mol_dir.name}")
-            for step_num in ["01_crest", "02_opt", "03_numfreq", "04_sp", "05_tddft", "06_sp_nroot", "07_adc2"]:
+            for step_num in ["01_crest", "02_opt", "03_numfreq", "04_sp", "04b_sp_gas", "05_tddft", "06_sp_nroot", "07_adc2"]:
                 step_dir = mol_dir / step_num
                 if not step_dir.exists():
                     print(f"     {step_num:12s}  —  no iniciado")
@@ -4168,6 +4617,22 @@ def _run_one(args, parser):
     mol_xyz = args.mol.resolve()
     if not mol_xyz.exists():
         sys.exit(f"ERROR: no se encontró {mol_xyz}")
+
+    # ── Modo batch SP_GAS sobre carpeta de grupo (--spgas + --mol carpeta) ──
+    # No es un .xyz: --mol apunta directo a la carpeta de grupo (ej. MGLYVAL),
+    # y se recorren TODOS los runs/ dentro de ella calculando el SP_GAS que
+    # falte, sin correr ningún otro paso del pipeline.
+    if args.spgas and mol_xyz.is_dir():
+        group_dir = mol_xyz
+        log = setup_logging(group_dir)
+        log.info("=" * 60)
+        log.info(f"MODO: SP_GAS batch (--spgas) sobre carpeta de grupo → {group_dir.name}")
+        log.info("=" * 60)
+        stage_spgas_batch(group_dir, log)
+        log.info("=" * 60)
+        log.info("SP_GAS BATCH FINALIZADO")
+        log.info("=" * 60)
+        return
 
     if not mol_xyz.suffix.lower() == ".xyz":
         sys.exit(f"ERROR: el archivo de entrada debe ser un .xyz: {mol_xyz}")
@@ -4425,6 +4890,20 @@ def _run_one(args, parser):
                       "(SP fase gas es obligatorio para finalizar el pipeline).")
             sys.exit(1)
 
+    # ── Etapa 4b: SP_GAS (OPCIONAL — requiere --spgas) ───────────
+    # Idéntico al SP (Etapa 4) pero sin CPCM(water). No bloquea
+    # "PIPELINE FINALIZADO" — es aditivo, igual que --adc2.
+    if args.spgas:
+        log.info(f"[SP_GAS] calculando SP fase-gas (sin CPCM) para "
+                 f"{len(sp_dirs)} confórmeros de 04_sp/")
+        spgas_dirs = stage_sp_gas(sp_dirs, mol_dir, log)
+        if not spgas_dirs:
+            log.warning("[SP_GAS] ningún cálculo completado.")
+        else:
+            log.info(f"[SP_GAS] {len(spgas_dirs)}/{len(sp_dirs)} completados ✓")
+    else:
+        log.info("[SP_GAS] no incluido en esta ejecución (opcional — usa --spgas)")
+
     # ── Etapa 5: TDDFT ──────────────────────────────────────────
     if start_idx <= STEPS.index("tddft"):
         tddft_dirs = stage_tddft(sp_dirs, mol_dir, args.charge, log)
@@ -4584,6 +5063,19 @@ Ejemplos (modo multi-molécula, --mol repetido):
             "salvo que --start sea posterior a esa etapa; ADC2 en cambio "
             "requiere pedirse explícitamente con --adc2 (o de forma "
             "standalone con --start adc2, que sigue funcionando igual)."
+        ),
+    )
+    parser.add_argument(
+        "--spgas", action="store_true",
+        help=(
+            "Incluye la etapa SP fase-gas (04b_sp_gas/) — OPCIONAL, solo se "
+            "calcula si se pide explícitamente. Idéntico al SP con CPCM(water) "
+            "pero sin CPCM (misma geometría, mismo charge/mult, leídos de "
+            "04_sp/<conf_id>/opt_opt.xyz y sp.inp). "
+            "Si --mol apunta a un .xyz: se agrega como paso extra al final de "
+            "esa corrida. Si --mol apunta a una carpeta de grupo (ej. MGLYVAL, "
+            "sin molecules/): calcula todos los sp_gas faltantes de TODOS los "
+            "runs/ dentro de esa carpeta, sin correr ningún otro paso."
         ),
     )
 

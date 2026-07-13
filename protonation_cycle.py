@@ -72,7 +72,7 @@ ESTRUCTURA DE DIRECTORIOS (igual que pipeline.py / results_collector.py)
   │       ├── R/                         ← estado de referencia/neutro
   │       │   ├── 03_numfreq/conf_001/freq.out
   │       │   ├── 04_sp/conf_001/sp.out          ← SP acuoso (CPCM)
-  │       │   └── 06_sp_gas/conf_001/sp_gas.out  ← SP fase gas (sin CPCM) [NUEVO]
+  │       │   └── 04b_sp_gas/conf_001/sp_gas.out ← SP fase gas (sin CPCM) [NUEVO]
   │       ├── A/                         ← estado de protonación A
   │       │   └── (mismo árbol)
   │       ├── B/                         ← estado de protonación B
@@ -92,7 +92,7 @@ en ese caso). Los nombres de estado que se pasan en
 --neutral/--anion/--dianion son los nombres de carpeta dentro de runs/
 (p. ej. "R", "A", "B", "C"), no rutas completas.
 
-Para el ciclo de pKa se requieren los SP en fase gas (06_sp_gas).
+Para el ciclo de pKa se requieren los SP en fase gas (04b_sp_gas).
 Si no existen, el módulo de pKa se omite con advertencia clara.
 
 ═══════════════════════════════════════════════════════════════════════════════
@@ -195,7 +195,7 @@ G_HPLUS_AQ = G_HPLUS_AQ_DIRECT
 # Subdirectorios dentro de cada mol en runs/
 SUBDIR_SP      = "04_sp"
 SUBDIR_FREQ    = "03_numfreq"
-SUBDIR_SP_GAS  = "06_sp_gas"   # SPs sin CPCM para el ciclo de pKa
+SUBDIR_SP_GAS  = "04b_sp_gas"  # SPs sin CPCM para el ciclo de pKa
 
 # ─────────────────────────────────────────────
 #  GOODVIBES  (corrección cuasi-armónica opcional)
@@ -593,32 +593,47 @@ def run_goodvibes(
     qh: bool = GV_QH,
 ) -> dict:
     """
-    Corre GoodVibes (`python -m goodvibes`, con el intérprete resuelto por
-    _resolve_gv_python()) sobre un freq.out de ORCA y extrae la corrección de
-    Gibbs CUASI-ARMÓNICA (mRRHO de Grimme para la entropía, y opcionalmente
-    Head-Gordon para la entalpía si qh=True).
+    Corre GoodVibes UNA vez sobre un freq.out de ORCA y extrae de la MISMA
+    tabla dos juegos de valores paralelos:
 
-    A diferencia de parse_thermochem() (RRHO puro, como lo reporta ORCA
-    directamente), GoodVibes reinterpola los modos de baja frecuencia
-    (< cutoff, default 100 cm⁻¹) como rotores libres en vez de osciladores
-    armónicos, evitando la sobreestimación de S (y por ende de −TS) que la
-    aproximación armónica pura produce ahí.
+      • "armónico puro"     → columnas T.S / G(T)       (nunca amortiguadas
+                               por el cutoff — así las define GoodVibes; T.S
+                               es el RRHO estándar, sin mRRHO)
+      • "cuasi-armónico"    → columnas T.qh-S / qh-G(T)  (mRRHO de Grimme,
+                               amortiguado con `cutoff`, default 100 cm⁻¹)
 
-    NOTA sobre la invocación: se usa `[python_exe, "-m", "goodvibes", ...]`
-    en vez de depender de que el binario `goodvibes` esté en el PATH del
-    proceso actual (`shutil.which("goodvibes")` se usaba antes, pero eso
-    falla silenciosamente en shells no interactivas — SSH sin `conda activate`,
-    cron, nohup en otra sesión — donde el PATH no incluye el bin/ del entorno
-    sciencebitch aunque GoodVibes esté perfectamente instalado ahí). Misma
-    estrategia que ya usa results_collector.py.
+    Esto es clave para que la comparación "armónico vs. GoodVibes" del
+    script sea limpia: antes, la pasada "armónica" salía de parse_thermochem()
+    (bloque THERMOCHEMISTRY de ORCA, que ya viene con `Quasi RRHO = True` y
+    su propio cutoff interno ~1 cm⁻¹) mientras que la pasada "GoodVibes"
+    salía de un cálculo aparte — dos fuentes de datos distintas, no
+    comparables limpiamente. Ahora ambas pasadas vienen del mismo cálculo de
+    frecuencias, la misma detección de simetría, etc.; la única diferencia
+    real entre ellas es si se aplica o no el amortiguamiento de Grimme.
 
-    Retorna dict con claves compatibles con el resto del pipeline:
-        G_corr, H_corr, S_total (Eh, Eh/K), n_imag, ok, warning
-    más los campos crudos de GoodVibes (scf_energy, qh_gibbs_free_energy).
+    Invocación (idéntica a la de terminal):
+
+        python -m goodvibes.GoodVibes <freq.out> \\
+            --qs grimme --freq_cutoff 100 -t 298.15
+
+    Se parsea la tabla de stdout (no `--json`/`--output_format`, cuyo nombre
+    de archivo de salida varía entre versiones de GoodVibes) — más simple,
+    algo más lento pero robusto a esos cambios de flags.
+
+    Retorna dict con:
+        scf_energy, ZPE, n_imag, ok, warning
+        G_corr_harmonic, H_corr_harmonic, S_total_harmonic, G_total_harmonic
+        G_corr_qh,       H_corr_qh,       S_total_qh,       G_total_qh
+    más alias retro-compatibles G_corr/H_corr/S_total/qh_gibbs_free_energy
+    (= los *_qh, que es lo que antes usaba la pasada "goodvibes").
     """
     null = {
         "G_corr": None, "H_corr": None, "S_total": None,
-        "scf_energy": None, "qh_gibbs_free_energy": None,
+        "scf_energy": None, "ZPE": None, "qh_gibbs_free_energy": None,
+        "G_corr_harmonic": None, "H_corr_harmonic": None,
+        "S_total_harmonic": None, "G_total_harmonic": None,
+        "G_corr_qh": None, "H_corr_qh": None,
+        "S_total_qh": None, "G_total_qh": None,
         "n_imag": 0, "ok": False, "warning": None,
     }
 
@@ -641,75 +656,156 @@ def run_goodvibes(
     except (subprocess.TimeoutExpired, OSError) as e:
         return {**null, "warning": f"No se pudo verificar goodvibes con {python_exe}: {e}"}
 
-    with tempfile.TemporaryDirectory() as tmp:
-        json_path = Path(tmp) / "gv_result.json"
-        cmd = [
-            python_exe, "-m", "goodvibes",
-            "--temp", str(T), "-f", str(cutoff), "--qs", qs,
-            "-v", "1.0",  # desactiva el auto-scaling de frecuencias de GoodVibes
-                          # (detectado por nivel de teoría vía tablas de Truhlar);
-                          # sin esto, el delta "harmónico vs. GoodVibes" mezcla el
-                          # efecto cuasi-armónico (mRRHO) con un factor de escalado
-                          # no controlado que parse_thermochem()/ORCA no aplican.
-                          # --zpe-vscal hereda este mismo valor si no se pasa aparte.
-        ]
-        if qh:
-            cmd.append("--qh")
-        cmd += ["--json", str(json_path), str(freq_out)]
+    cmd = [
+        python_exe, "-m", "goodvibes.GoodVibes", str(freq_out),
+        "--qs", qs, "--freq_cutoff", str(cutoff), "-t", str(T),
+    ]
+    if qh:
+        cmd.append("--qh")
 
-        try:
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
             proc = subprocess.run(
                 cmd, cwd=tmp, capture_output=True, text=True, timeout=180,
             )
-        except (subprocess.TimeoutExpired, OSError) as e:
-            return {**null, "warning": f"Fallo al ejecutar goodvibes ({python_exe} -m goodvibes): {e}"}
-
-        if not json_path.exists():
-            stderr_tail = (proc.stderr or "").strip()[-400:]
-            return {**null, "warning": (
-                f"goodvibes ({python_exe}) no generó JSON (returncode={proc.returncode}). "
-                f"{stderr_tail}"
-            )}
-
-        try:
-            payload = json.loads(json_path.read_text())
-        except (OSError, json.JSONDecodeError) as e:
-            return {**null, "warning": f"No se pudo leer el JSON de goodvibes: {e}"}
-
-    results = payload.get("results") or []
-    if not results:
-        return {**null, "warning": "goodvibes no devolvió resultados para este archivo."}
-
-    thermo = results[0].get("thermo") or {}
-    scf_energy = thermo.get("scf_energy")
-    qh_gibbs   = thermo.get("qh_gibbs_free_energy")
-    # Entalpía: si --qh está activo, usa la entalpía cuasi-armónica (Head-Gordon);
-    # si no, GoodVibes deja la entalpía en su forma armónica estándar.
-    enthalpy   = thermo.get("qh_enthalpy") if qh else thermo.get("enthalpy")
-    # Entropía: siempre cuasi-armónica (mRRHO), que es el objeto del análisis.
-    entropy    = thermo.get("qh_entropy")
-    im_freqs   = thermo.get("im_frequency_wn") or []
-    n_imag     = len(im_freqs) if isinstance(im_freqs, list) else 0
-
-    if scf_energy is None or qh_gibbs is None:
+    except (subprocess.TimeoutExpired, OSError) as e:
         return {**null, "warning": (
-            "goodvibes no reportó scf_energy/qh_gibbs_free_energy "
+            f"Fallo al ejecutar goodvibes ({python_exe} -m goodvibes.GoodVibes): {e}"
+        )}
+
+    if proc.returncode != 0:
+        stderr_tail = (proc.stderr or "").strip()[-400:]
+        return {**null, "warning": (
+            f"goodvibes ({python_exe}) terminó con returncode={proc.returncode}. "
+            f"{stderr_tail}"
+        )}
+
+    stdout = proc.stdout or ""
+    parsed = _parse_goodvibes_table(stdout, freq_out.stem)
+    if parsed is None:
+        stdout_tail = stdout.strip()[-600:]
+        return {**null, "warning": (
+            f"No se pudo parsear la tabla de salida de goodvibes para "
+            f"{freq_out.name}. Salida (cola):\n{stdout_tail}"
+        )}
+
+    scf_energy = parsed.get("E")
+    ZPE        = parsed.get("ZPE")
+    G_qh       = parsed.get("qh-G(T)")
+    G_harm     = parsed.get("G(T)")
+    if scf_energy is None or G_qh is None or G_harm is None:
+        return {**null, "warning": (
+            "goodvibes no reportó columnas E / G(T) / qh-G(T) en la tabla "
             "(freq.out posiblemente incompleto o mal formado)."
         )}
 
-    G_corr = qh_gibbs - scf_energy
-    H_corr = (enthalpy - scf_energy) if enthalpy is not None else None
+    # Entalpía armónica pura: siempre la columna H estándar.
+    H_harm = parsed.get("H")
+    H_corr_harmonic = (H_harm - scf_energy) if H_harm is not None else None
+
+    # Entalpía cuasi-armónica: columna qh-H (Head-Gordon) si --qh está
+    # activo; si no, GoodVibes no amortigua la entalpía y
+    # H_corr_qh == H_corr_harmonic.
+    H_qh = parsed.get("qh-H") if "qh-H" in parsed else H_harm
+    H_corr_qh = (H_qh - scf_energy) if H_qh is not None else None
+
+    # T.S / T.qh-S ya vienen multiplicadas por T; se recupera S dividiendo por T.
+    T_S    = parsed.get("T.S")
+    T_qh_S = parsed.get("T.qh-S")
+    S_total_harmonic = (T_S / T) if T_S is not None else None
+    S_total_qh       = (T_qh_S / T) if T_qh_S is not None else None
+
+    n_imag = 0
+    m = re.search(r"(\d+)\s+imaginary frequenc", stdout, re.IGNORECASE)
+    if m:
+        n_imag = int(m.group(1))
+
+    G_corr_harmonic = G_harm - scf_energy
+    G_corr_qh       = G_qh - scf_energy
 
     return {
-        "G_corr":               G_corr,
-        "H_corr":               H_corr,
-        "S_total":              entropy,      # Eh/K
-        "scf_energy":           scf_energy,
-        "qh_gibbs_free_energy": qh_gibbs,
-        "n_imag":               n_imag,
-        "ok":                   True,
-        "warning":              None,
+        "scf_energy":         scf_energy,
+        "ZPE":                ZPE,
+        "n_imag":             n_imag,
+        "ok":                 True,
+        "warning":            None,
+        "G_corr_harmonic":    G_corr_harmonic,
+        "H_corr_harmonic":    H_corr_harmonic,
+        "S_total_harmonic":   S_total_harmonic,
+        "G_total_harmonic":   G_harm,
+        "G_corr_qh":          G_corr_qh,
+        "H_corr_qh":          H_corr_qh,
+        "S_total_qh":         S_total_qh,
+        "G_total_qh":         G_qh,
+        # alias retro-compatibles (= *_qh, comportamiento previo de "goodvibes")
+        "G_corr":               G_corr_qh,
+        "H_corr":               H_corr_qh,
+        "S_total":              S_total_qh,
+        "qh_gibbs_free_energy": G_qh,
     }
+
+
+def _parse_goodvibes_table(stdout: str, structure_stem: str) -> Optional[dict]:
+    """
+    Parsea la tabla de resultados que GoodVibes imprime por stdout, del
+    estilo:
+
+          Structure              E        ZPE              H        T.S     T.qh-S           G(T)        qh-G(T)
+        ────────────────────────────────────────────────────────────────────────────────────────────────────────
+             freq        -1220.971714   0.402267   -1220.542612   0.085076   0.079189   -1220.627688   -1220.621801
+        ────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    Devuelve un dict {nombre_columna: valor_float} para la fila cuya
+    columna "Structure" coincide con `structure_stem` (nombre del archivo
+    sin extensión; en la convención del pipeline siempre es "freq", ya que
+    el archivo es conf_NNN/freq.out), o None si la tabla no aparece o no se
+    pudo parsear.
+
+    NOTA: GoodVibes antepone un marcador de estado de una sola columna
+    (aparece como un bullet/checkmark, p. ej. una "o" suelta) ANTES del
+    nombre de estructura en cada fila de datos:
+
+        o     freq        -1220.967288   0.403345   ...
+
+    Si se asumiera que la estructura es siempre el primer token, esa "o"
+    correría el conteo de columnas en uno y la fila se descartaría por
+    "no calzar" con el header — silenciosamente, sin fallar con un error
+    claro. Por eso acá se busca `structure_stem` en la posición que sea
+    dentro de los tokens, y se toman los valores inmediatamente después.
+    """
+    lines = stdout.splitlines()
+    header_tokens = None
+    header_idx = None
+    for i, line in enumerate(lines):
+        if "Structure" in line and "G(T)" in line:
+            header_tokens = re.split(r"\s{2,}", line.strip())
+            header_idx = i
+            break
+    if header_tokens is None:
+        return None
+
+    n_values = len(header_tokens) - 1  # columnas numéricas tras "Structure"
+
+    for line in lines[header_idx + 1:]:
+        stripped = line.strip()
+        if not stripped or set(stripped) <= {"─", "-", "_"}:
+            continue
+        tokens = stripped.split()
+        if structure_stem not in tokens:
+            continue
+        idx = tokens.index(structure_stem)
+        value_tokens = tokens[idx + 1:]
+        if len(value_tokens) != n_values:
+            continue
+        values: dict = {"Structure": structure_stem}
+        for key, val in zip(header_tokens[1:], value_tokens):
+            try:
+                values[key] = float(val)
+            except ValueError:
+                values[key] = val
+        return values
+
+    return None
 
 
 def get_thermochem(
@@ -721,10 +817,21 @@ def get_thermochem(
     gv_qh: bool = GV_QH,
 ) -> dict:
     """
-    Wrapper único para obtener G_corr, con dos fuentes intercambiables:
+    Wrapper único para obtener G_corr, con dos fuentes intercambiables que
+    ahora comparten la MISMA corrida de GoodVibes sobre el mismo freq.out
+    (ver run_goodvibes()) — solo difieren en qué columnas de esa tabla usan:
 
-      source="harmonic"  → parse_thermochem()  (RRHO puro, tal cual ORCA)
-      source="goodvibes"  → run_goodvibes()      (mRRHO cuasi-armónico)
+      source="harmonic"  → columnas T.S / G(T) de GoodVibes
+                            (RRHO puro, NUNCA amortiguado por el cutoff)
+      source="goodvibes" → columnas T.qh-S / qh-G(T) de GoodVibes
+                            (mRRHO de Grimme, amortiguado con gv_cutoff)
+
+    Antes, "harmonic" salía de parse_thermochem() (bloque THERMOCHEMISTRY
+    de ORCA, que ya trae `Quasi RRHO = True` con su propio cutoff interno
+    ~1 cm⁻¹) mientras que "goodvibes" salía de un cálculo aparte — dos
+    fuentes de datos distintas, no comparables. parse_thermochem() se deja
+    definida arriba solo como utilidad de referencia/inspección manual, ya
+    no la usa esta función.
 
     Retorna siempre el shape de parse_thermochem() (E_elec_freq, ZPE,
     H_corr, TS_total, S_total, G_corr, G_total_freq, T_parsed, n_imag, ok),
@@ -735,22 +842,37 @@ def get_thermochem(
     if source not in ("harmonic", "goodvibes"):
         raise ValueError(f"source debe ser 'harmonic' o 'goodvibes', no {source!r}")
 
-    if source == "harmonic":
-        tc = parse_thermochem(freq_out, T=T)
-        tc["source"] = "harmonic"
-        tc["warning"] = None
-        return tc
-
     gv = run_goodvibes(freq_out, T=T, cutoff=gv_cutoff, qs=gv_qs, qh=gv_qh)
-    TS_total = (T * gv["S_total"]) if gv.get("S_total") is not None else None
+
+    if source == "harmonic":
+        S_total  = gv.get("S_total_harmonic")
+        TS_total = (T * S_total) if S_total is not None else None
+        return {
+            "E_elec_freq":  gv.get("scf_energy"),
+            "ZPE":          gv.get("ZPE"),
+            "H_corr":       gv.get("H_corr_harmonic"),
+            "TS_total":     TS_total,
+            "S_total":      S_total,
+            "G_corr":       gv.get("G_corr_harmonic"),
+            "G_total_freq": gv.get("G_total_harmonic"),
+            "T_parsed":     T,
+            "n_imag":       gv.get("n_imag", 0),
+            "ok":           gv.get("ok", False),
+            "source":       "harmonic",
+            "warning":      gv.get("warning"),
+        }
+
+    # source == "goodvibes"
+    S_total  = gv.get("S_total_qh")
+    TS_total = (T * S_total) if S_total is not None else None
     return {
         "E_elec_freq":  gv.get("scf_energy"),
-        "ZPE":          None,   # GoodVibes no expone ZPE por separado en G_corr
-        "H_corr":       gv.get("H_corr"),
+        "ZPE":          gv.get("ZPE"),
+        "H_corr":       gv.get("H_corr_qh"),
         "TS_total":     TS_total,
-        "S_total":      gv.get("S_total"),
-        "G_corr":       gv.get("G_corr"),
-        "G_total_freq": gv.get("qh_gibbs_free_energy"),
+        "S_total":      S_total,
+        "G_corr":       gv.get("G_corr_qh"),
+        "G_total_freq": gv.get("G_total_qh"),
         "T_parsed":     T,
         "n_imag":       gv.get("n_imag", 0),
         "ok":           gv.get("ok", False),
@@ -772,7 +894,7 @@ def collect_mol_data(mol_name: str, verbose: bool = False,
 
     Para cada confórmero con SP acuoso:
       - E_sp_aq   : energía SP con CPCM (Hartree)
-      - E_sp_gas  : energía SP sin CPCM (Hartree, de 06_sp_gas — opcional)
+      - E_sp_gas  : energía SP sin CPCM (Hartree, de 04b_sp_gas — opcional)
       - G_corr(T) : corrección de Gibbs de NumFreq, re-evaluada a cada T (Hartree)
       - G_total(T): E_sp_aq + G_corr(T)    ciclo compuesto Ho & Coote
 
@@ -815,13 +937,16 @@ def collect_mol_data(mol_name: str, verbose: bool = False,
         e_sp_gas    = parse_sp_energy(sp_gas_file)
 
         # Correcciones térmicas — leídas a T_STD, S_total re-escalado.
-        # gcorr_source="harmonic" → RRHO puro de NumFreq (ORCA); "goodvibes"
-        # → mRRHO cuasi-armónico (ver get_thermochem()).
+        # gcorr_source="harmonic" → columnas T.S/G(T) de GoodVibes (RRHO
+        # puro, sin amortiguar); "goodvibes" → T.qh-S/qh-G(T) (mRRHO
+        # cuasi-armónico). Ambas vienen de la misma corrida de GoodVibes
+        # (ver get_thermochem()/run_goodvibes()), así que un fallo de
+        # GoodVibes afecta a las dos fuentes por igual.
         freq_file = mol_dir / SUBDIR_FREQ / conf_id / "freq.out"
         tc = get_thermochem(freq_file, T=T_STD, source=gcorr_source,
                             gv_cutoff=GV_CUTOFF, gv_qs=GV_QS, gv_qh=GV_QH)
-        if gcorr_source == "goodvibes" and not tc["ok"] and tc.get("warning"):
-            warns.append(f"[{mol_name}/{conf_id}] GoodVibes: {tc['warning']}")
+        if not tc["ok"] and tc.get("warning"):
+            warns.append(f"[{mol_name}/{conf_id}] GoodVibes ({gcorr_source}): {tc['warning']}")
 
         # Carga/multiplicidad/N° átomos — para validación cruzada entre
         # estados (ver _validate_state_charges). Se intenta primero desde el
@@ -970,18 +1095,29 @@ def collect_mol_data(mol_name: str, verbose: bool = False,
 # ─────────────────────────────────────────────
 
 def _state_G_total_direct(data: dict, T: float = T_STD,
-                           gcorr_source: str = "harmonic") -> dict:
+                           gcorr_source: str = "harmonic",
+                           use_ensemble: bool = False) -> dict:
     """
-    G_total_CPCM (E_SP_aq + G_corr) del confórmero representativo de un estado,
-    para el método directo. Funciona con dos tipos de entrada:
+    G_total_CPCM del estado, para el método directo. Funciona con dos tipos
+    de entrada:
 
-      1. Un dict "normal" salido de collect_mol_data(): se relee freq.out del
-         confórmero representativo (best_conf) y se recalcula G_corr a T.
+      1. Un dict "normal" salido de collect_mol_data(): por default
+         (use_ensemble=False) se relee freq.out del confórmero representativo
+         (best_conf) y se recalcula G_corr a T (E_SP_aq(best_conf) + G_corr).
+
+         Si use_ensemble=True, en vez de eso se usa data["G_boltz"][T_label]
+         — el G_Boltzmann del ENSEMBLE conformacional completo, ya calculado
+         por collect_mol_data() (línea ~1005-1008) — evitando descartar la
+         población de confórmeros que no son el mínimo. Si no hay una entrada
+         válida de G_boltz para la T pedida, cae automáticamente al
+         comportamiento de best_conf y lo deja registrado en 'warn' (no falla
+         silenciosamente).
 
       2. Un dict "macroestado" (data["is_macrostate"] = True), construido por
          compute_tautomer_equilibrium(): ya trae G_total_direct_Eh precalculado
          (combinación de Boltzmann entre neutro y zwitterión) y se usa tal cual,
-         sin volver a tocar archivos.
+         sin volver a tocar archivos. use_ensemble no aplica aquí (el macro-
+         estado ya es, por construcción, una combinación de Boltzmann).
 
     Retorna dict: G_total_Eh, conf, theory_sp, theory_freq, ok, warn (str|None).
     """
@@ -1000,13 +1136,38 @@ def _state_G_total_direct(data: dict, T: float = T_STD,
     if conf is None:
         return {"ok": False, "warn": f"No hay confórmero representativo para {mol}."}
 
+    freq_file   = WORK_ROOT / mol / SUBDIR_FREQ / conf / "freq.out"
+    theory_sp   = parse_theory_level(WORK_ROOT / mol / SUBDIR_SP / conf / "sp.out")
+    theory_freq = parse_theory_level(freq_file)
+
+    warn_fallback = None
+    if use_ensemble:
+        T_label = next(
+            (lbl for T_i, lbl in zip(TEMPS_K, TEMP_LABELS) if np.isclose(T_i, T, atol=1e-3)),
+            None,
+        )
+        G_ens = data.get("G_boltz", {}).get(T_label) if T_label is not None else None
+        if G_ens is not None:
+            return {
+                "G_total_Eh":  G_ens,
+                "conf":        f"ensemble Boltzmann ({conf}=best_conf)",
+                "theory_sp":   theory_sp,
+                "theory_freq": theory_freq,
+                "ok":          True,
+                "warn":        None,
+            }
+        warn_fallback = (
+            f"use_ensemble=True pero no hay G_boltz válido a T={T:.2f} K "
+            f"para {mol} (T_label={T_label!r}); se usa el confórmero "
+            f"representativo (best_conf={conf}) en su lugar."
+        )
+
     df = data["df"]
     row = df[df["conformer"] == conf].iloc[0]
     E_aq = row["E_sp_aq"]
     if E_aq is None or pd.isna(E_aq):
         return {"ok": False, "warn": f"Sin SP acuoso para {mol}/{conf}."}
 
-    freq_file = WORK_ROOT / mol / SUBDIR_FREQ / conf / "freq.out"
     tc = get_thermochem(freq_file, T=T, source=gcorr_source,
                         gv_cutoff=GV_CUTOFF, gv_qs=GV_QS, gv_qh=GV_QH)
     G_corr = tc["G_corr"] if tc["ok"] else None
@@ -1015,9 +1176,10 @@ def _state_G_total_direct(data: dict, T: float = T_STD,
         extra = f" ({tc['warning']})" if tc.get("warning") else ""
         warn = f"G_corr ({gcorr_source}) no disponible para {mol}/{conf}. Se usa G≈E_SP (sin ZPE/entropía).{extra}"
 
+    if warn_fallback:
+        warn = f"{warn_fallback} {warn}" if warn else warn_fallback
+
     G_total = E_aq + (G_corr if G_corr is not None else 0.0)
-    theory_sp   = parse_theory_level(WORK_ROOT / mol / SUBDIR_SP / conf / "sp.out")
-    theory_freq = parse_theory_level(freq_file)
 
     return {
         "G_total_Eh":  G_total,
@@ -1191,7 +1353,7 @@ def compute_pka(
     Dos métodos disponibles:
 
     1. "born"   — Ciclo de Born completo (Ho & Coote 2010). Requiere SP en
-                  fase gas (06_sp_gas) además del SP acuoso (CPCM):
+                  fase gas (04b_sp_gas) además del SP acuoso (CPCM):
                     ΔG_solv(X) = E_SP(CPCM) − E_SP(gas) + δG_conc
                     ΔG_aq = ΔG_gas + ΔG_solv(A⁻) + ΔG_solv(H⁺) − ΔG_solv(AH)
                   Usa G(H⁺,aq) implícito de Tissandier 1998 + Kelly 2006
@@ -1285,8 +1447,15 @@ def compute_pka(
                 f"definido para una mezcla. Se usa el método directo."
             )
 
-        g_acid = _state_G_total_direct(data_acid, T=T, gcorr_source=gcorr_source)
-        g_base = _state_G_total_direct(data_base, T=T, gcorr_source=gcorr_source)
+        # use_ensemble=True: para el lado que NO es macroestado (A o B), usa
+        # el G_Boltzmann del ensemble conformacional completo en vez de solo
+        # el best_conf — ver nota #3 del review. Para el lado que SÍ es
+        # macroestado, _state_G_total_direct ignora use_ensemble (ya entra
+        # por la rama is_macrostate de arriba).
+        g_acid = _state_G_total_direct(data_acid, T=T, gcorr_source=gcorr_source,
+                                       use_ensemble=True)
+        g_base = _state_G_total_direct(data_base, T=T, gcorr_source=gcorr_source,
+                                       use_ensemble=True)
 
         result["conf_acid"] = g_acid.get("conf")
         result["conf_base"] = g_base.get("conf")
@@ -1803,6 +1972,275 @@ def print_pka_summary(pka_list: list):
     print(f"{sep}\n")
 
 
+def _cross_validate_ph_scale(
+    data_acid: dict,
+    data_base: dict,
+    result: dict,
+    T: float = T_STD,
+    gcorr_source: str = "harmonic",
+) -> dict:
+    """
+    Diagnóstico de consistencia de escala de energía libre del protón.
+
+    Problema que resuelve: pKa₁ (R/D→B) SIEMPRE usa method='direct' porque
+    el lado ácido es un macroestado (ver rama is_macrostate en compute_pka),
+    mientras que pKa₂ (B→C) usa method='auto' y puede resolver a 'born' si
+    hay SP fase gas para B y C. 'direct' y 'born' usan constantes G(H⁺,aq)
+    distintas y NO intercambiables (Pliego & Riveros −264.61 kcal/mol vs.
+    Tissandier/Kelly −272.18 kcal/mol) — sumar un pKa 'direct' con un pKa
+    'born' en la misma cadena mezcla dos escalas de referencia del protón
+    sin que nada lo señale.
+
+    Esta función NO reemplaza el resultado ya calculado (`result`); solo
+    lo audita. Si `result['method'] == 'born'`, recalcula el mismo par
+    ácido/base forzando method='direct' (reusando compute_pka, que ya
+    implementa ambas rutas) y reporta el delta entre ambos pKa como
+    diagnóstico. Si `result['method']` ya es 'direct', no hay nada que
+    cross-validar (ambos pasos ya comparten la misma escala) y se retorna
+    ok=False sin advertencia.
+    """
+    diag: dict = {
+        "ok": False, "applicable": False,
+        "pKa_born": None, "pKa_direct": None,
+        "delta_pKa": None, "delta_dG_kcal": None,
+        "warnings": [],
+    }
+
+    if result is None or not result.get("ok"):
+        return diag
+
+    if result.get("method") != "born":
+        # Ya está en 'direct': mismo pie que pKa₁/pKa₀, nada que cruzar.
+        return diag
+
+    diag["applicable"] = True
+    diag["pKa_born"] = result["pKa"]
+
+    direct_result = compute_pka(
+        data_acid, data_base, T=T, verbose=False,
+        method="direct", gcorr_source=gcorr_source,
+    )
+
+    if not direct_result.get("ok"):
+        diag["warnings"].append(
+            "No se pudo recalcular con method='direct' para cross-validar "
+            "contra el resultado 'born' (revisar warnings del sub-cálculo)."
+        )
+        return diag
+
+    diag["ok"] = True
+    diag["pKa_direct"] = direct_result["pKa"]
+    diag["delta_pKa"] = result["pKa"] - direct_result["pKa"]
+    diag["delta_dG_kcal"] = result["dG_aq_kcal"] - direct_result["dG_aq_kcal"]
+    return diag
+
+
+def _print_ph_scale_diagnostic(diag: dict, label: str = "pKa₂ (B→C)"):
+    """Imprime el resultado de _cross_validate_ph_scale(), si aplica."""
+    if not diag.get("applicable"):
+        return
+
+    sep = "─" * 66
+    print(f"\n  {sep}")
+    print(f"  DIAGNÓSTICO — consistencia de escala del protón ({label})")
+    print(f"  {sep}")
+
+    if not diag["ok"]:
+        print(f"  ⚠  No se pudo completar el cross-check:")
+        for w in diag["warnings"]:
+            print(f"     {w}")
+        print(f"  {sep}\n")
+        return
+
+    print(f"  {'method=\"born\"  -> pKa':<40} {diag['pKa_born']:>10.2f}")
+    print(f"  {'method=\"direct\" (forzado) -> pKa':<40} {diag['pKa_direct']:>10.2f}")
+    print(f"  {'Delta pKa (born - direct)':<40} {diag['delta_pKa']:>+10.2f}")
+    print(f"  {'Delta dG_aq (born - direct)  [kcal/mol]':<40} {diag['delta_dG_kcal']:>+10.2f}")
+    print()
+    if abs(diag["delta_pKa"]) > 2.0:
+        print(f"  \u26a0  Delta pKa > 2 unidades: born y direct discrepan mas de lo")
+        print(f"     tipicamente esperable entre metodos. Si este resultado se")
+        print(f"     va a combinar con pKa1 (que siempre usa 'direct'), evaluar")
+        print(f"     reportar tambien la version 'direct' de este paso para que")
+        print(f"     toda la cadena comparta la misma referencia de G(H+,aq).")
+    else:
+        print(f"  Delta dentro de lo esperable entre convenciones de G(H+,aq);")
+        print(f"  no invalida el resultado, pero recordar que 'direct' es la")
+        print(f"  escala que comparte el resto de la cadena (pKa0/pKa1).")
+    print(f"  {sep}\n")
+
+
+def _pka_temperature_scan(
+    steps: list,
+    gcorr_source: str = "harmonic",
+    method: str = "auto",
+) -> dict:
+    """
+    Escanea pKa en las 4 temperaturas de TEMPS_K/TEMP_LABELS (mismas T a las
+    que collect_mol_data() ya tabula G_boltz por ensemble conformacional).
+
+    Nota #8 del review: T estaba hardcodeada a T_STD=298.15 K en toda la
+    orquestación (_run_classic/_run_extended), pese a que el pipeline ya
+    calcula G a 4 temperaturas para el Boltzmann conformacional. Esta
+    función reusa esa infraestructura vía compute_pka(T=...) para reportar
+    cómo cambia cada pKa con T, sin fijar una sola T "de fábrica" — relevante
+    para MAAs en agua de mar antártica (~274 K), no solo a 298.15 K estándar.
+
+    steps: lista de tuplas (label, data_acid, data_base). Si data_acid o
+    data_base es None, ese step se omite (igual que en el flujo principal).
+
+    Retorna {label: {T_label: pka_result_dict}}.
+    """
+    scan: dict = {}
+    for label, data_acid, data_base in steps:
+        if data_acid is None or data_base is None:
+            continue
+        scan[label] = {}
+        for T, lbl in zip(TEMPS_K, TEMP_LABELS):
+            scan[label][lbl] = compute_pka(
+                data_acid, data_base, T=T, verbose=False,
+                method=method, gcorr_source=gcorr_source,
+            )
+    return scan
+
+
+def _print_pka_temperature_scan(scan: dict, reported_T: float):
+    """Imprime tabla pKa vs. T para cada step de _pka_temperature_scan()."""
+    if not scan:
+        return
+
+    sep = "─" * 66
+    print(f"\n  {sep}")
+    print(f"  ESCANEO DE TEMPERATURA — pKa(T)")
+    print(f"  {sep}")
+    print(f"  {'Paso':<18}" + "".join(f"{lbl:>12}" for lbl in TEMP_LABELS))
+    print(f"  {'─'*18}" + "".join(f"{'─'*12}" for _ in TEMP_LABELS))
+
+    for label, by_T in scan.items():
+        row = f"  {label:<18}"
+        for T, lbl in zip(TEMPS_K, TEMP_LABELS):
+            r = by_T.get(lbl)
+            marker = "*" if np.isclose(T, reported_T, atol=1e-3) else " "
+            if r and r.get("ok"):
+                row += f"{r['pKa']:>11.2f}{marker}"
+            else:
+                row += f"{'N/A':>11}{marker}"
+        print(row)
+
+    print(f"\n  * = T reportada en el resto del output (--temp, default "
+          f"{T_STD:.2f} K).")
+    print(f"  Nota: el pKa incluye T tanto en G_corr (vía GoodVibes/NumFreq)")
+    print(f"  como en RT·ln10 al final del ciclo; el efecto no es solo el")
+    print(f"  denominador. No confundir con --goodvibes (harmonic vs.")
+    print(f"  quasi-harmonic), que es un eje ortogonal a esta T.")
+    print(f"  {sep}\n")
+
+
+def _extended_temperature_scan(
+    data_A: Optional[dict], data_R: dict, data_D: dict,
+    data_B: Optional[dict], data_C: Optional[dict],
+    gcorr_source: str = "harmonic",
+    method: str = "auto",
+) -> dict:
+    """
+    Análogo a _pka_temperature_scan() pero para la cadena extendida de 5
+    estados, donde pKa₀/pKa₁ dependen del macroestado neutro/zwitterión
+    (data_neutral_macro), que a su vez está "horneado" a una única T dentro
+    de taut_result["G_macro_Eh"]. No alcanza con pasarle T distinta a
+    compute_pka() para esos dos pasos — hay que reconstruir el equilibrio
+    de tautómeros y el macroestado en cada T del escaneo.
+
+    Retorna {label: {T_label: pka_result_dict}}, mismo formato que
+    _pka_temperature_scan(), más "f_D" (fracción de zwitterión por T) para
+    contexto, ya que también depende de T.
+    """
+    scan: dict = {"f_D": {}}
+
+    for T, lbl in zip(TEMPS_K, TEMP_LABELS):
+        taut_T = compute_tautomer_equilibrium(data_R, data_D, T=T, verbose=False,
+                                              gcorr_source=gcorr_source)
+        if not taut_T["ok"]:
+            gR_T = _state_G_total_direct(data_R, T=T, gcorr_source=gcorr_source)
+            if not gR_T.get("ok"):
+                scan["f_D"][lbl] = None
+                continue
+            taut_T = {
+                "f_R": 1.0, "f_D": 0.0,
+                "G_macro_Eh": gR_T["G_total_Eh"],
+                "theory_R": gR_T["theory_sp"], "theory_D": None,
+            }
+
+        scan["f_D"][lbl] = taut_T["f_D"]
+
+        macro_T = {
+            "mol_name":          "neutro/zwitterión",
+            "is_macrostate":     True,
+            "G_total_direct_Eh": taut_T["G_macro_Eh"],
+            "conf_label":        f"macroestado @ {lbl}",
+            "theory_label":      taut_T["theory_R"] or taut_T["theory_D"],
+            "charge":            data_R.get("charge"),
+            "n_atoms":           data_R.get("n_atoms"),
+        }
+
+        if data_A is not None:
+            scan.setdefault("pKa0", {})[lbl] = compute_pka(
+                data_A, macro_T, T=T, verbose=False,
+                method=method, gcorr_source=gcorr_source,
+            )
+        if data_B is not None:
+            scan.setdefault("pKa1", {})[lbl] = compute_pka(
+                macro_T, data_B, T=T, verbose=False,
+                method=method, gcorr_source=gcorr_source,
+            )
+        if data_B is not None and data_C is not None:
+            scan.setdefault("pKa2", {})[lbl] = compute_pka(
+                data_B, data_C, T=T, verbose=False,
+                method=method, gcorr_source=gcorr_source,
+            )
+
+    return scan
+
+
+def _print_extended_temperature_scan(scan: dict, reported_T: float):
+    """Imprime tabla pKa(T) + f_D(T) para la cadena extendida de 5 estados."""
+    pka_labels = [k for k in ("pKa0", "pKa1", "pKa2") if k in scan]
+    if not pka_labels:
+        return
+
+    sep = "─" * 66
+    print(f"\n  {sep}")
+    print(f"  ESCANEO DE TEMPERATURA — pKa(T) y f_D(T)  (cadena extendida)")
+    print(f"  {sep}")
+    print(f"  {'Paso':<18}" + "".join(f"{lbl:>12}" for lbl in TEMP_LABELS))
+    print(f"  {'─'*18}" + "".join(f"{'─'*12}" for _ in TEMP_LABELS))
+
+    row = f"  {'f_D (zwitt.)':<18}"
+    for lbl in TEMP_LABELS:
+        fD = scan["f_D"].get(lbl)
+        row += f"{fD*100:>10.1f}% " if fD is not None else f"{'N/A':>11} "
+    print(row)
+
+    for label in pka_labels:
+        row = f"  {label:<18}"
+        for T, lbl in zip(TEMPS_K, TEMP_LABELS):
+            r = scan[label].get(lbl)
+            marker = "*" if np.isclose(T, reported_T, atol=1e-3) else " "
+            if r and r.get("ok"):
+                row += f"{r['pKa']:>11.2f}{marker}"
+            else:
+                row += f"{'N/A':>11}{marker}"
+        print(row)
+
+    print(f"\n  * = T reportada en el resto del output (--temp, default "
+          f"{T_STD:.2f} K).")
+    print(f"  f_D depende de T (equilibrio R⇌D) y se re-cierra el macroestado")
+    print(f"  neutro/zwitterión en cada T — no es solo re-evaluar RT·ln10 con")
+    print(f"  un G_macro fijo. pKa₂ (B→C) no usa el macroestado y puede diferir")
+    print(f"  en método ('born' vs 'direct') de pKa₀/pKa₁; ver diagnóstico de")
+    print(f"  cross-validación de escala del protón más arriba si aplica.")
+    print(f"  {sep}\n")
+
+
 def print_distribution_table(
     df_dist: pd.DataFrame,
     pKa1: Optional[float],
@@ -2288,6 +2726,17 @@ Ejemplos:
                              "(default: auto). Los pasos que involucran el "
                              "macroestado neutro/zwitterión (con --protonated/"
                              "--zwitterion) siempre usan 'direct'.")
+    parser.add_argument("--temp",     type=float, default=T_STD, choices=TEMPS_K,
+                        help=f"Temperatura T (K) para el pKa reportado (default: "
+                             f"{T_STD} K, estándar). Restringido a {TEMPS_K} porque "
+                             f"G_boltz (usado en los pasos con macroestado "
+                             f"neutro/zwitterión, --protonated/--zwitterion) solo "
+                             f"está tabulado a esas 4 T; pedir otra T degrada "
+                             f"silenciosamente esos pasos a un solo confórmero en "
+                             f"vez del ensemble Boltzmann. Útil para reportar el "
+                             f"pKa a T de agua de mar antártica (274.15 K) en vez "
+                             f"del estándar de 298.15 K. Ver también el escaneo de "
+                             f"las 4 T que se imprime siempre como diagnóstico.")
     parser.add_argument("--export",   choices=["csv", "xlsx", "both"], default=None,
                         help="Exportar resultados")
     parser.add_argument("--plot",     action="store_true",
@@ -2414,21 +2863,27 @@ def _run_classic(args, gcorr_source: str = "harmonic"):
     pka1_result = pka2_result = None
 
     if data_neutral and data_anion:
-        print(f"\n▸ Calculando pKa₁  ({args.neutral} → {args.anion} + H⁺)")
+        print(f"\n▸ Calculando pKa₁  ({args.neutral} → {args.anion} + H⁺)  @ T={args.temp:.2f} K")
         pka1_result = compute_pka(data_neutral, data_anion,
-                                  T=T_STD, verbose=args.verbose, method=args.method,
+                                  T=args.temp, verbose=args.verbose, method=args.method,
                                   gcorr_source=gcorr_source)
 
     if data_anion and data_dianion:
-        print(f"\n▸ Calculando pKa₂  ({args.anion} → {args.dianion} + H⁺)")
+        print(f"\n▸ Calculando pKa₂  ({args.anion} → {args.dianion} + H⁺)  @ T={args.temp:.2f} K")
         pka2_result = compute_pka(data_anion, data_dianion,
-                                  T=T_STD, verbose=args.verbose, method=args.method,
+                                  T=args.temp, verbose=args.verbose, method=args.method,
                                   gcorr_source=gcorr_source)
 
     if pka1_result is None and pka2_result is None:
         print("\n  ⚠  No se pudo calcular ningún pKa. "
               "Revisa los directorios y los SP fase gas.")
         sys.exit(1)
+
+    temp_scan = _pka_temperature_scan(
+        [("pKa1", data_neutral, data_anion), ("pKa2", data_anion, data_dianion)],
+        gcorr_source=gcorr_source, method=args.method,
+    )
+    _print_pka_temperature_scan(temp_scan, reported_T=args.temp)
 
     print_pka_summary([(pka1_result, "pKa₁"), (pka2_result, "pKa₂")])
 
@@ -2539,8 +2994,8 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
         print_mol_summary(data_C, verbose=args.verbose)
 
     # ── Equilibrio de tautómeros R ⇌ D (sin H⁺) ────────────────────────────
-    print(f"\n▸ Calculando equilibrio de tautómeros  ({args.neutral} ⇌ {args.zwitterion})")
-    taut_result = compute_tautomer_equilibrium(data_R, data_D, T=T_STD, verbose=args.verbose,
+    print(f"\n▸ Calculando equilibrio de tautómeros  ({args.neutral} ⇌ {args.zwitterion})  @ T={args.temp:.2f} K")
+    taut_result = compute_tautomer_equilibrium(data_R, data_D, T=args.temp, verbose=args.verbose,
                                                gcorr_source=gcorr_source)
 
     if not taut_result["ok"]:
@@ -2555,14 +3010,14 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
         for w in taut_result["warnings"]:
             print(f"    ⚠  {w}")
 
-        gR_fallback = _state_G_total_direct(data_R, T=T_STD, gcorr_source=gcorr_source)
+        gR_fallback = _state_G_total_direct(data_R, T=args.temp, gcorr_source=gcorr_source)
         if not gR_fallback.get("ok"):
             print(f"\n  ⚠  Tampoco se pudo obtener G_total para "
                   f"'{args.neutral}'. Abortando.")
             sys.exit(1)
 
         taut_result = {
-            "mol_R": args.neutral, "mol_D": args.zwitterion, "T": T_STD,
+            "mol_R": args.neutral, "mol_D": args.zwitterion, "T": args.temp,
             "ok": True,
             "warnings": taut_result["warnings"] + [
                 f"Macroestado neutro construido solo con '{args.neutral}' "
@@ -2606,22 +3061,40 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
     pka0_result = pka1_result = pka2_result = None
 
     if data_A:
-        print(f"\n▸ Calculando pKa₀  ({args.protonated} → neutro/zwitterión + H⁺)")
+        print(f"\n▸ Calculando pKa₀  ({args.protonated} → neutro/zwitterión + H⁺)  @ T={args.temp:.2f} K")
         pka0_result = compute_pka(data_A, data_neutral_macro,
-                                  T=T_STD, verbose=args.verbose, method=args.method,
+                                  T=args.temp, verbose=args.verbose, method=args.method,
                                   gcorr_source=gcorr_source)
 
     if data_B:
-        print(f"\n▸ Calculando pKa₁  (neutro/zwitterión → {args.anion} + H⁺)")
+        print(f"\n▸ Calculando pKa₁  (neutro/zwitterión → {args.anion} + H⁺)  @ T={args.temp:.2f} K")
         pka1_result = compute_pka(data_neutral_macro, data_B,
-                                  T=T_STD, verbose=args.verbose, method=args.method,
+                                  T=args.temp, verbose=args.verbose, method=args.method,
                                   gcorr_source=gcorr_source)
 
     if data_B and data_C:
-        print(f"\n▸ Calculando pKa₂  ({args.anion} → {args.dianion} + H⁺)")
+        print(f"\n▸ Calculando pKa₂  ({args.anion} → {args.dianion} + H⁺)  @ T={args.temp:.2f} K")
         pka2_result = compute_pka(data_B, data_C,
-                                  T=T_STD, verbose=args.verbose, method=args.method,
+                                  T=args.temp, verbose=args.verbose, method=args.method,
                                   gcorr_source=gcorr_source)
+
+        # Nota #2 del review: pKa1 siempre usa 'direct' (macroestado), pero
+        # pKa2 puede resolver a 'born' con method='auto'. Ambos métodos usan
+        # constantes G(H+,aq) distintas y no intercambiables — este chequeo
+        # cuantifica la discrepancia cuando aplica, sin alterar pka2_result.
+        ph_scale_diag = _cross_validate_ph_scale(
+            data_B, data_C, pka2_result, T=args.temp, gcorr_source=gcorr_source,
+        )
+        if ph_scale_diag.get("applicable"):
+            _print_ph_scale_diagnostic(ph_scale_diag, label="pKa₂ (B→C)")
+
+    # Nota #8 del review: reconstruye tautómero+macroestado y recalcula
+    # pKa0/1/2 en las 4 T de TEMPS_K (no solo re-evalúa RT·ln10 a T fija).
+    ext_temp_scan = _extended_temperature_scan(
+        data_A, data_R, data_D, data_B, data_C,
+        gcorr_source=gcorr_source, method=args.method,
+    )
+    _print_extended_temperature_scan(ext_temp_scan, reported_T=args.temp)
 
     print_pka_summary([
         (pka0_result, "pKa₀ (A→R/D)"),
