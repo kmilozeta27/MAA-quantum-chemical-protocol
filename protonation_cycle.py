@@ -369,35 +369,35 @@ def _validate_state_charges(
 
     if qa is None or qb is None:
         msgs.append(
-            f"No se pudo verificar la carga entre '{label_a}' y '{label_b}' "
-            f"(carga no determinada desde el .out de ORCA en al menos uno de "
-            f"los dos estados). Verificar manualmente que la relación de "
-            f"carga esperada (Δq={dq_expected:+d}) sea correcta."
+            f"Could not verify charge between '{label_a}' and '{label_b}' "
+            f"(charge not determined from the ORCA .out for at least one of "
+            f"the two states). Manually verify that the expected charge "
+            f"relation (Δq={dq_expected:+d}) is correct."
         )
     elif (qb - qa) != dq_expected:
         msgs.append(
-            f"❌ CARGA INCONSISTENTE: '{label_a}' (q={qa:+d}) → '{label_b}' "
-            f"(q={qb:+d}) implica Δq={qb - qa:+d}, pero se esperaba "
-            f"Δq={dq_expected:+d}. Revisar si el mapeo de carpetas "
+            f"❌ INCONSISTENT CHARGE: '{label_a}' (q={qa:+d}) → '{label_b}' "
+            f"(q={qb:+d}) implies Δq={qb - qa:+d}, but Δq={dq_expected:+d} "
+            f"was expected. Check whether the folder mapping "
             f"(--protonated/--neutral/--anion/--dianion/--zwitterion) "
-            f"corresponde al estado que crees que es."
+            f"corresponds to the state you think it is."
         )
 
     if na is None or nb is None:
         msgs.append(
-            f"No se pudo verificar N° de átomos entre '{label_a}' y '{label_b}' "
-            f"(N° de átomos no determinado desde el .out de ORCA en al menos "
-            f"uno de los dos estados). Verificar manualmente que la relación "
-            f"esperada (ΔN={dn_expected:+d}) sea correcta."
+            f"Could not verify atom count between '{label_a}' and '{label_b}' "
+            f"(atom count not determined from the ORCA .out for at least one "
+            f"of the two states). Manually verify that the expected relation "
+            f"(ΔN={dn_expected:+d}) is correct."
         )
     elif (nb - na) != dn_expected:
         msgs.append(
-            f"❌ N° DE ÁTOMOS INCONSISTENTE: '{label_a}' (N={na}) → "
-            f"'{label_b}' (N={nb}) implica ΔN={nb - na:+d}, pero se esperaba "
-            f"ΔN={dn_expected:+d}. Revisar si el mapeo de carpetas "
-            f"corresponde al estado que crees que es, o si el confórmero "
-            f"representativo (best_conf) corresponde a la geometría "
-            f"esperada."
+            f"❌ INCONSISTENT ATOM COUNT: '{label_a}' (N={na}) → "
+            f"'{label_b}' (N={nb}) implies ΔN={nb - na:+d}, but ΔN={dn_expected:+d} "
+            f"was expected. Check whether the folder mapping "
+            f"corresponds to the state you think it is, or whether the "
+            f"representative conformer (best_conf) corresponds to the "
+            f"expected geometry."
         )
 
     return msgs
@@ -912,7 +912,7 @@ def collect_mol_data(mol_name: str, verbose: bool = False,
 
     if not mol_dir.exists():
         return {"mol_name": mol_name, "ok": False,
-                "warnings": [f"Directorio no encontrado: {mol_dir}"],
+                "warnings": [f"Directory not found: {mol_dir}"],
                 "conformers": [], "df": pd.DataFrame()}
 
     sp_dirs = sorted((mol_dir / SUBDIR_SP).glob("conf_*")) \
@@ -920,7 +920,7 @@ def collect_mol_data(mol_name: str, verbose: bool = False,
 
     if not sp_dirs:
         return {"mol_name": mol_name, "ok": False,
-                "warnings": [f"Sin confórmeros SP en {mol_dir / SUBDIR_SP}"],
+                "warnings": [f"No SP conformers in {mol_dir / SUBDIR_SP}"],
                 "conformers": [], "df": pd.DataFrame()}
 
     rows: list[dict] = []
@@ -1010,8 +1010,8 @@ def collect_mol_data(mol_name: str, verbose: bool = False,
             G_boltz[lbl] = None
             if not df["thermo_ok"].any():
                 warns.append(
-                    f"[{mol_name}] Sin correcciones térmicas válidas. "
-                    f"Boltzmann conformacional no disponible."
+                    f"[{mol_name}] No valid thermal corrections. "
+                    f"Conformational Boltzmann distribution not available."
                 )
 
     # Confórmero representativo (mínimo G_total a 298.15 K)
@@ -1026,17 +1026,17 @@ def collect_mol_data(mol_name: str, verbose: bool = False,
     n_imag_any = (df["n_imag"] > 0).sum()
     if n_imag_any > 0:
         warns.append(
-            f"[{mol_name}] {n_imag_any} confórmero(s) con frecuencias imaginarias. "
-            f"Revisar geometrías antes de usar en el ciclo de pKa."
+            f"[{mol_name}] {n_imag_any} conformer(s) with imaginary frequencies. "
+            f"Check geometries before using them in the pKa cycle."
         )
 
-    # Advertencia si falta SP gas
+    # Warning if gas-phase SP is missing
     n_missing_gas = df["E_sp_gas"].isna().sum()
     if n_missing_gas > 0:
         warns.append(
-            f"[{mol_name}] {n_missing_gas}/{len(df)} confórmeros sin SP fase gas "
-            f"(esperado en runs/{mol_name}/{SUBDIR_SP_GAS}/conf_NNN/sp_gas.out). "
-            f"El ciclo de pKa requiere SP gas del confórmero representativo."
+            f"[{mol_name}] {n_missing_gas}/{len(df)} conformers without gas-phase SP "
+            f"(expected at runs/{mol_name}/{SUBDIR_SP_GAS}/conf_NNN/sp_gas.out). "
+            f"The pKa cycle requires the gas-phase SP of the representative conformer."
         )
 
     # ── Carga / multiplicidad / N° átomos a nivel de estado ────────────────
@@ -1056,23 +1056,23 @@ def collect_mol_data(mol_name: str, verbose: bool = False,
 
     if len(charges_seen) > 1:
         warns.append(
-            f"[{mol_name}] Carga inconsistente entre confórmeros: "
-            f"{charges_seen}. No se puede validar contra estados vecinos; "
-            f"revisar runs/{mol_name}/{SUBDIR_SP}/conf_*/sp.out."
+            f"[{mol_name}] Inconsistent charge across conformers: "
+            f"{charges_seen}. Cannot validate against neighboring states; "
+            f"check runs/{mol_name}/{SUBDIR_SP}/conf_*/sp.out."
         )
     if len(natoms_seen) > 1:
         warns.append(
-            f"[{mol_name}] N° de átomos inconsistente entre confórmeros: "
-            f"{natoms_seen}. No se puede validar contra estados vecinos; "
-            f"revisar runs/{mol_name}/{SUBDIR_SP}/conf_*/sp.out."
+            f"[{mol_name}] Inconsistent atom count across conformers: "
+            f"{natoms_seen}. Cannot validate against neighboring states; "
+            f"check runs/{mol_name}/{SUBDIR_SP}/conf_*/sp.out."
         )
     if not charges_seen or not natoms_seen:
         warns.append(
-            f"[{mol_name}] No se pudo determinar carga y/o N° de átomos "
-            f"desde ningún .out. La validación cruzada de carga/N° átomos "
-            f"frente a estados vecinos quedará deshabilitada para este "
-            f"estado (solo se emitirá una advertencia informativa, no un "
-            f"error)."
+            f"[{mol_name}] Could not determine charge and/or atom count "
+            f"from any .out file. Cross-validation of charge/atom count "
+            f"against neighboring states will be disabled for this "
+            f"state (only an informational warning will be issued, not "
+            f"an error)."
         )
 
     return {
@@ -1124,7 +1124,7 @@ def _state_G_total_direct(data: dict, T: float = T_STD,
     if data.get("is_macrostate"):
         return {
             "G_total_Eh":  data["G_total_direct_Eh"],
-            "conf":        data.get("conf_label", "macroestado"),
+            "conf":        data.get("conf_label", "macrostate"),
             "theory_sp":   data.get("theory_label"),
             "theory_freq": data.get("theory_label"),
             "ok":          True,
@@ -1134,7 +1134,7 @@ def _state_G_total_direct(data: dict, T: float = T_STD,
     mol  = data["mol_name"]
     conf = data.get("best_conf")
     if conf is None:
-        return {"ok": False, "warn": f"No hay confórmero representativo para {mol}."}
+        return {"ok": False, "warn": f"No representative conformer for {mol}."}
 
     freq_file   = WORK_ROOT / mol / SUBDIR_FREQ / conf / "freq.out"
     theory_sp   = parse_theory_level(WORK_ROOT / mol / SUBDIR_SP / conf / "sp.out")
@@ -1157,16 +1157,16 @@ def _state_G_total_direct(data: dict, T: float = T_STD,
                 "warn":        None,
             }
         warn_fallback = (
-            f"use_ensemble=True pero no hay G_boltz válido a T={T:.2f} K "
-            f"para {mol} (T_label={T_label!r}); se usa el confórmero "
-            f"representativo (best_conf={conf}) en su lugar."
+            f"use_ensemble=True but no valid G_boltz at T={T:.2f} K "
+            f"for {mol} (T_label={T_label!r}); using the representative "
+            f"conformer (best_conf={conf}) instead."
         )
 
     df = data["df"]
     row = df[df["conformer"] == conf].iloc[0]
     E_aq = row["E_sp_aq"]
     if E_aq is None or pd.isna(E_aq):
-        return {"ok": False, "warn": f"Sin SP acuoso para {mol}/{conf}."}
+        return {"ok": False, "warn": f"No aqueous SP for {mol}/{conf}."}
 
     tc = get_thermochem(freq_file, T=T, source=gcorr_source,
                         gv_cutoff=GV_CUTOFF, gv_qs=GV_QS, gv_qh=GV_QH)
@@ -1174,7 +1174,7 @@ def _state_G_total_direct(data: dict, T: float = T_STD,
     warn = None
     if not tc["ok"]:
         extra = f" ({tc['warning']})" if tc.get("warning") else ""
-        warn = f"G_corr ({gcorr_source}) no disponible para {mol}/{conf}. Se usa G≈E_SP (sin ZPE/entropía).{extra}"
+        warn = f"G_corr ({gcorr_source}) not available for {mol}/{conf}. Using G≈E_SP instead (no ZPE/entropy).{extra}"
 
     if warn_fallback:
         warn = f"{warn_fallback} {warn}" if warn else warn_fallback
@@ -1248,8 +1248,8 @@ def compute_tautomer_equilibrium(
         _warn(m)
     if any(m.startswith("❌") for m in charge_msgs):
         _warn(
-            f"Abortando equilibrio de tautómeros ({mol_R}⇌{mol_D}) por "
-            f"inconsistencia de carga/N° de átomos."
+            f"Aborting tautomer equilibrium ({mol_R}⇌{mol_D}) due to "
+            f"charge/atom-count inconsistency."
         )
         return result
 
@@ -1257,10 +1257,10 @@ def compute_tautomer_equilibrium(
     gD = _state_G_total_direct(data_D, T=T, gcorr_source=gcorr_source)
 
     if not gR.get("ok"):
-        _warn(gR.get("warn") or f"No se pudo obtener G_total para {mol_R}.")
+        _warn(gR.get("warn") or f"Could not obtain G_total for {mol_R}.")
         return result
     if not gD.get("ok"):
-        _warn(gD.get("warn") or f"No se pudo obtener G_total para {mol_D}.")
+        _warn(gD.get("warn") or f"Could not obtain G_total for {mol_D}.")
         return result
     if gR.get("warn"):
         warns.append(gR["warn"])
@@ -1269,9 +1269,9 @@ def compute_tautomer_equilibrium(
 
     if gR["theory_sp"] and gD["theory_sp"] and gR["theory_sp"] != gD["theory_sp"]:
         _warn(
-            f"NIVEL DE TEORÍA INCONSISTENTE en el SP acuoso entre "
-            f"{mol_R} ('{gR['theory_sp']}') y {mol_D} ('{gD['theory_sp']}'). "
-            f"La comparación de tautómeros no es válida si difieren base/funcional/CPCM."
+            f"INCONSISTENT THEORY LEVEL in the aqueous SP between "
+            f"{mol_R} ('{gR['theory_sp']}') and {mol_D} ('{gD['theory_sp']}'). "
+            f"The tautomer comparison is not valid if basis set/functional/CPCM differ."
         )
 
     G_R = gR["G_total_Eh"]
@@ -1307,13 +1307,13 @@ def _print_tautomer_cycle(r: dict):
     """Imprime el equilibrio de tautómeros neutro⇌zwitterión."""
     sep = "─" * 66
     print(f"\n  {sep}")
-    print(f"  EQUILIBRIO DE TAUTÓMEROS (sin H⁺) — {r['mol_R']} ⇌ {r['mol_D']}")
+    print(f"  TAUTOMER EQUILIBRIUM (no H⁺) — {r['mol_R']} ⇌ {r['mol_D']}")
     print(f"  T = {r['T']:.2f} K")
     print(f"  {sep}")
-    print(f"  Conf. R (neutro)      : {r['conf_R']}")
-    print(f"  Conf. D (zwitterión)  : {r['conf_D']}")
-    print(f"  Nivel SP(R)  : {r['theory_R'] or '—'}")
-    print(f"  Nivel SP(D)  : {r['theory_D'] or '—'}")
+    print(f"  Conf. R (neutral)     : {r['conf_R']}")
+    print(f"  Conf. D (zwitterion)  : {r['conf_D']}")
+    print(f"  SP level (R) : {r['theory_R'] or '—'}")
+    print(f"  SP level (D) : {r['theory_D'] or '—'}")
     print()
     print(f"  {'G_total_CPCM(R)  [Eh]':<40} {r['G_R_Eh']:>14.8f}")
     print(f"  {'G_total_CPCM(D)  [Eh]':<40} {r['G_D_Eh']:>14.8f}")
@@ -1321,15 +1321,15 @@ def _print_tautomer_cycle(r: dict):
     print(f"  {'ΔG_taut = G(D) − G(R)  [kcal/mol]':<40} {r['dG_taut_kcal']:>+14.3f}")
     print(f"  {'K_taut = [D]/[R]':<40} {r['K_taut']:>14.4g}")
     print()
-    print(f"  f(R, neutro)      = {r['f_R']*100:6.2f} %")
-    print(f"  f(D, zwitterión)  = {r['f_D']*100:6.2f} %")
-    dominant = "R (neutro)" if r["f_R"] >= r["f_D"] else "D (zwitterión)"
-    print(f"  Tautómero dominante: {dominant}")
-    print(f"\n  G_macroestado neutro (Boltzmann R+D) = {r['G_macro_Eh']:.8f} Eh")
-    print(f"  (este valor combinado es el que entra al ciclo de pKa como")
-    print(f"   estado 'neutro/zwitterión' frente al catión y al anión)")
+    print(f"  f(R, neutral)     = {r['f_R']*100:6.2f} %")
+    print(f"  f(D, zwitterion)  = {r['f_D']*100:6.2f} %")
+    dominant = "R (neutral)" if r["f_R"] >= r["f_D"] else "D (zwitterion)"
+    print(f"  Dominant tautomer: {dominant}")
+    print(f"\n  Neutral macrostate G (Boltzmann R+D) = {r['G_macro_Eh']:.8f} Eh")
+    print(f"  (this combined value is what enters the pKa cycle as the")
+    print(f"   'neutral/zwitterion' state versus the cation and the anion)")
     if r["warnings"]:
-        print(f"\n  Advertencias:")
+        print(f"\n  Warnings:")
         for w in r["warnings"]:
             print(f"    ⚠  {w}")
     print(f"  {sep}\n")
@@ -1426,27 +1426,42 @@ def compute_pka(
         _warn(m)
     if any(m.startswith("❌") for m in charge_msgs):
         _warn(
-            f"Abortando cálculo de pKa ({mol_acid}→{mol_base}) por "
-            f"inconsistencia de carga/N° de átomos. Revisar el mapeo de "
-            f"estados antes de continuar."
+            f"Aborting pKa calculation ({mol_acid}→{mol_base}) due to "
+            f"charge/atom-count inconsistency. Check the state mapping "
+            f"before continuing."
         )
         return result
 
     # ── Rama simplificada: uno de los dos lados es un macroestado combinado ─
-    # (neutro+zwitterión, construido por compute_tautomer_equilibrium). No hay
-    # forma físicamente limpia de combinar dos SP de fase gas de especies
-    # distintas en un ciclo de Born, así que este caso SIEMPRE usa el método
-    # directo, sin importar lo que pida --method.
+    # (neutro+zwitterión, construido por compute_tautomer_equilibrium).
+    #
+    # method='born' SÍ se puede resolver aquí, y de forma EXACTA, sin ningún
+    # SP de fase gas para la mezcla. La razón es la misma identidad algebraica
+    # ya documentada arriba de compute_pka_montecarlo() para el caso de una
+    # sola especie: con las definiciones que usa este script,
+    #
+    #   G_gas(X)    = E_gas(X) + G_corr(X)
+    #   ΔG_solv(X)  = E_aq(X) − E_gas(X) + δG_conc
+    #
+    # TODOS los términos en E_gas se cancelan al construir ΔG_aq del ciclo de
+    # Born, y lo que queda es exactamente la resta de energías CPCM (idéntica
+    # a la del método directo) más la constante G(H⁺,aq) correspondiente:
+    #
+    #   ΔG_aq(born)   = G_total_CPCM(base) − G_total_CPCM(acid) + G_HPLUS_AQ_BORN
+    #   ΔG_aq(direct) = G_total_CPCM(base) − G_total_CPCM(acid) + G_HPLUS_AQ_DIRECT
+    #
+    # Esa cancelación se extiende sin cambios al macroestado combinado: si se
+    # define el "G_gas" de la mezcla con la MISMA entropía de mezcla (mismos
+    # pesos f_R/f_D) que ya usa G_macro_Eh en compute_tautomer_equilibrium, el
+    # término de entropía de mezcla aparece igual en G_macro_aq y en
+    # G_macro_gas y se cancela exactamente igual que G_corr en el caso de una
+    # sola especie. No hace falta calcular ni siquiera construir ese
+    # G_macro_gas explícitamente — el resultado final es el mismo de arriba,
+    # con G_total_CPCM(macro) = G_macro_Eh ya calculado por
+    # compute_tautomer_equilibrium(). Por eso tampoco hacía falta el SP de
+    # fase gas para el lado que NO es macroestado: esos términos también se
+    # cancelan ahí.
     if data_acid.get("is_macrostate") or data_base.get("is_macrostate"):
-        if method == "born":
-            _warn(
-                f"method='born' solicitado, pero uno de los estados "
-                f"({mol_acid if data_acid.get('is_macrostate') else mol_base}) "
-                f"es un macroestado combinado neutro+zwitterión. El ciclo de Born "
-                f"completo requiere SP fase gas de una única especie; no está "
-                f"definido para una mezcla. Se usa el método directo."
-            )
-
         # use_ensemble=True: para el lado que NO es macroestado (A o B), usa
         # el G_Boltzmann del ensemble conformacional completo en vez de solo
         # el best_conf — ver nota #3 del review. Para el lado que SÍ es
@@ -1463,10 +1478,10 @@ def compute_pka(
         result["theory_sp_base"] = g_base.get("theory_sp")
 
         if not g_acid.get("ok"):
-            _warn(g_acid.get("warn") or f"No se pudo obtener G_total para {mol_acid}.")
+            _warn(g_acid.get("warn") or f"Could not obtain G_total for {mol_acid}.")
             return result
         if not g_base.get("ok"):
-            _warn(g_base.get("warn") or f"No se pudo obtener G_total para {mol_base}.")
+            _warn(g_base.get("warn") or f"Could not obtain G_total for {mol_base}.")
             return result
         if g_acid.get("warn"):
             warns.append(g_acid["warn"])
@@ -1476,24 +1491,47 @@ def compute_pka(
         if (g_acid["theory_sp"] and g_base["theory_sp"]
                 and g_acid["theory_sp"] != g_base["theory_sp"]):
             _warn(
-                f"NIVEL DE TEORÍA INCONSISTENTE entre {mol_acid} "
-                f"('{g_acid['theory_sp']}') y {mol_base} ('{g_base['theory_sp']}')."
+                f"INCONSISTENT THEORY LEVEL between {mol_acid} "
+                f"('{g_acid['theory_sp']}') and {mol_base} ('{g_base['theory_sp']}')."
             )
 
         G_total_acid = g_acid["G_total_Eh"]
         G_total_base = g_base["G_total_Eh"]
         result["G_total_acid_Eh"] = G_total_acid
         result["G_total_base_Eh"] = G_total_base
-        result["G_hplus_aq_kcal"] = G_HPLUS_AQ_DIRECT
 
-        dG_aq_kcal = (G_total_base - G_total_acid) * HARTREE_TO_KCAL + G_HPLUS_AQ_DIRECT
+        use_born_macro = (method == "born")
+        if use_born_macro:
+            result["G_hplus_aq_kcal"] = G_HPLUS_AQ_BORN
+            result["method"] = "born"
+            _warn(
+                f"method='born' with a combined neutral+zwitterion macrostate "
+                f"({mol_acid if data_acid.get('is_macrostate') else mol_base}): "
+                f"no gas-phase SP is used (or needed) for the mixture. ΔG_aq "
+                f"is obtained via the algebraic reduction of the Born cycle "
+                f"to G_total_CPCM(base) − G_total_CPCM(acid) + G_HPLUS_AQ_BORN "
+                f"— the same reduction that already applies to a single "
+                f"species in this script, since the E_gas terms cancel "
+                f"identically (see the derivation note above "
+                f"compute_pka_montecarlo())."
+            )
+        else:
+            result["G_hplus_aq_kcal"] = G_HPLUS_AQ_DIRECT
+            result["method"] = "direct"
+
+        dG_aq_kcal = (
+            (G_total_base - G_total_acid) * HARTREE_TO_KCAL
+            + result["G_hplus_aq_kcal"]
+        )
         result["dG_aq_kcal"] = dG_aq_kcal
-        result["method"] = "direct"
         result["pKa"] = dG_aq_kcal / (R_KCAL * T * LN10)
         result["ok"] = True
 
         if verbose:
-            _print_direct_cycle(result)
+            if result["method"] == "born":
+                _print_born_cycle_macrostate(result)
+            else:
+                _print_direct_cycle(result)
 
         return result
 
@@ -1504,10 +1542,10 @@ def compute_pka(
     result["conf_base"] = conf_base
 
     if conf_acid is None:
-        _warn(f"No hay confórmero representativo para {mol_acid}.")
+        _warn(f"No representative conformer for {mol_acid}.")
         return result
     if conf_base is None:
-        _warn(f"No hay confórmero representativo para {mol_base}.")
+        _warn(f"No representative conformer for {mol_base}.")
         return result
 
     df_acid = data_acid["df"]
@@ -1535,15 +1573,15 @@ def compute_pka(
 
     if sp_acid_lvl and sp_base_lvl and sp_acid_lvl != sp_base_lvl:
         _warn(
-            f"NIVEL DE TEORÍA INCONSISTENTE en el SP acuoso entre "
-            f"{mol_acid} ('{sp_acid_lvl}') y {mol_base} ('{sp_base_lvl}'). "
-            f"El ciclo de pKa NO es válido si la base/funcional/CPCM difieren "
-            f"entre estados — revisar antes de reportar."
+            f"INCONSISTENT THEORY LEVEL in the aqueous SP between "
+            f"{mol_acid} ('{sp_acid_lvl}') and {mol_base} ('{sp_base_lvl}'). "
+            f"The pKa cycle is NOT valid if the basis set/functional/CPCM "
+            f"differ between states — check before reporting."
         )
     if freq_acid_lvl and freq_base_lvl and freq_acid_lvl != freq_base_lvl:
         _warn(
-            f"NIVEL DE TEORÍA INCONSISTENTE en NumFreq entre "
-            f"{mol_acid} ('{freq_acid_lvl}') y {mol_base} ('{freq_base_lvl}')."
+            f"INCONSISTENT THEORY LEVEL in NumFreq between "
+            f"{mol_acid} ('{freq_acid_lvl}') and {mol_base} ('{freq_base_lvl}')."
         )
 
     # ── Energías SP acuosas (CPCM) ────────────────────────────────────────
@@ -1553,10 +1591,10 @@ def compute_pka(
     result["E_sp_aq_base_Eh"] = E_aq_base
 
     if E_aq_acid is None or pd.isna(E_aq_acid):
-        _warn(f"Sin SP acuoso para {mol_acid}/{conf_acid}.")
+        _warn(f"No aqueous SP for {mol_acid}/{conf_acid}.")
         return result
     if E_aq_base is None or pd.isna(E_aq_base):
-        _warn(f"Sin SP acuoso para {mol_base}/{conf_base}.")
+        _warn(f"No aqueous SP for {mol_base}/{conf_base}.")
         return result
 
     # ── Energías SP fase gas (pueden faltar) ───────────────────────────────
@@ -1573,10 +1611,10 @@ def compute_pka(
     # ── Decidir método ──────────────────────────────────────────────────────
     if method == "born" and not have_gas:
         _warn(
-            f"method='born' solicitado pero faltan SP fase gas para "
-            f"{mol_acid}/{conf_acid} y/o {mol_base}/{conf_base}. "
-            f"Crear runs/{mol_acid}/{SUBDIR_SP_GAS}/{conf_acid}/sp_gas.inp "
-            f"y el equivalente para {mol_base} (mismo funcional/base, sin CPCM)."
+            f"method='born' requested but gas-phase SPs are missing for "
+            f"{mol_acid}/{conf_acid} and/or {mol_base}/{conf_base}. "
+            f"Create runs/{mol_acid}/{SUBDIR_SP_GAS}/{conf_acid}/sp_gas.inp "
+            f"and the equivalent for {mol_base} (same functional/basis, no CPCM)."
         )
         return result
 
@@ -1584,10 +1622,10 @@ def compute_pka(
 
     if method == "auto" and not have_gas:
         _warn(
-            f"Sin SP fase gas para {mol_acid}/{conf_acid} y/o {mol_base}/{conf_base}. "
-            f"Se usa el método directo (solo CPCM) en su lugar: "
+            f"No gas-phase SP for {mol_acid}/{conf_acid} and/or {mol_base}/{conf_base}. "
+            f"Using the direct method (CPCM only) instead: "
             f"ΔG_aq = G_total_CPCM(base) − G_total_CPCM(acid) + G(H⁺,aq). "
-            f"Para el ciclo de Born completo, crear los SP fase gas en "
+            f"For the full Born cycle, create the gas-phase SPs in "
             f"{SUBDIR_SP_GAS}/conf_NNN/sp_gas.out."
         )
 
@@ -1607,16 +1645,16 @@ def compute_pka(
     else:
         extra = f" ({tc_acid['warning']})" if tc_acid.get("warning") else ""
         _warn(
-            f"G_corr ({gcorr_source}) no disponible para {mol_acid}/{conf_acid}. "
-            f"Se usa G ≈ E_SP (sin ZPE/entropía; pKa con mayor incertidumbre).{extra}"
+            f"G_corr ({gcorr_source}) not available for {mol_acid}/{conf_acid}. "
+            f"Using G ≈ E_SP instead (no ZPE/entropy; pKa has higher uncertainty).{extra}"
         )
     if tc_base["ok"]:
         G_corr_base = tc_base["G_corr"]
     else:
         extra = f" ({tc_base['warning']})" if tc_base.get("warning") else ""
         _warn(
-            f"G_corr ({gcorr_source}) no disponible para {mol_base}/{conf_base}. "
-            f"Se usa G ≈ E_SP.{extra}"
+            f"G_corr ({gcorr_source}) not available for {mol_base}/{conf_base}. "
+            f"Using G ≈ E_SP.{extra}"
         )
 
     result["G_corr_acid_Eh"] = G_corr_acid
@@ -1682,19 +1720,237 @@ def compute_pka(
     return result
 
 
+# ─────────────────────────────────────────────
+#  MONTE CARLO — PROPAGACIÓN DE INCERTIDUMBRE EN pKa (FASE 1)
+# ─────────────────────────────────────────────
+#
+# NOTA DE DERIVACIÓN (por qué el ruido se aplica solo a E_aq y G_corr, no a
+# E_gas por separado, en el método "born"):
+#
+#   dG_gas       = (G_gas_base − G_gas_acid)·H2K + G_HPLUS_GAS
+#   dG_solv_X    = (E_aq_X − E_gas_X)·H2K + DG_CONC_CORR
+#   dG_aq(born)  = dG_gas + dG_solv_base + DG_SOLV_HPLUS − dG_solv_acid
+#
+#   Sustituyendo G_gas_X = E_gas_X + G_corr_X y expandiendo, TODOS los
+#   términos en E_gas_acid/E_gas_base se cancelan algebraicamente (y también
+#   DG_CONC_CORR, que aparece una vez con cada signo). Lo que queda es
+#   idéntico en forma al método directo:
+#
+#   dG_aq(born) = (E_aq_base − E_aq_acid + G_corr_base − G_corr_acid)·H2K
+#                 + (G_HPLUS_GAS + DG_SOLV_HPLUS)      # = G_HPLUS_AQ_BORN
+#
+#   dG_aq(direct) = (E_aq_base − E_aq_acid + G_corr_base − G_corr_acid)·H2K
+#                   + G_HPLUS_AQ_DIRECT
+#
+#   O sea: dado cómo compute_pka() arma el ciclo de Born hoy, "born" y
+#   "direct" tienen EXACTAMENTE la misma sensibilidad al ruido en E_aq/G_corr;
+#   solo difieren en qué constante de G(H⁺,aq) se suma. Por eso el modelo de
+#   ruido de abajo es el mismo para ambos métodos, y solo cambia el punto de
+#   partida (base_result["dG_aq_kcal"]). Si algún día cambia la fórmula de
+#   compute_pka() (p. ej. DG_CONC_CORR deja de cancelarse), esta nota y el
+#   test test_born_and_direct_same_noise_sensitivity() dejan de ser válidos
+#   y hay que revisar esta función.
+#
+# FUENTES DE INCERTIDUMBRE MODELADAS (ver plan, sección 1):
+#   - sigma_elec_kcal  : energía electrónica SP (funcional/base), por estado,
+#                        independiente entre ácido y base.
+#   - sigma_gcorr_kcal : corrección térmica G_corr (ZPE+TS), por estado,
+#                        independiente entre ácido y base.
+#   - sigma_hplus_kcal : G(H⁺,aq) — constante compartida por TODA la cadena
+#                        de pKa's. Por eso admite shared_hplus_draw: al
+#                        correr varios pKa's de la misma cadena (pKa0, pKa1,
+#                        pKa2) hay que pasarles el MISMO array de muestras
+#                        para esta constante, o la incertidumbre de
+#                        cantidades derivadas (Δ entre pKa's, fracciones de
+#                        especie) queda sobreestimada.
+
+def compute_pka_montecarlo(
+    data_acid: dict,
+    data_base: dict,
+    T: float = T_STD,
+    method: str = "auto",
+    gcorr_source: str = "harmonic",
+    n_samples: int = 10_000,
+    sigma_elec_kcal: float = 0.5,
+    sigma_gcorr_kcal: float = 0.4,
+    sigma_hplus_kcal: float = 2.5,
+    shared_hplus_draw: Optional[np.ndarray] = None,
+    rng: Optional[np.random.Generator] = None,
+) -> dict:
+    """
+    Propaga incertidumbre en el pKa de AH → A⁻ + H⁺ vía Monte Carlo,
+    reusando compute_pka() como fuente única de verdad para el valor
+    determinístico (mismo mapeo de estados, misma validación de carga/N°
+    de átomos, mismo método born/direct/auto).
+
+    No vuelve a leer archivos ni reimplementa el ciclo termodinámico: toma
+    dG_aq_kcal ya calculado por compute_pka() como centro de la distribución
+    y le suma perturbaciones gaussianas sobre los términos que compute_pka()
+    ya expone en su dict de resultado (E_sp_aq_acid/base_Eh — si están
+    disponibles — o, si no, sobre un sigma combinado, ver el caso de
+    macroestados más abajo).
+
+    Parameters
+    ----------
+    data_acid, data_base : dict
+        Mismos dicts que recibiría compute_pka() (salida de
+        collect_mol_data() o de compute_tautomer_equilibrium()).
+    n_samples : int
+        Número de muestras Monte Carlo.
+    sigma_elec_kcal, sigma_gcorr_kcal : float
+        Desviación estándar asumida para la energía electrónica SP y la
+        corrección térmica, respectivamente, por estado (kcal/mol).
+    sigma_hplus_kcal : float
+        Desviación estándar asumida para G(H⁺,aq) — dispersión típica entre
+        valores de literatura (Pliego-Riveros, Kelly-Cramer-Truhlar,
+        Zhan-Dixon); ver plan, sección 1.
+    shared_hplus_draw : np.ndarray, opcional
+        Si se provee (shape (n_samples,)), se usa como la perturbación de
+        G(H⁺,aq) en vez de samplear una nueva — para correlacionar el mismo
+        error sistemático entre varios pKa's de una misma cadena (ver
+        run_chain_montecarlo(), fase 2).
+    rng : np.random.Generator, opcional
+        Generador de números aleatorios; si no se provee, usa uno sin
+        semilla fija (no reproducible entre corridas).
+
+    Returns
+    -------
+    dict con:
+        ok               : bool
+        base_result      : dict — salida de compute_pka() (determinístico)
+        method_used      : 'born' | 'direct' (resuelto, nunca 'auto')
+        pka_samples      : np.ndarray, shape (n_samples,)
+        pka_mean         : float
+        pka_std          : float (ddof=1)
+        pka_median       : float
+        pka_ci95         : tuple (lo, hi) — percentiles 2.5/97.5
+        hplus_draw       : np.ndarray — la perturbación de G(H⁺,aq) usada
+                            (para reusar como shared_hplus_draw en otro pKa)
+        warnings         : list[str]
+    """
+    base_result = compute_pka(
+        data_acid, data_base, T=T, method=method,
+        gcorr_source=gcorr_source, verbose=False,
+    )
+
+    out: dict = {
+        "ok": False,
+        "base_result": base_result,
+        "method_used": base_result.get("method"),
+        "n_samples": n_samples,
+        "pka_samples": None,
+        "pka_mean": None, "pka_std": None, "pka_median": None,
+        "pka_ci95": None,
+        "hplus_draw": None,
+        "sigma_elec_kcal": sigma_elec_kcal,
+        "sigma_gcorr_kcal": sigma_gcorr_kcal,
+        "sigma_hplus_kcal": sigma_hplus_kcal,
+        "warnings": list(base_result.get("warnings", [])),
+    }
+
+    if not base_result.get("ok"):
+        out["warnings"].append(
+            "compute_pka() determinístico falló (ok=False); no se puede "
+            "construir una distribución Monte Carlo encima de un ciclo "
+            "inválido. Revisa los warnings de base_result."
+        )
+        return out
+
+    if n_samples < 2:
+        out["warnings"].append(f"n_samples={n_samples} demasiado bajo; se requieren ≥2.")
+        return out
+
+    if shared_hplus_draw is not None and len(shared_hplus_draw) != n_samples:
+        raise ValueError(
+            f"shared_hplus_draw tiene {len(shared_hplus_draw)} muestras, "
+            f"pero n_samples={n_samples}. Deben coincidir para poder sumarlo "
+            f"término a término con el resto de las perturbaciones."
+        )
+
+    if rng is None:
+        rng = np.random.default_rng()
+
+    d_hplus = (
+        shared_hplus_draw if shared_hplus_draw is not None
+        else rng.normal(0.0, sigma_hplus_kcal, size=n_samples)
+    )
+
+    base_dG_aq = base_result["dG_aq_kcal"]
+
+    # ── ¿Tenemos E_sp_aq por separado (caso normal) o solo G_total combinado
+    #    (caso macroestado neutro+zwitterión, ver compute_tautomer_equilibrium)? ──
+    have_separate_terms = (
+        base_result.get("E_sp_aq_acid_Eh") is not None and
+        base_result.get("E_sp_aq_base_Eh") is not None
+    )
+
+    if have_separate_terms:
+        # Ruido independiente en energía electrónica y corrección térmica,
+        # por estado (ácido y base son cálculos distintos → errores no
+        # correlacionados entre sí). Ver nota de derivación arriba: esto
+        # es válido tanto para method_used='born' como 'direct'.
+        d_elec_acid  = rng.normal(0.0, sigma_elec_kcal,  size=n_samples)
+        d_elec_base  = rng.normal(0.0, sigma_elec_kcal,  size=n_samples)
+        d_gcorr_acid = rng.normal(0.0, sigma_gcorr_kcal, size=n_samples)
+        d_gcorr_base = rng.normal(0.0, sigma_gcorr_kcal, size=n_samples)
+
+        dG_aq_samples = (
+            base_dG_aq
+            + (d_elec_base - d_elec_acid)
+            + (d_gcorr_base - d_gcorr_acid)
+            + d_hplus
+        )
+    else:
+        # Macroestado combinado (o, por alguna razón, sin desglose): no hay
+        # forma de separar contribución electrónica de térmica dentro de
+        # G_total_Eh ya mezclado con pesos de Boltzmann internos. Se usa un
+        # sigma combinado en cuadratura como aproximación conservadora y se
+        # deja registrado en warnings — esto es una simplificación de Fase 1,
+        # no un tratamiento riguroso del error del ensemble.
+        out["warnings"].append(
+            "Sin desglose E_sp_aq/G_corr por separado (probablemente un "
+            "macroestado neutro+zwitterión); se usa un sigma combinado "
+            "sqrt(sigma_elec² + sigma_gcorr²) por estado en vez de separar "
+            "las dos fuentes de error."
+        )
+        sigma_total = float(np.hypot(sigma_elec_kcal, sigma_gcorr_kcal))
+        d_total_acid = rng.normal(0.0, sigma_total, size=n_samples)
+        d_total_base = rng.normal(0.0, sigma_total, size=n_samples)
+
+        dG_aq_samples = (
+            base_dG_aq
+            + (d_total_base - d_total_acid)
+            + d_hplus
+        )
+
+    pka_samples = dG_aq_samples / (R_KCAL * T * LN10)
+    ci_lo, ci_hi = np.percentile(pka_samples, [2.5, 97.5])
+
+    out.update({
+        "ok": True,
+        "pka_samples": pka_samples,
+        "pka_mean":   float(np.mean(pka_samples)),
+        "pka_std":    float(np.std(pka_samples, ddof=1)),
+        "pka_median": float(np.median(pka_samples)),
+        "pka_ci95":   (float(ci_lo), float(ci_hi)),
+        "hplus_draw": d_hplus,
+    })
+    return out
+
+
 def _print_born_cycle(r: dict):
     """Imprime las contribuciones detalladas del ciclo de Born."""
     sep = "─" * 66
     print(f"\n  {sep}")
-    print(f"  CICLO DE BORN — {r['mol_acid']} → {r['mol_base']} + H⁺")
+    print(f"  BORN CYCLE — {r['mol_acid']} → {r['mol_base']} + H⁺")
     print(f"  T = {r['T']:.2f} K")
     print(f"  {sep}")
     print(f"  Conf. AH  : {r['conf_acid']}")
     print(f"  Conf. A⁻  : {r['conf_base']}")
-    print(f"  Nivel SP(AH)  : {r['theory_sp_acid'] or '—'}")
-    print(f"  Nivel SP(A⁻)  : {r['theory_sp_base'] or '—'}")
+    print(f"  SP level (AH)  : {r['theory_sp_acid'] or '—'}")
+    print(f"  SP level (A⁻)  : {r['theory_sp_base'] or '—'}")
     print()
-    print(f"  {'Término':<40} {'Valor':>12}")
+    print(f"  {'Term':<40} {'Value':>12}")
     print(f"  {'─'*40}  {'─'*12}")
 
     def fmt(v): return f"{v:+12.3f}" if v is not None else "       N/A"
@@ -1713,9 +1969,9 @@ def _print_born_cycle(r: dict):
     print()
     pka_str = f"{r['pKa']:.2f}" if r['pKa'] is not None else "N/A"
     print(f"  pKa = ΔG_aq / (RT·ln10)  =  {pka_str}")
-    print(f"  (incertidumbre típica ±1–2 unidades; Born/CPCM/TZVPD)")
+    print(f"  (typical uncertainty ±1–2 units; Born/CPCM/TZVPD)")
     if r["warnings"]:
-        print(f"\n  Advertencias:")
+        print(f"\n  Warnings:")
         for w in r["warnings"]:
             print(f"    ⚠  {w}")
     print(f"  {sep}\n")
@@ -1725,13 +1981,13 @@ def _print_direct_cycle(r: dict):
     """Imprime las contribuciones del método directo (solo CPCM, sin fase gas)."""
     sep = "─" * 66
     print(f"\n  {sep}")
-    print(f"  MÉTODO DIRECTO (solo CPCM) — {r['mol_acid']} → {r['mol_base']} + H⁺")
+    print(f"  DIRECT METHOD (CPCM only) — {r['mol_acid']} → {r['mol_base']} + H⁺")
     print(f"  T = {r['T']:.2f} K")
     print(f"  {sep}")
     print(f"  Conf. AH  : {r['conf_acid']}")
     print(f"  Conf. A⁻  : {r['conf_base']}")
-    print(f"  Nivel SP(AH)  : {r['theory_sp_acid'] or '—'}")
-    print(f"  Nivel SP(A⁻)  : {r['theory_sp_base'] or '—'}")
+    print(f"  SP level (AH)  : {r['theory_sp_acid'] or '—'}")
+    print(f"  SP level (A⁻)  : {r['theory_sp_base'] or '—'}")
     print()
     print(f"  {'G_total_CPCM(AH)  [Eh]':<40} {r['G_total_acid_Eh']:>12.8f}")
     print(f"  {'G_total_CPCM(A⁻)  [Eh]':<40} {r['G_total_base_Eh']:>12.8f}")
@@ -1744,11 +2000,55 @@ def _print_direct_cycle(r: dict):
     print()
     pka_str = f"{r['pKa']:.2f}" if r['pKa'] is not None else "N/A"
     print(f"  pKa = ΔG_aq / (RT·ln10)  =  {pka_str}")
-    print(f"  (método directo: válido si el error de solvatación del nivel de")
-    print(f"  teoría es consistente entre especies; incertidumbre típica ±1–2")
-    print(f"  unidades, similar al ciclo de Born completo)")
+    print(f"  (direct method: valid if the solvation error of the theory")
+    print(f"  level is consistent across species; typical uncertainty ±1–2")
+    print(f"  units, similar to the full Born cycle)")
     if r["warnings"]:
-        print(f"\n  Advertencias:")
+        print(f"\n  Warnings:")
+        for w in r["warnings"]:
+            print(f"    ⚠  {w}")
+    print(f"  {sep}\n")
+
+
+def _print_born_cycle_macrostate(r: dict):
+    """
+    Imprime el ciclo de Born cuando uno de los dos lados es un macroestado
+    combinado neutro+zwitterión. No hay G_gas/ΔG_solv por especie que mostrar
+    (no se calculan ni se necesitan — ver la nota en compute_pka()): en vez
+    de eso, se muestra explícitamente la reducción algebraica a la resta de
+    energías CPCM con la constante G_HPLUS_AQ_BORN.
+    """
+    sep = "─" * 66
+    print(f"\n  {sep}")
+    print(f"  BORN CYCLE (macrostate, algebraic reduction) — "
+          f"{r['mol_acid']} → {r['mol_base']} + H⁺")
+    print(f"  T = {r['T']:.2f} K")
+    print(f"  {sep}")
+    print(f"  Conf. AH  : {r['conf_acid']}")
+    print(f"  Conf. A⁻  : {r['conf_base']}")
+    print(f"  SP level (AH)  : {r['theory_sp_acid'] or '—'}")
+    print(f"  SP level (A⁻)  : {r['theory_sp_base'] or '—'}")
+    print()
+    print(f"  No explicit gas-phase SP is used for the mixture — the Born")
+    print(f"  cycle reduces algebraically to the CPCM-only energy difference")
+    print(f"  (same E_gas-cancellation already present for a single species")
+    print(f"  in this script; see the derivation note above")
+    print(f"  compute_pka_montecarlo()).")
+    print()
+    print(f"  {'G_total_CPCM(AH)  [Eh]':<40} {r['G_total_acid_Eh']:>12.8f}")
+    print(f"  {'G_total_CPCM(A⁻)  [Eh]':<40} {r['G_total_base_Eh']:>12.8f}")
+    print(f"  {'G(H⁺, aq)  [kcal/mol]':<40} {r['G_hplus_aq_kcal']:>12.3f}"
+          f"   [Tissandier 1998 + Kelly 2006]")
+    print(f"  {'─'*40}  {'─'*12}")
+    dG = r["dG_aq_kcal"]
+    print(f"  {'ΔG_aq  [kcal/mol]':<40} {dG:+12.3f}" if dG is not None else "")
+    print(f"  {'ΔG_aq  [kJ/mol]':<40} {dG*4.184:>12.3f}" if dG is not None else "")
+    print()
+    pka_str = f"{r['pKa']:.2f}" if r['pKa'] is not None else "N/A"
+    print(f"  pKa = ΔG_aq / (RT·ln10)  =  {pka_str}")
+    print(f"  (typical uncertainty ±1–2 units; Born/CPCM/TZVPD)")
+    if r["warnings"]:
+        print(f"\n  Warnings:")
         for w in r["warnings"]:
             print(f"    ⚠  {w}")
     print(f"  {sep}\n")
@@ -1873,6 +2173,321 @@ def boltzmann_5state(
 
 
 # ─────────────────────────────────────────────
+#  MONTE CARLO — CADENA COMPLETA DE 5 ESTADOS (FASE 2)
+# ─────────────────────────────────────────────
+
+def _boltzmann_5state_vectorized(
+    pKa0_samples: Optional[np.ndarray],
+    pKa1_samples: Optional[np.ndarray],
+    pKa2_samples: Optional[np.ndarray],
+    f_R: Optional[float],
+    f_D: Optional[float],
+    pH_values: list[float],
+) -> pd.DataFrame:
+    """
+    Versión vectorizada de boltzmann_5state() sobre un eje adicional de
+    muestras Monte Carlo. En vez de llamar boltzmann_5state() una vez por
+    cada una de las N muestras (con N=10 000 y ~140 valores de pH serían
+    ~1.4M evaluaciones en loop de Python puro), arma arrays 2D
+    (n_samples, n_pH) con broadcasting de numpy y reduce a percentiles por
+    columna de pH al final.
+
+    Reproduce exactamente la misma fórmula que boltzmann_5state() (mismo
+    r0/r1/r2/D) — si esa función cambia, esta hay que actualizarla en
+    paralelo; no hay una única fuente de verdad aquí porque una versión
+    escalar con loop sobre N=10⁴ muestras sería demasiado lenta para uso
+    interactivo.
+
+    Parameters
+    ----------
+    pKa0_samples, pKa1_samples, pKa2_samples : np.ndarray o None
+        Arrays de muestras MC (mismo n_samples cada uno, generados con el
+        mismo shared_hplus_draw si vienen de la misma cadena — ver
+        run_chain_montecarlo()). None si ese pKa no existe en la cadena
+        (mismo criterio que boltzmann_5state: se omite esa rama).
+    f_R, f_D : float, opcional
+        Igual que en boltzmann_5state(); default 1.0/0.0 si no se proveen.
+    pH_values : list[float]
+
+    Returns
+    -------
+    pd.DataFrame con columna 'pH' y, para cada fracción que aplique
+    (f_neutral_macro, f_R, f_D, f_cation, f_anion, f_dianion), tres
+    columnas: '{frac}_lo' (percentil 2.5), '{frac}_median', '{frac}_hi'
+    (percentil 97.5). DataFrame vacío si no hay ninguna muestra disponible.
+    """
+    if f_R is None or f_D is None:
+        f_R, f_D = 1.0, 0.0
+
+    have_pka0 = pKa0_samples is not None
+    have_pka1 = pKa1_samples is not None
+    have_pka2 = have_pka1 and (pKa2_samples is not None)
+
+    if not have_pka0 and not have_pka1:
+        return pd.DataFrame()
+
+    n_samples = (
+        len(pKa0_samples) if have_pka0 else
+        len(pKa1_samples)
+    )
+    for name, arr in [("pKa0", pKa0_samples), ("pKa1", pKa1_samples), ("pKa2", pKa2_samples)]:
+        if arr is not None and len(arr) != n_samples:
+            raise ValueError(
+                f"{name}_samples tiene {len(arr)} muestras, se esperaban "
+                f"{n_samples} (todas las ramas de la cadena deben compartir "
+                f"el mismo n_samples)."
+            )
+
+    pH_arr = np.asarray(pH_values, dtype=float)             # shape (M,)
+
+    def _pow10_2d(exp_2d):
+        return 10.0 ** np.clip(exp_2d, -300.0, 300.0)
+
+    zeros_2d = np.zeros((n_samples, len(pH_arr)))
+
+    r0 = (_pow10_2d(pKa0_samples[:, None] - pH_arr[None, :])
+          if have_pka0 else zeros_2d)
+    r1 = (_pow10_2d(pH_arr[None, :] - pKa1_samples[:, None])
+          if have_pka1 else zeros_2d)
+    r2 = (_pow10_2d(2 * pH_arr[None, :] - pKa1_samples[:, None] - pKa2_samples[:, None])
+          if have_pka2 else zeros_2d)
+
+    D = 1.0 + r0 + r1 + r2
+    f_neutral_macro = 1.0 / D
+    f_R_arr = f_neutral_macro * f_R
+    f_D_arr = f_neutral_macro * f_D
+
+    def _summ(arr_2d):
+        lo, med, hi = np.percentile(arr_2d, [2.5, 50.0, 97.5], axis=0)
+        return lo, med, hi
+
+    cols: dict = {"pH": pH_arr}
+
+    for label, arr_2d in [
+        ("f_neutral_macro", f_neutral_macro),
+        ("f_R", f_R_arr),
+        ("f_D", f_D_arr),
+    ]:
+        lo, med, hi = _summ(arr_2d)
+        cols[f"{label}_lo"], cols[f"{label}_median"], cols[f"{label}_hi"] = lo, med, hi
+
+    if have_pka0:
+        lo, med, hi = _summ(r0 / D)
+        cols["f_cation_lo"], cols["f_cation_median"], cols["f_cation_hi"] = lo, med, hi
+    if have_pka1:
+        lo, med, hi = _summ(r1 / D)
+        cols["f_anion_lo"], cols["f_anion_median"], cols["f_anion_hi"] = lo, med, hi
+    if have_pka2:
+        lo, med, hi = _summ(r2 / D)
+        cols["f_dianion_lo"], cols["f_dianion_median"], cols["f_dianion_hi"] = lo, med, hi
+
+    return pd.DataFrame(cols)
+
+
+def run_chain_montecarlo(
+    data_A: Optional[dict],
+    data_neutral_macro: Optional[dict],
+    data_B: Optional[dict],
+    data_C: Optional[dict],
+    f_R: Optional[float],
+    f_D: Optional[float],
+    pH_values: list[float],
+    T: float = T_STD,
+    method: str = "auto",
+    gcorr_source: str = "harmonic",
+    n_samples: int = 10_000,
+    sigma_elec_kcal: float = 0.5,
+    sigma_gcorr_kcal: float = 0.4,
+    sigma_hplus_kcal: float = 2.5,
+    seed: Optional[int] = None,
+) -> dict:
+    """
+    Propaga incertidumbre por Monte Carlo a través de TODA la cadena de 5
+    estados (A⁺ ⇌ [R⇌D] ⇌ B⁻ ⇌ C²⁻), preservando la correlación física de
+    G(H⁺,aq) entre pKa0/pKa1/pKa2, y devuelve bandas de confianza para las
+    fracciones de especie vs. pH.
+
+    Mismos pares acid/base que usa _run_extended() para la cadena
+    determinística:
+        pKa0 = compute_pka(data_A, data_neutral_macro, ...)
+        pKa1 = compute_pka(data_neutral_macro, data_B,  ...)
+        pKa2 = compute_pka(data_B, data_C, ...)
+
+    Cualquier par con un miembro en None se omite (mismo criterio que
+    _run_extended: pKa0 requiere data_A, pKa2 requiere data_B y data_C).
+
+    Punto clave de diseño: la perturbación de G(H⁺,aq) (shared_hplus_draw)
+    se genera UNA sola vez acá y se pasa idéntica a las tres llamadas de
+    compute_pka_montecarlo. Esto hace que, en las N muestras generadas,
+    pKa0/pKa1/pKa2 se muevan de forma correlacionada cuando la constante del
+    protón se desplaza — que es lo físicamente correcto, porque es la MISMA
+    constante en los tres pasos de desprotonación. El ruido de energía
+    electrónica/térmica (sigma_elec_kcal, sigma_gcorr_kcal) en cambio usa
+    generadores independientes por tramo (rng.spawn), porque A, R/D, B y C
+    son cálculos ORCA distintos con errores no correlacionados entre sí.
+
+    Returns
+    -------
+    dict con:
+        ok             : bool
+        mc_pka0/1/2    : dict o None — salida completa de
+                         compute_pka_montecarlo() para cada tramo presente
+        df_dist_bands  : pd.DataFrame — salida de
+                         _boltzmann_5state_vectorized() (columnas
+                         {frac}_lo/_median/_hi por cada fracción aplicable)
+        warnings       : list[str]
+    """
+    rng = np.random.default_rng(seed)
+
+    # Constante compartida por toda la cadena — un solo draw, reusado en
+    # las tres llamadas de compute_pka_montecarlo de abajo.
+    shared_hplus_draw = rng.normal(0.0, sigma_hplus_kcal, size=n_samples)
+
+    # Sub-generadores independientes para el ruido de E_elec/G_corr de cada
+    # tramo (no deben compartirse entre tramos: cada uno involucra cálculos
+    # ORCA distintos).
+    rng_pka0, rng_pka1, rng_pka2 = rng.spawn(3)
+
+    out: dict = {
+        "ok": False,
+        "n_samples": n_samples,
+        "mc_pka0": None, "mc_pka1": None, "mc_pka2": None,
+        "df_dist_bands": None,
+        "warnings": [],
+    }
+
+    mc_pka0 = mc_pka1 = mc_pka2 = None
+
+    if data_A is not None and data_neutral_macro is not None:
+        mc_pka0 = compute_pka_montecarlo(
+            data_A, data_neutral_macro, T=T, method=method, gcorr_source=gcorr_source,
+            n_samples=n_samples,
+            sigma_elec_kcal=sigma_elec_kcal, sigma_gcorr_kcal=sigma_gcorr_kcal,
+            sigma_hplus_kcal=sigma_hplus_kcal,
+            shared_hplus_draw=shared_hplus_draw, rng=rng_pka0,
+        )
+        out["warnings"].extend(mc_pka0["warnings"])
+
+    if data_neutral_macro is not None and data_B is not None:
+        mc_pka1 = compute_pka_montecarlo(
+            data_neutral_macro, data_B, T=T, method=method, gcorr_source=gcorr_source,
+            n_samples=n_samples,
+            sigma_elec_kcal=sigma_elec_kcal, sigma_gcorr_kcal=sigma_gcorr_kcal,
+            sigma_hplus_kcal=sigma_hplus_kcal,
+            shared_hplus_draw=shared_hplus_draw, rng=rng_pka1,
+        )
+        out["warnings"].extend(mc_pka1["warnings"])
+
+    if data_B is not None and data_C is not None:
+        mc_pka2 = compute_pka_montecarlo(
+            data_B, data_C, T=T, method=method, gcorr_source=gcorr_source,
+            n_samples=n_samples,
+            sigma_elec_kcal=sigma_elec_kcal, sigma_gcorr_kcal=sigma_gcorr_kcal,
+            sigma_hplus_kcal=sigma_hplus_kcal,
+            shared_hplus_draw=shared_hplus_draw, rng=rng_pka2,
+        )
+        out["warnings"].extend(mc_pka2["warnings"])
+
+    out["mc_pka0"], out["mc_pka1"], out["mc_pka2"] = mc_pka0, mc_pka1, mc_pka2
+
+    if (mc_pka0 is None or not mc_pka0["ok"]) and (mc_pka1 is None or not mc_pka1["ok"]):
+        out["warnings"].append(
+            "No hay suficientes tramos válidos para construir la cadena MC "
+            "(se necesita al menos A+neutro/zwitterión, o neutro/zwitterión+B, "
+            "con compute_pka() determinístico exitoso)."
+        )
+        return out
+
+    pKa0_samples = mc_pka0["pka_samples"] if (mc_pka0 and mc_pka0["ok"]) else None
+    pKa1_samples = mc_pka1["pka_samples"] if (mc_pka1 and mc_pka1["ok"]) else None
+    pKa2_samples = mc_pka2["pka_samples"] if (mc_pka2 and mc_pka2["ok"]) else None
+
+    df_bands = _boltzmann_5state_vectorized(
+        pKa0_samples, pKa1_samples, pKa2_samples, f_R, f_D, pH_values,
+    )
+
+    out["ok"] = True
+    out["df_dist_bands"] = df_bands
+    return out
+
+
+def print_mc_summary(chain_mc: Optional[dict], pka_labels: list) -> None:
+    """
+    Imprime tabla comparativa pKa determinístico vs. Monte Carlo (media±std,
+    CI95) — análoga a print_pka_summary(), pero para la salida de
+    run_chain_montecarlo().
+
+    pka_labels: lista de tuplas (key, resultado_dict_o_None, etiqueta_str),
+    p. ej. [("pKa0", pka0_result, "pKa₀ (A→R/D)"), ("pKa1", pka1_result,
+    "pKa₁ (R/D→B)"), ("pKa2", pka2_result, "pKa₂ (B→C)")] — key debe
+    coincidir con mc_pka0/mc_pka1/mc_pka2 dentro de chain_mc.
+    """
+    sep = "═" * 74
+    print(f"\n{sep}")
+    print("  PROPAGACIÓN DE INCERTIDUMBRE — MONTE CARLO")
+    print(sep)
+
+    if chain_mc is None or not chain_mc.get("ok"):
+        print("\n  ⚠  El Monte Carlo no pudo ejecutarse.")
+        for w in (chain_mc or {}).get("warnings", []):
+            print(f"    ⚠  {w}")
+        print(f"{sep}\n")
+        return
+
+    mc_map = {
+        "pKa0": chain_mc.get("mc_pka0"),
+        "pKa1": chain_mc.get("mc_pka1"),
+        "pKa2": chain_mc.get("mc_pka2"),
+    }
+
+    print(f"\n  N = {chain_mc['n_samples']:,} muestras  "
+          f"(G(H⁺,aq) compartido entre pKa0/pKa1/pKa2 — ver nota abajo)")
+    print(f"\n  {'':<22} {'determinístico':>14} {'media MC':>10} "
+          f"{'± std':>8} {'CI 95%':>18}")
+    print(f"  {'-'*22} {'-'*14} {'-'*10} {'-'*8} {'-'*18}")
+
+    any_row = False
+    for key, det, label in pka_labels:
+        mc = mc_map.get(key)
+        if det is None and mc is None:
+            continue
+        any_row = True
+        det_v = f"{det['pKa']:.2f}" if (det and det.get("ok")) else "—"
+        if mc is not None and mc.get("ok"):
+            mean_v = f"{mc['pka_mean']:.2f}"
+            std_v  = f"±{mc['pka_std']:.2f}"
+            lo, hi = mc["pka_ci95"]
+            ci_v   = f"[{lo:.2f}, {hi:.2f}]"
+        else:
+            mean_v = std_v = ci_v = "—"
+        print(f"  {label:<22} {det_v:>14} {mean_v:>10} {std_v:>8} {ci_v:>18}")
+
+    if not any_row:
+        print("  (sin pKa's disponibles para Monte Carlo)")
+
+    sample_mc = next((mc for mc in mc_map.values() if mc is not None and mc.get("ok")), None)
+    if sample_mc is not None:
+        print(f"\n  σ asumidos: E_elec=±{sample_mc['sigma_elec_kcal']:.2f}  "
+              f"G_corr=±{sample_mc['sigma_gcorr_kcal']:.2f}  "
+              f"G(H⁺,aq)=±{sample_mc['sigma_hplus_kcal']:.2f} kcal/mol")
+
+    if chain_mc["warnings"]:
+        print(f"\n  ⚠  Advertencias:")
+        for w in chain_mc["warnings"]:
+            print(f"     ⚠  {w}")
+
+    print(f"\n  Nota: G(H⁺,aq) es la misma constante física en los tres pasos")
+    print(f"  de desprotonación, así que su perturbación se comparte entre")
+    print(f"  pKa0/pKa1/pKa2 en cada muestra MC (no se samplea independiente")
+    print(f"  por tramo) — esto correlaciona el sesgo sistemático entre pKa's")
+    print(f"  y evita inflar artificialmente la incertidumbre de cantidades")
+    print(f"  derivadas como Δ(pKa2−pKa1) o la fracción de especie a un pH")
+    print(f"  dado. Las bandas de confianza de la distribución de especies")
+    print(f"  quedan en df_dist_bands (percentiles 2.5/50/97.5).")
+    print(f"{sep}\n")
+
+
+# ─────────────────────────────────────────────
 #  IMPRESIÓN DE RESULTADOS
 # ─────────────────────────────────────────────
 
@@ -1925,11 +2540,16 @@ def _print_single_pka(pka: dict, label: str):
     if pka["ok"]:
         print(f"\n  {label}  ({pka['mol_acid']} → {pka['mol_base']} + H⁺)"
               f"   [método: {pka['method']}]")
-        if pka["method"] == "born":
+        if pka["method"] == "born" and pka.get("dG_gas_kcal") is not None:
             print(f"  ΔG_gas        = {pka['dG_gas_kcal']:+.3f} kcal/mol")
             print(f"  ΔG_solv(ácido) = {pka['dG_solv_acid_kcal']:+.3f} kcal/mol")
             print(f"  ΔG_solv(base)  = {pka['dG_solv_base_kcal']:+.3f} kcal/mol")
             print(f"  ΔG_solv(H⁺)   = {DG_SOLV_HPLUS:+.3f} kcal/mol  [Kelly 2006]")
+        elif pka["method"] == "born":
+            # Macroestado: ciclo de Born resuelto vía la reducción algebraica
+            # (sin SP de fase gas para la mezcla) — ver compute_pka().
+            print(f"  G(H⁺, aq)     = {pka['G_hplus_aq_kcal']:+.3f} kcal/mol "
+                  f"[Tissandier 1998 + Kelly 2006; macroestado, reducción algebraica]")
         else:
             print(f"  G(H⁺, aq)     = {pka['G_hplus_aq_kcal']:+.3f} kcal/mol "
                   f"[Pliego & Riveros 2002]")
@@ -2366,10 +2986,16 @@ def plot_distribution(
     pKa2: Optional[float],
     output_path: Optional[Path] = None,
     ph_highlight: Optional[float] = None,
+    chain_mc: Optional[dict] = None,
 ):
     """
     Diagrama de distribución de especies (fracciones molares vs pH).
     Guarda como PNG si se provee output_path; si no, muestra en pantalla.
+
+    chain_mc : dict de run_chain_montecarlo(), opcional (--montecarlo). En
+        _run_classic() se construye con data_A=None, f_R=1.0, f_D=0.0, así
+        que la columna 'f_neutral_macro' de df_dist_bands es equivalente a
+        'f_neutral' acá (f_R=1 → f_R_macro == f_neutral_macro).
     """
     try:
         import matplotlib.pyplot as plt
@@ -2381,16 +3007,38 @@ def plot_distribution(
     has_dianion = "f_dianion" in df_dist.columns
     pH_vals = df_dist["pH"].values
 
+    df_bands = None
+    if chain_mc is not None and chain_mc.get("ok"):
+        cand = chain_mc.get("df_dist_bands")
+        if cand is not None and not cand.empty and len(cand) == len(pH_vals):
+            df_bands = cand
+        elif cand is not None and not cand.empty:
+            print("  ⚠  df_dist_bands tiene distinto largo que df_dist "
+                  "(pH_all no coincide) — se omiten las bandas MC en el gráfico.")
+
     fig, ax = plt.subplots(figsize=(8, 5))
 
     colors = ["#2196F3", "#4CAF50", "#F44336"]  # azul, verde, rojo
     labels = ["AH₂ (q=0)", "AH⁻ (q=−1)", "A²⁻ (q=−2)"]
     cols   = ["f_neutral", "f_anion"] + (["f_dianion"] if has_dianion else [])
+    # mapeo a columnas de df_dist_bands (run_chain_montecarlo siempre usa
+    # nomenclatura de 5 estados internamente)
+    band_cols = {"f_neutral": "f_neutral_macro", "f_anion": "f_anion", "f_dianion": "f_dianion"}
 
     for col, label, color in zip(cols, labels, colors):
         if col in df_dist.columns:
+            bcol = band_cols.get(col)
+            if df_bands is not None and bcol and f"{bcol}_lo" in df_bands.columns and f"{bcol}_hi" in df_bands.columns:
+                ax.fill_between(pH_vals,
+                                 df_bands[f"{bcol}_lo"].values * 100,
+                                 df_bands[f"{bcol}_hi"].values * 100,
+                                 color=color, alpha=0.15, linewidth=0, zorder=1)
             ax.plot(pH_vals, df_dist[col].values * 100, label=label,
-                    color=color, linewidth=2.0)
+                    color=color, linewidth=2.0, zorder=2)
+
+    if df_bands is not None:
+        ax.plot([], [], color="gray", alpha=0.3, linewidth=8,
+                label="banda MC 95% (percentil 2.5–97.5)")
 
     # Líneas verticales en pKa
     if pKa1:
@@ -2433,8 +3081,17 @@ def plot_distribution_5(
     pKa2: Optional[float],
     output_path: Optional[Path] = None,
     ph_highlight: Optional[float] = None,
+    chain_mc: Optional[dict] = None,
 ):
-    """Diagrama de distribución de 5 especies (catión, R, D, anión, dianión) vs pH."""
+    """
+    Diagrama de distribución de 5 especies (catión, R, D, anión, dianión) vs pH.
+
+    chain_mc : dict de run_chain_montecarlo(), opcional (--montecarlo). Si se
+        provee y trae df_dist_bands no vacío, se dibuja una banda sombreada
+        de percentil 2.5–97.5 alrededor de cada curva (misma columna de
+        pH que df_dist, ya que ambas se generan con el mismo pH_all — ver
+        _run_extended()/_run_classic()).
+    """
     try:
         import matplotlib.pyplot as plt
         import matplotlib.ticker as ticker
@@ -2443,6 +3100,16 @@ def plot_distribution_5(
         return
 
     pH_vals = df_dist["pH"].values
+
+    df_bands = None
+    if chain_mc is not None and chain_mc.get("ok"):
+        cand = chain_mc.get("df_dist_bands")
+        if cand is not None and not cand.empty and len(cand) == len(pH_vals):
+            df_bands = cand
+        elif cand is not None and not cand.empty:
+            print("  ⚠  df_dist_bands tiene distinto largo que df_dist "
+                  "(pH_all no coincide) — se omiten las bandas MC en el gráfico.")
+
     fig, ax = plt.subplots(figsize=(9, 5.5))
 
     series = []
@@ -2457,8 +3124,17 @@ def plot_distribution_5(
 
     for col, label, color, ls in series:
         if col in df_dist.columns:
+            if df_bands is not None and f"{col}_lo" in df_bands.columns and f"{col}_hi" in df_bands.columns:
+                ax.fill_between(pH_vals,
+                                 df_bands[f"{col}_lo"].values * 100,
+                                 df_bands[f"{col}_hi"].values * 100,
+                                 color=color, alpha=0.15, linewidth=0, zorder=1)
             ax.plot(pH_vals, df_dist[col].values * 100, label=label,
-                    color=color, linewidth=2.0, linestyle=ls)
+                    color=color, linewidth=2.0, linestyle=ls, zorder=2)
+
+    if df_bands is not None:
+        ax.plot([], [], color="gray", alpha=0.3, linewidth=8,
+                label="banda MC 95% (percentil 2.5–97.5)")
 
     if pKa0 is not None:
         ax.axvline(pKa0, color="#9C27B0", linestyle=":", alpha=0.6, label=f"pKa₀ = {pKa0:.2f}")
@@ -2546,6 +3222,78 @@ def plot_conformer_boltzmann(data_list: list[dict], output_path: Optional[Path] 
     plt.close(fig)
 
 
+def plot_pka_histograms(chain_mc: Optional[dict], pka_labels: list,
+                        output_path: Optional[Path] = None):
+    """
+    Histograma de las muestras Monte Carlo de cada pKa presente en la
+    cadena (chain_mc['mc_pka0']/['mc_pka1']/['mc_pka2']), con el pKa
+    determinístico (compute_pka(), línea vertical) y la media/CI95 de la
+    distribución MC superpuestos. Complementa las bandas de confianza de
+    plot_distribution_5()/plot_distribution() con la vista "por pKa" que
+    pide la Fase 4 del plan (histograma de cada pKa individual).
+
+    pka_labels : misma estructura que print_mc_summary() — lista de
+        tuplas (key, base_result, label) con key en {'pKa0','pKa1','pKa2'}
+        y base_result el resultado determinístico de compute_pka() (para
+        la línea vertical de referencia).
+    """
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("  ⚠  matplotlib no disponible. Instalar con: conda install matplotlib")
+        return
+
+    if chain_mc is None or not chain_mc.get("ok"):
+        return
+
+    key_to_mc = {"pKa0": "mc_pka0", "pKa1": "mc_pka1", "pKa2": "mc_pka2"}
+    panels = []
+    for key, base_result, label in pka_labels:
+        mc = chain_mc.get(key_to_mc.get(key))
+        if mc is not None and mc.get("ok") and mc.get("pka_samples") is not None:
+            panels.append((key, base_result, label, mc))
+
+    if not panels:
+        return
+
+    fig, axes = plt.subplots(1, len(panels), figsize=(4.5 * len(panels), 4),
+                             sharey=False)
+    if len(panels) == 1:
+        axes = [axes]
+
+    for ax, (key, base_result, label, mc) in zip(axes, panels):
+        samples = mc["pka_samples"]
+        ax.hist(samples, bins=60, color="#2196F3", alpha=0.75, edgecolor="none")
+
+        pka_det = base_result["pKa"] if (base_result and base_result.get("ok")) else None
+        if pka_det is not None:
+            ax.axvline(pka_det, color="black", linestyle="-", linewidth=1.5,
+                       label=f"determinístico = {pka_det:.2f}")
+
+        ax.axvline(mc["pka_mean"], color="#F44336", linestyle="--", linewidth=1.5,
+                   label=f"media MC = {mc['pka_mean']:.2f}")
+        lo95, hi95 = mc["pka_ci95"]
+        ax.axvspan(lo95, hi95, color="#F44336", alpha=0.08,
+                   label=f"CI95 = [{lo95:.2f}, {hi95:.2f}]")
+
+        ax.set_title(label, fontsize=10)
+        ax.set_xlabel("pKa")
+        ax.set_ylabel("Frecuencia" if ax == axes[0] else "")
+        ax.legend(fontsize=7, loc="upper right")
+        ax.grid(True, alpha=0.25)
+
+    fig.suptitle(f"Distribución Monte Carlo de pKa (N={chain_mc['n_samples']:,} muestras)",
+                fontsize=11)
+    plt.tight_layout()
+
+    if output_path:
+        fig.savefig(output_path, dpi=150, bbox_inches="tight")
+        print(f"  Histogramas de pKa (MC) guardados en: {output_path}")
+    else:
+        plt.show()
+    plt.close(fig)
+
+
 # ─────────────────────────────────────────────
 #  EXPORTACIÓN
 # ─────────────────────────────────────────────
@@ -2556,6 +3304,7 @@ def export_results(
     data_list: list[dict],
     fmt: str,
     taut_result: Optional[dict] = None,
+    chain_mc: Optional[dict] = None,
 ):
     """
     Exporta resultados del ciclo de pKa y distribución de especies.
@@ -2564,6 +3313,12 @@ def export_results(
       [(pka0, "pKa0"), (pka1, "pKa1"), (pka2, "pKa2")]
     taut_result: dict de compute_tautomer_equilibrium(), opcional (se agrega
       como fila/hoja adicional si se provee).
+    chain_mc: dict de run_chain_montecarlo(), opcional (--montecarlo). Si se
+      provee y ok=True, agrega las muestras crudas de pKa0/pKa1/pKa2
+      (mc_samples.csv / hoja MC_samples) y las bandas de confianza de la
+      distribución de especies (mc_distribution_bands.csv / hoja
+      MC_distribution_bands) — útil para reproducir el análisis de
+      incertidumbre sin recorrer todo el pipeline.
     """
     out_dir = WORK_ROOT
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -2622,12 +3377,30 @@ def export_results(
             conf_rows.append(r)
     df_confs = pd.DataFrame(conf_rows)
 
+    # ── DataFrame de muestras crudas Monte Carlo (opcional) ───────────────
+    df_mc_samples = None
+    df_mc_bands = None
+    if chain_mc is not None and chain_mc.get("ok"):
+        mc_cols = {}
+        for key, colname in [("mc_pka0", "pKa0"), ("mc_pka1", "pKa1"), ("mc_pka2", "pKa2")]:
+            mc = chain_mc.get(key)
+            if mc is not None and mc.get("ok"):
+                mc_cols[colname] = mc["pka_samples"]
+        if mc_cols:
+            df_mc_samples = pd.DataFrame(mc_cols)
+        if chain_mc.get("df_dist_bands") is not None and not chain_mc["df_dist_bands"].empty:
+            df_mc_bands = chain_mc["df_dist_bands"]
+
     if fmt in ("csv", "both"):
         df_cycle.to_csv(out_dir / "pka_cycle.csv", index=False)
         df_dist.to_csv(out_dir / "protonation_distribution.csv", index=False)
         df_confs.to_csv(out_dir / "conformer_boltzmann.csv", index=False)
         if df_taut is not None:
             df_taut.to_csv(out_dir / "tautomer_equilibrium.csv", index=False)
+        if df_mc_samples is not None:
+            df_mc_samples.to_csv(out_dir / "mc_samples.csv", index=False)
+        if df_mc_bands is not None:
+            df_mc_bands.to_csv(out_dir / "mc_distribution_bands.csv", index=False)
         print(f"  CSVs guardados en: {out_dir}/")
 
     if fmt in ("xlsx", "both"):
@@ -2644,6 +3417,10 @@ def export_results(
                         "G_total_298K", "boltz_298K", "dG_298K_kcal"]
                 keep = [c for c in keep if c in df_confs.columns]
                 df_confs[keep].to_excel(writer, sheet_name="Conformer_Boltzmann", index=False)
+            if df_mc_samples is not None:
+                df_mc_samples.to_excel(writer, sheet_name="MC_samples", index=False)
+            if df_mc_bands is not None:
+                df_mc_bands.to_excel(writer, sheet_name="MC_distribution_bands", index=False)
         print(f"  Excel guardado en: {xlsx_path}")
 
 
@@ -2762,6 +3539,34 @@ Ejemplos:
                         help="Además de la entropía, aplica también la corrección "
                              "cuasi-armónica de Head-Gordon a la entalpía "
                              "(default: solo la entropía, la más relevante)")
+    parser.add_argument("--montecarlo", action="store_true",
+                        help="Propaga incertidumbre por Monte Carlo a través de "
+                             "toda la cadena de pKa's (ver --mc-*), preservando "
+                             "la correlación física de G(H⁺,aq) entre pKa0/pKa1/"
+                             "pKa2. Imprime media±std/CI95 junto al valor "
+                             "determinístico y, si además se pasa --export, "
+                             "agrega las muestras crudas y las bandas de "
+                             "confianza de la distribución de especies.")
+    parser.add_argument("--mc-samples", type=int, default=10_000, metavar="N",
+                        help="Número de muestras Monte Carlo (default: 10000)")
+    parser.add_argument("--mc-sigma-elec", type=float, default=0.5, metavar="KCAL",
+                        help="σ asumida para la energía electrónica SP por "
+                             "estado, en kcal/mol (default: 0.5, típico para "
+                             "ωB97X-D3/def2-TZVPD)")
+    parser.add_argument("--mc-sigma-gcorr", type=float, default=0.4, metavar="KCAL",
+                        help="σ asumida para la corrección térmica G_corr por "
+                             "estado, en kcal/mol (default: 0.4; mayor si hay "
+                             "n_imag>0 o gcorr_source='harmonic' en vez de mRRHO)")
+    parser.add_argument("--mc-sigma-hplus", type=float, default=2.5, metavar="KCAL",
+                        help="σ asumida para G(H⁺,aq) — dispersión típica entre "
+                             "valores de literatura (Pliego-Riveros −264.61, "
+                             "Kelly-Cramer-Truhlar −265.9, Zhan-Dixon ≈−262.4; "
+                             "default: 2.5). Esta es sistemática y se comparte "
+                             "entre los tres pKa's de la cadena, no se muestrea "
+                             "independiente por tramo.")
+    parser.add_argument("--mc-seed", type=int, default=None, metavar="N",
+                        help="Semilla para reproducibilidad del Monte Carlo "
+                             "(default: sin fijar)")
     args = parser.parse_args()
 
     GV_CUTOFF = args.gv_cutoff
@@ -2925,22 +3730,49 @@ def _run_classic(args, gcorr_source: str = "harmonic"):
                 if fa is not None: parts.append(f"f(AH⁻)={fa:.1f}%")
                 if fd is not None: parts.append(f"f(A²⁻)={fd:.1f}%")
                 print(f"    {label}: {', '.join(parts)}")
+
+        # ── Monte Carlo (cadena de 3 estados: no hay catión A ni macroestado,
+        #    se reusa run_chain_montecarlo() con data_A=None, f_R=1/f_D=0) ──
+        chain_mc = None
+        if args.montecarlo:
+            print(f"\n▸ Propagando incertidumbre Monte Carlo "
+                  f"(N={args.mc_samples:,} muestras)...")
+            chain_mc = run_chain_montecarlo(
+                None, data_neutral, data_anion, data_dianion,
+                f_R=1.0, f_D=0.0, pH_values=pH_all,
+                T=args.temp, method=args.method, gcorr_source=gcorr_source,
+                n_samples=args.mc_samples,
+                sigma_elec_kcal=args.mc_sigma_elec,
+                sigma_gcorr_kcal=args.mc_sigma_gcorr,
+                sigma_hplus_kcal=args.mc_sigma_hplus,
+                seed=args.mc_seed,
+            )
+            print_mc_summary(chain_mc, [
+                ("pKa1", pka1_result, "pKa₁"),
+                ("pKa2", pka2_result, "pKa₂"),
+            ])
     else:
         df_dist = pd.DataFrame()
+        chain_mc = None
 
     data_list = [d for d in [data_neutral, data_anion, data_dianion] if d is not None]
 
     if args.export and not df_dist.empty:
         export_results([(pka1_result, "pKa1"), (pka2_result, "pKa2")],
-                       df_dist, data_list, args.export)
+                       df_dist, data_list, args.export, chain_mc=chain_mc)
 
     if args.plot and pKa1 is not None:
         out_dir = WORK_ROOT
         plot_distribution(df_dist, pKa1, pKa2,
                           output_path=out_dir / "species_distribution.png",
-                          ph_highlight=args.ph)
+                          ph_highlight=args.ph, chain_mc=chain_mc)
         plot_conformer_boltzmann(data_list,
                                  output_path=out_dir / "conformer_boltzmann.png")
+        if args.montecarlo:
+            plot_pka_histograms(chain_mc, [
+                ("pKa1", pka1_result, "pKa₁"),
+                ("pKa2", pka2_result, "pKa₂"),
+            ], output_path=out_dir / "pka_mc_histograms.png")
 
     print("\nTerminado.\n")
 
@@ -2949,6 +3781,7 @@ def _run_classic(args, gcorr_source: str = "harmonic"):
         "pKa1": pKa1, "pKa2": pKa2,
         "df_dist": df_dist,
         "data_list": data_list,
+        "chain_mc": chain_mc,
     }
 
 
@@ -3145,6 +3978,28 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
             if "f_dianion" in row: parts.append(f"f(C²⁻)={r0['f_dianion']*100:.1f}%")
             print(f"    {label}: {', '.join(parts)}")
 
+    # ── Monte Carlo (cadena completa de 5 estados, G(H⁺,aq) correlacionado
+    #    entre pKa0/pKa1/pKa2 — ver run_chain_montecarlo()) ─────────────────
+    chain_mc = None
+    if args.montecarlo:
+        print(f"\n▸ Propagando incertidumbre Monte Carlo por toda la cadena "
+              f"(N={args.mc_samples:,} muestras)...")
+        chain_mc = run_chain_montecarlo(
+            data_A, data_neutral_macro, data_B, data_C,
+            f_R=f_R, f_D=f_D, pH_values=pH_all,
+            T=args.temp, method=args.method, gcorr_source=gcorr_source,
+            n_samples=args.mc_samples,
+            sigma_elec_kcal=args.mc_sigma_elec,
+            sigma_gcorr_kcal=args.mc_sigma_gcorr,
+            sigma_hplus_kcal=args.mc_sigma_hplus,
+            seed=args.mc_seed,
+        )
+        print_mc_summary(chain_mc, [
+            ("pKa0", pka0_result, "pKa₀ (A→R/D)"),
+            ("pKa1", pka1_result, "pKa₁ (R/D→B)"),
+            ("pKa2", pka2_result, "pKa₂ (B→C)"),
+        ])
+
     # ── Exportar ─────────────────────────────────────────────────────────
     data_list = [d for d in [data_A, data_R, data_D, data_B, data_C] if d is not None]
 
@@ -3152,6 +4007,7 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
         export_results(
             [(pka0_result, "pKa0"), (pka1_result, "pKa1"), (pka2_result, "pKa2")],
             df_dist, data_list, args.export, taut_result=taut_result,
+            chain_mc=chain_mc,
         )
 
     # ── Gráficos ─────────────────────────────────────────────────────────
@@ -3161,10 +4017,17 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
             df_dist, pKa0, pKa1, pKa2,
             output_path=out_dir / "species_distribution.png",
             ph_highlight=args.ph,
+            chain_mc=chain_mc,
         )
         plot_conformer_boltzmann(
             data_list, output_path=out_dir / "conformer_boltzmann.png",
         )
+        if args.montecarlo:
+            plot_pka_histograms(chain_mc, [
+                ("pKa0", pka0_result, "pKa₀ (A→R/D)"),
+                ("pKa1", pka1_result, "pKa₁ (R/D→B)"),
+                ("pKa2", pka2_result, "pKa₂ (B→C)"),
+            ], output_path=out_dir / "pka_mc_histograms.png")
 
     print("\nTerminado.\n")
 
@@ -3174,6 +4037,7 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
         "f_R": f_R, "f_D": f_D,
         "df_dist": df_dist,
         "data_list": data_list,
+        "chain_mc": chain_mc,
     }
 
 
