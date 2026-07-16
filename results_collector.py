@@ -66,16 +66,25 @@ MÓDULOS DE ANÁLISIS
 USO
 ═══════════════════════════════════════════════════════════════════════════════
 
-  python results_collector.py --mol mglyval               # un estado
-  python results_collector.py --mol mglyval --export xlsx
-  python results_collector.py --mol mglyval --plot
-  python results_collector.py --compare                   # todos los estados
-  python results_collector.py --compare --plot
-  python results_collector.py --compare --ref mglyval_neutral
+  python results_collector.py                                   # --mol MGLYVAL (default), modo compare
+  python results_collector.py --mol MGLYVAL                     # compara TODOS los estados de protonación
+  python results_collector.py --mol MGLYVAL --plot
+  python results_collector.py --mol MGLYVAL --export xlsx
+  python results_collector.py --mol MGLYVAL --ref mglyval_neutral
+  python results_collector.py --mol MGLYVAL --state mglyval_neutral        # un solo estado
+  python results_collector.py --mol MGLYVAL --state mglyval_neutral --plot
   python results_collector.py --pka --acid mglyval_neutral --base mglyval_anion
 
-Para el pKa, cada mol debe tener un SP en fase gas bajo:
-  runs/<mol>/06_sp_gas/conf_<best>/sp_gas.out
+--mol NAME apunta al proyecto bajo PAPER1/, p.ej. --mol MGLYVAL resuelve a
+  /home/kmilozeta/PAPER1/MGLYVAL/runs/
+Dentro de ese runs/ se autodetectan automáticamente todos los estados de
+protonación disponibles (cualquier subdirectorio con 04_sp/ dentro) y se
+comparan entre sí — este es el modo por defecto (equivalente al antiguo
+--compare). Usa --state NAME si en cambio quieres analizar un único estado
+de protonación en detalle.
+
+Para el pKa, cada estado debe tener un SP en fase gas bajo:
+  runs/<estado>/06_sp_gas/conf_<best>/sp_gas.out
 (calcular con el mismo funcional/base que el SP acuoso pero sin CPCM)
 """
 
@@ -98,7 +107,8 @@ except ImportError:
 #  CONSTANTES
 # ─────────────────────────────────────────────
 
-WORK_ROOT       = Path("runs")
+WORK_ROOT       = Path("runs")     # se reasigna en main() vía resolve_work_root()
+PAPER1_ROOT     = Path("/home/kmilozeta/PAPER1")
 HARTREE_TO_KCAL = 627.5094740631
 HARTREE_TO_KJ   = HARTREE_TO_KCAL * 4.184
 HARTREE_TO_EV   = 27.211396132
@@ -1244,6 +1254,55 @@ def print_pka_analysis(pka_result: dict, mol_acid: str, mol_base: str):
 #  COLECTOR PRINCIPAL
 # ─────────────────────────────────────────────
 
+def resolve_work_root(mol_name: str) -> Path:
+    """
+    Resuelve el directorio runs/ del proyecto a partir de --mol.
+
+    --mol ahora identifica el proyecto bajo PAPER1/ (p.ej. --mol MGLYVAL),
+    no un estado de protonación individual. Se resuelve a:
+
+        /home/kmilozeta/PAPER1/<MOL_NAME.upper()>/runs/
+
+    Si esa ruta no existe, se intenta como fallback interpretar mol_name
+    directamente como una ruta (relativa o absoluta) a un directorio runs/
+    ya existente, para no romper flujos antiguos que corrían el script
+    desde dentro del proyecto con `runs/` local.
+    """
+    project_dir = PAPER1_ROOT / mol_name.upper()
+    candidate = project_dir / "runs"
+    if candidate.is_dir():
+        return candidate
+
+    fallback = Path(mol_name)
+    if fallback.is_dir():
+        warnings.warn(
+            f"[resolve_work_root] {candidate} no existe; usando fallback "
+            f"'{fallback}' (¿corriendo desde dentro del proyecto?)"
+        )
+        return fallback
+
+    raise FileNotFoundError(
+        f"No se encontró runs/ para --mol {mol_name!r}. Se esperaba: "
+        f"{candidate}\n"
+        f"Estructura esperada: PAPER1/{mol_name.upper()}/runs/<estado>/04_sp/..."
+    )
+
+
+def detect_protonation_states(work_root: Path) -> list[str]:
+    """
+    Autodetecta todos los estados de protonación disponibles dentro de
+    work_root: cualquier subdirectorio que contenga al menos 04_sp/
+    (la etapa mínima para tener energías utilizables) se considera un
+    estado válido.
+    """
+    if not work_root.exists():
+        return []
+    return sorted(
+        p.name for p in work_root.iterdir()
+        if p.is_dir() and (p / "04_sp").exists()
+    )
+
+
 def collect_results(mol_name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Devuelve (df_conf, df_tddft) con todos los campos enriquecidos:
@@ -1422,12 +1481,15 @@ def compare_protonation_states(
 
     Retorna DataFrame de comparación.
     """
-    mols = sorted(p.name for p in WORK_ROOT.iterdir()
-                  if p.is_dir() and (p / "04_sp").exists())
+    mols = detect_protonation_states(WORK_ROOT)
 
     if not mols:
-        print("No se encontraron resultados SP en ninguna molécula bajo runs/")
+        print(f"No se encontraron estados de protonación con resultados SP "
+              f"bajo {WORK_ROOT}/")
         return pd.DataFrame()
+
+    print(f"  Estados de protonación detectados en {WORK_ROOT}: "
+          f"{', '.join(mols)}")
 
     rows = []
     dfs_conf: dict[str, pd.DataFrame] = {}
@@ -3329,8 +3391,7 @@ def compare_adc2_tddft(
     Retorna DataFrame con una fila por molécula.
     """
     if mols is None:
-        mols = sorted(p.name for p in WORK_ROOT.iterdir()
-                      if p.is_dir() and (p / "04_sp").exists())
+        mols = detect_protonation_states(WORK_ROOT)
 
     rows = []
     for mol in mols:
@@ -3763,23 +3824,34 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Ejemplos:
-  python results_collector.py --mol mglyval
-  python results_collector.py --mol mglyval --export xlsx --plot
-  python results_collector.py --mol mglyval --goodvibes
-  python results_collector.py --mol mglyval --goodvibes --export csv
-  python results_collector.py --compare
-  python results_collector.py --compare --plot --ref mglyval_neutral
+  python results_collector.py                                # --mol MGLYVAL, compara todos los estados
+  python results_collector.py --mol MGLYVAL                  # idem, explícito
+  python results_collector.py --mol MGLYVAL --export xlsx --plot
+  python results_collector.py --mol MGLYVAL --ref mglyval_neutral
+  python results_collector.py --mol MGLYVAL --state mglyval_neutral
+  python results_collector.py --mol MGLYVAL --state mglyval_neutral --goodvibes --export csv
+
+--mol NAME resuelve /home/kmilozeta/PAPER1/NAME/runs/ y autodetecta ahí
+todos los estados de protonación (subdirectorios con 04_sp/). Ese es el
+modo por defecto (compare). Usa --state para analizar un único estado.
         """,
     )
 
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--mol",     metavar="NAME",
-                      help="analizar un estado (nombre del directorio en runs/)")
-    mode.add_argument("--compare", action="store_true",
-                      help="comparar todos los estados de protonacion en runs/")
+    parser.add_argument("--mol",     metavar="NAME", default="MGLYVAL",
+                        help="proyecto bajo PAPER1/ (ej. MGLYVAL -> "
+                             "/home/kmilozeta/PAPER1/MGLYVAL/runs/). "
+                             "Default: MGLYVAL")
+    parser.add_argument("--state",   metavar="NAME", default=None,
+                        help="analizar un único estado de protonación "
+                             "(subdirectorio de runs/) en vez del modo "
+                             "comparación por defecto")
+    parser.add_argument("--compare", action="store_true",
+                        help="(deprecado, ya no es necesario) comparar todos "
+                             "los estados de protonación — es el comportamiento "
+                             "por defecto cuando no se pasa --state")
 
     parser.add_argument("--ref",    metavar="NAME", default=None,
-                        help="estado de referencia para dE relativa (solo con --compare)")
+                        help="estado de referencia para dE relativa (modo compare)")
     parser.add_argument("--export", choices=["csv", "xlsx", "both"], default=None,
                         help="exportar tablas")
     parser.add_argument("--plot",   action="store_true",
@@ -3787,13 +3859,14 @@ Ejemplos:
     parser.add_argument("--goodvibes", action="store_true",
                         help="correr GoodVibes (mRRHO Grimme) sobre cada "
                              "freq.out y comparar contra el G_corr de ORCA "
-                             "(solo con --mol). Imprime y exporta el apendice "
-                             "de comparacion a runs/<mol>/.")
+                             "(solo con --state). Imprime y exporta el apendice "
+                             "de comparacion a runs/<estado>/.")
     parser.add_argument("--adc2",   action="store_true",
                         help="extraer lambda_max ADC(2) y comparar con TD-DFT. "
-                             "Con --mol: analiza ese estado. "
-                             "Con --compare: compara todos los estados y evalua "
-                             "la sistematicidad del desplazamiento TDDFT-ADC2.")
+                             "Con --state: analiza ese estado. "
+                             "En modo compare (default): compara todos los "
+                             "estados y evalua la sistematicidad del "
+                             "desplazamiento TDDFT-ADC2.")
     parser.add_argument("--sigma",  type=float, default=20.0,
                         help="anchura Gaussiana en nm para los plots (default: 20)")
     parser.add_argument("--xmin",   type=float, default=200.0,
@@ -3804,37 +3877,44 @@ Ejemplos:
 
     x_range = (args.xmin, args.xmax)
 
-    if args.mol:
-        df_conf, df_tddft = collect_results(args.mol)
-        print_summary(df_conf, df_tddft, args.mol)
+    # ── Resolver runs/ del proyecto a partir de --mol ──────────────────────
+    global WORK_ROOT
+    WORK_ROOT = resolve_work_root(args.mol)
+    print(f"  Proyecto: {args.mol.upper()}  →  runs/: {WORK_ROOT}")
+
+    if args.state:
+        # ── Modo estado único (comportamiento del antiguo --mol) ──────────
+        df_conf, df_tddft = collect_results(args.state)
+        print_summary(df_conf, df_tddft, args.state)
 
         if args.adc2:
-            df_adc2 = collect_adc2_results(args.mol)
-            print_adc2_summary(df_adc2, args.mol, df_conf)
+            df_adc2 = collect_adc2_results(args.state)
+            print_adc2_summary(df_adc2, args.state, df_conf)
             if args.export:
-                export_adc2_mol(df_adc2, args.mol, args.export)
+                export_adc2_mol(df_adc2, args.state, args.export)
             if not df_adc2.empty:
-                df_cmp_adc2 = compare_adc2_tddft(mols=[args.mol])
+                df_cmp_adc2 = compare_adc2_tddft(mols=[args.state])
                 print_adc2_tddft_comparison(df_cmp_adc2)
                 if args.export:
                     export_adc2_comparison(df_cmp_adc2, args.export)
 
         if args.export:
-            export_results(df_conf, df_tddft, args.mol, args.export)
+            export_results(df_conf, df_tddft, args.state, args.export)
         if args.plot:
-            plot_spectrum(df_tddft, df_conf, args.mol,
+            plot_spectrum(df_tddft, df_conf, args.state,
                           sigma=args.sigma, x_range=x_range)
         if args.goodvibes:
             print(f"\n{chr(9472)*74}")
-            print(f"  GOODVIBES (mRRHO Grimme) vs ORCA (RRHO) -- {args.mol}")
+            print(f"  GOODVIBES (mRRHO Grimme) vs ORCA (RRHO) -- {args.state}")
             print(f"{chr(9472)*74}")
-            gv_results = run_goodvibes_on_mol(args.mol)
-            df_gv = compute_gv_appendix(args.mol, df_conf, gv_results)
+            gv_results = run_goodvibes_on_mol(args.state)
+            df_gv = compute_gv_appendix(args.state, df_conf, gv_results)
             print(df_gv.to_string(index=False))
             if args.export:
-                export_gv_appendix(df_gv, args.mol, args.export)
+                export_gv_appendix(df_gv, args.state, args.export)
 
-    elif args.compare:
+    else:
+        # ── Modo compare (default): autodetecta todos los estados ─────────
         result = compare_protonation_states(ref_mol=args.ref)
         if isinstance(result, tuple):
             df_cmp, dfs_conf, dfs_tddft = result
