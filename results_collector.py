@@ -128,6 +128,24 @@ DG_CONC_CORR     = 1.894           # kcal/mol  corrección 1 atm → 1 M (RT·ln
 # Estructura esperada: runs/<mol>/06_sp_gas/<conf_id>/sp_gas.out
 PKA_GAS_SP_SUBDIR = "06_sp_gas"
 
+# ── Constantes Multiwfn / ESP de superficie ─────────────────────────────────
+# Ejecutables (rutas completas — mismo criterio que ORCA: nunca confiar en PATH)
+ORCA_2MKL_BIN   = "/home/kmilozeta/orca_6_1_1_avx2/orca_2mkl"
+MULTIWFN_BIN    = "/home/kmilozeta/multiwfn/Multiwfn"
+
+# Subcarpeta del pipeline donde vive la función de onda de cada confórmero
+# (el .gbw usado para el análisis ESP es el de la etapa TDDFT: runs/<mol>/05_tddft/conf_XXX/)
+ESP_SOURCE_SUBDIR = "05_tddft"
+
+# Subcarpeta creada dentro de cada conf_xxx para no ensuciar 05_tddft/
+ESP_SUBDIR        = "esp_multiwfn"
+
+# Timeouts generosos: orca_2mkl es rápido, pero el análisis de superficie ESP
+# (mapeo + búsqueda de extremos sobre miles de puntos) puede tardar varios
+# minutos por confórmero según el tamaño de la molécula y la densidad de malla.
+ORCA_2MKL_TIMEOUT = 120     # s
+MULTIWFN_TIMEOUT  = 900     # s — 15 min por confórmero
+
 
 # ─────────────────────────────────────────────
 #  PARSERS — individuales y robustos
@@ -2692,6 +2710,389 @@ def export_gv_appendix(df_gv: pd.DataFrame, mol_name: str, fmt: str):
             with pd.ExcelWriter(xlsx_gv, engine="openpyxl") as writer:
                 df_out.to_excel(writer, sheet_name="GoodVibes_mRRHO", index=False)
             print(f"  GoodVibes appendix XLSX → {xlsx_gv}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  MÓDULO MULTIWFN/ESP — potencial electrostático de superficie molecular
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+#  Fundamento:
+#  El ESP mapeado sobre la superficie de isodensidad electrónica (0.001 u.a.,
+#  criterio Bader/Politzer) identifica sitios susceptibles a ataque
+#  electrofílico/nucleofílico -- relevante para racionalizar reactividad y
+#  patrones de solvatación de las MAAs. Multiwfn calcula extremos (mínimos y
+#  máximos locales), área positiva/negativa, promedio, varianza e índices de
+#  polaridad molecular (MPI, Π, ν) a partir de la función de onda (.molden).
+#
+#  Problema resuelto por este módulo:
+#  Multiwfn es 100% interactivo por menú numérico via stdin. Dentro del
+#  submenú de análisis cuantitativo de superficie existe un comando de
+#  VISUALIZACIÓN en consola ("ver mínimos y máximos") que activa un modo de
+#  paginación y espera un Enter adicional antes de devolver el control al
+#  menú. Si el resto de comandos de post-procesado se manda por stdin sin
+#  contar exactamente ese Enter extra, la secuencia se desincroniza y
+#  Multiwfn se queda "colgado" (o traga comandos posteriores como si fueran
+#  la respuesta a la paginación).
+#
+#  Estrategia adoptada (sin depender de contar Enters a ciegas):
+#    1. Nunca se invoca el comando interactivo de "ver" extremos en consola.
+#       En su lugar se usa el comando de EXPORTAR esos mismos datos a un
+#       archivo -- es una operación de escritura a disco, siempre retorna
+#       limpiamente al menú sin paginación.
+#    2. El batch completo de números de menú se arma como un solo string
+#       (_build_multiwfn_esp_batch) y se manda de una sola vez via
+#       subprocess.run(input=...), nunca interactuando línea a línea con el
+#       proceso vivo: el pipe del SO buferiza el stdin completo sin importar
+#       el timing exacto en que Multiwfn lo vaya leyendo.
+#    3. subprocess.run(..., timeout=MULTIWFN_TIMEOUT) acota el peor caso: si
+#       de todas formas algo queda esperando input, el proceso se mata solo
+#       en vez de trabar el pipeline completo.
+#    4. La verificación de éxito es POR CONTENIDO del log (se buscan las
+#       cadenas que Multiwfn imprime al completar el análisis cuantitativo:
+#       "Minimal value" / "Maximal value" / "Global surface..."), nunca por
+#       conteo de líneas o de prompts respondidos.
+#
+#  Flujo por confórmero (runs/<mol>/05_tddft/conf_XXX/):
+#    _find_esp_wavefunction()    → localiza el .gbw de esa etapa
+#    _generate_molden_input()    → orca_2mkl <base> -molden
+#    _build_multiwfn_esp_batch() → arma el batch de comandos de menú
+#    run_multiwfn_esp_on_conf()  → corre Multiwfn con ese batch (subprocess.run
+#                                   con input=..., timeout=..., sin interacción viva)
+#                                   y parsea el log + localiza el archivo exportado
+#    run_multiwfn_esp_on_mol()   → itera todos los conf_* de 05_tddft/
+#    compute_esp_summary_df()    → arma el DataFrame resumen (+ Boltzmann si aplica)
+#    print_esp_summary()         → tabla formateada al estilo del script
+#    export_esp_results()        → CSV/XLSX (hoja "ESP_Multiwfn")
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Secuencia de menú Multiwfn para el análisis ESP ─────────────────────────
+# Verificar contra la versión instalada (2026.6.2 en este equipo, ver skill
+# compquim-kmilozeta) corriendo Multiwfn interactivamente una vez sobre un
+# .molden.input de prueba. Si los números difieren, solo hay que tocar estas
+# constantes -- el resto del harness (batch único + timeout + verificación
+# por contenido) no depende de los valores exactos.
+MULTIWFN_ESP_MENU_MAIN           = "12"  # Quantitative analysis of molecular surface
+MULTIWFN_ESP_MENU_START          = "0"   # Start analysis now! (ESP es la función mapeada default)
+MULTIWFN_ESP_MENU_EXPORT_EXTREMA = "2"   # Exportar extremos de superficie a archivo
+                                          # (deliberadamente NO la opción de "ver"/mostrar
+                                          #  en consola -- esa es la que se queda pegada)
+MULTIWFN_ESP_MENU_RETURN         = "0"   # volver al menú de superficie / al menú principal
+MULTIWFN_ESP_MENU_QUIT           = "q"   # salir de Multiwfn limpiamente
+
+
+def _build_multiwfn_esp_batch() -> str:
+    """
+    Arma el batch completo de comandos de menú de Multiwfn para el análisis
+    cuantitativo de superficie ESP como UN SOLO string separado por saltos
+    de línea, listo para pasarse entero a subprocess.run(input=...).
+
+    Al mandarse de una sola vez (en vez de interactuar con el proceso vivo),
+    el timing exacto de cada prompt deja de importar; lo único que importa es
+    que la SECUENCIA de respuestas sea correcta. Se evita explícitamente
+    cualquier comando de "ver"/"mostrar en consola" (ver docstring del
+    módulo) usando en su lugar el comando de EXPORTAR a archivo.
+    """
+    commands = [
+        MULTIWFN_ESP_MENU_MAIN,              # 1. entrar a análisis cuantitativo de superficie
+        MULTIWFN_ESP_MENU_START,              # 2. iniciar análisis (imprime resumen: min/max/área/...)
+        MULTIWFN_ESP_MENU_EXPORT_EXTREMA,     # 3. exportar extremos a archivo (NO "ver" en consola)
+        MULTIWFN_ESP_MENU_RETURN,             # 4. volver al menú de superficie
+        "0",                                  # 5. volver al menú principal
+        MULTIWFN_ESP_MENU_QUIT,               # 6. salir de Multiwfn
+    ]
+    return "\n".join(commands) + "\n"
+
+
+def _find_esp_wavefunction(conf_dir: Path) -> Optional[Path]:
+    """
+    Localiza el .gbw a convertir para el análisis ESP dentro de conf_dir
+    (runs/<mol>/05_tddft/conf_XXX/). Se prioriza "tddft.gbw" (nombre estándar
+    del job de esa etapa); si no existe, se cae al .gbw más reciente por mtime
+    presente en el directorio.
+    """
+    preferred = conf_dir / "tddft.gbw"
+    if preferred.exists():
+        return preferred
+    candidates = sorted(conf_dir.glob("*.gbw"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0] if candidates else None
+
+
+def _generate_molden_input(gbw_path: Path, esp_dir: Path) -> tuple[Optional[Path], str]:
+    """
+    Corre `orca_2mkl <base> -molden` (cwd = directorio del .gbw) para generar
+    <base>.molden.input, y lo mueve a esp_dir para no ensuciar 05_tddft/.
+
+    Retorna (path_al_molden_input | None, mensaje_de_advertencia).
+    """
+    base = gbw_path.stem  # p.ej. "tddft" desde "tddft.gbw"
+    try:
+        proc = subprocess.run(
+            [ORCA_2MKL_BIN, base, "-molden"],
+            capture_output=True, text=True, timeout=ORCA_2MKL_TIMEOUT,
+            cwd=str(gbw_path.parent),
+        )
+    except subprocess.TimeoutExpired:
+        return None, f"orca_2mkl timeout (>{ORCA_2MKL_TIMEOUT}s) sobre {gbw_path.name}"
+    except FileNotFoundError:
+        return None, f"orca_2mkl no encontrado en {ORCA_2MKL_BIN}"
+
+    molden_src = gbw_path.parent / f"{base}.molden.input"
+    if proc.returncode != 0 or not molden_src.exists():
+        return None, (f"orca_2mkl retornó código {proc.returncode} o no generó "
+                       f"{molden_src.name}. stderr: {proc.stderr[:300]}")
+
+    esp_dir.mkdir(exist_ok=True)
+    molden_dst = esp_dir / molden_src.name
+    try:
+        molden_src.replace(molden_dst)
+    except OSError as exc:
+        return None, f"No se pudo mover {molden_src} -> {molden_dst}: {exc}"
+
+    return molden_dst, ""
+
+
+def _find_extrema_export(esp_dir: Path) -> Optional[Path]:
+    """Ubica el archivo de extremos de superficie exportado por Multiwfn (si existe)."""
+    for pattern in ("*extrem*", "*CPs*", "surfanalysis*.txt", "surfanalysis*.pdb"):
+        hits = sorted(esp_dir.glob(pattern))
+        if hits:
+            return hits[0]
+    return None
+
+
+def _parse_multiwfn_esp_log(log_text: str) -> dict:
+    """
+    Extrae del log de Multiwfn el bloque de resumen cuantitativo de
+    superficie ESP que se imprime automáticamente tras "Start analysis now!".
+
+    Tolerante a variaciones menores de formato entre versiones (regex laxas);
+    cualquier campo no encontrado queda en None sin abortar el parseo de los
+    demás -- mismo criterio defensivo que el resto de parsers del script.
+    """
+    result = {
+        "ESP_min_kcal": None, "ESP_max_kcal": None,
+        "area_total_ang2": None, "area_pos_ang2": None, "area_neg_ang2": None,
+        "avg_kcal": None, "variance_kcal2": None,
+        "MPI_kcal": None, "nu": None, "pi_kcal2": None,
+        "ok": False, "warning": "",
+    }
+    if not log_text or ("Minimal value" not in log_text and "Global surface" not in log_text):
+        result["warning"] = ("Bloque de resumen ESP no detectado en el log de Multiwfn "
+                              "(revisar log completo y ajustar menú si la versión difiere)")
+        return result
+
+    def _grab(pattern: str) -> Optional[float]:
+        m = re.search(pattern, log_text)
+        if not m:
+            return None
+        try:
+            return float(m.group(1))
+        except (ValueError, IndexError):
+            return None
+
+    # Multiwfn suele reportar en u.a. y, entre paréntesis, en kcal/mol —
+    # priorizamos kcal/mol por consistencia con el resto del script.
+    result["ESP_min_kcal"] = (
+        _grab(r"Minimal value[^\n]*?\(\s*([-\d.]+)\s*kcal/mol\s*\)")
+        or _grab(r"Global surface minimum[^\n]*?\(\s*([-\d.]+)\s*kcal/mol\s*\)")
+    )
+    result["ESP_max_kcal"] = (
+        _grab(r"Maximal value[^\n]*?\(\s*([-\d.]+)\s*kcal/mol\s*\)")
+        or _grab(r"Global surface maximum[^\n]*?\(\s*([-\d.]+)\s*kcal/mol\s*\)")
+    )
+    result["area_total_ang2"] = _grab(r"Overall surface area[^\n]*?\(\s*([\d.]+)\s*Angstrom")
+    result["area_pos_ang2"]   = _grab(r"Positive surface area[^\n]*?\(\s*([\d.]+)\s*Angstrom")
+    result["area_neg_ang2"]   = _grab(r"Negative surface area[^\n]*?\(\s*([\d.]+)\s*Angstrom")
+    result["avg_kcal"]        = _grab(r"Overall average value[^\n]*?\(\s*([-\d.]+)\s*kcal/mol\s*\)")
+    result["variance_kcal2"]  = _grab(r"Overall variance[^\n]*?\(\s*([-\d.]+)\s*kcal")
+    result["nu"]              = _grab(r"[Nn]u[^\n]*?[:=]\s*([-\d.]+)")
+    result["MPI_kcal"]        = _grab(r"MPI[^\n]*?[:=]\s*([-\d.]+)")
+    result["pi_kcal2"]        = _grab(r"[Ii]nternal charge separation[^\n]*?[:=]\s*([-\d.]+)")
+
+    # Éxito mínimo: al menos el par min/max de superficie (el dato original
+    # que se quería obtener sin que el proceso se quedara pegado).
+    result["ok"] = result["ESP_min_kcal"] is not None or result["ESP_max_kcal"] is not None
+    if not result["ok"]:
+        result["warning"] = ("No se pudo extraer ESP_min/ESP_max del log -- revisar formato "
+                              "de salida de esta versión de Multiwfn y ajustar los patrones "
+                              "regex en _parse_multiwfn_esp_log().")
+    return result
+
+
+def run_multiwfn_esp_on_conf(conf_dir: Path) -> dict:
+    """
+    Ejecuta el flujo ESP/Multiwfn completo para un único confórmero:
+      1. Localiza el .gbw de la etapa TDDFT.
+      2. orca_2mkl -> .molden.input (en conf_dir/esp_multiwfn/)
+      3. Multiwfn con el batch pre-armado, vía subprocess.run(input=...)
+      4. Parsea el log buscando el bloque de resumen cuantitativo.
+
+    No interrumpe el pipeline si algo falla: retorna dict con "ok": False y
+    "warning" describiendo el problema, igual que run_goodvibes_on_mol().
+    """
+    null_entry = {
+        "ESP_min_kcal": None, "ESP_max_kcal": None,
+        "area_total_ang2": None, "area_pos_ang2": None, "area_neg_ang2": None,
+        "avg_kcal": None, "variance_kcal2": None,
+        "MPI_kcal": None, "nu": None, "pi_kcal2": None,
+        "ok": False, "log_path": None, "extrema_path": None, "warning": "",
+    }
+
+    gbw_path = _find_esp_wavefunction(conf_dir)
+    if gbw_path is None:
+        null_entry["warning"] = f"No se encontró .gbw en {conf_dir}"
+        return null_entry
+
+    esp_dir = conf_dir / ESP_SUBDIR
+    molden_path, warn = _generate_molden_input(gbw_path, esp_dir)
+    if molden_path is None:
+        null_entry["warning"] = warn
+        return null_entry
+
+    batch = _build_multiwfn_esp_batch()
+
+    try:
+        proc = subprocess.run(
+            [MULTIWFN_BIN, str(molden_path)],
+            input=batch,
+            capture_output=True, text=True,
+            timeout=MULTIWFN_TIMEOUT,
+            cwd=str(esp_dir),
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Aunque haya vencido el timeout, guardamos lo que alcanzó a
+        # producirse en stdout para poder diagnosticar el punto de bloqueo.
+        log_path = esp_dir / "multiwfn_esp.log"
+        partial = exc.stdout if isinstance(exc.stdout, str) else ""
+        if partial:
+            log_path.write_text(partial, errors="replace")
+        null_entry["warning"] = (
+            f"Multiwfn timeout (>{MULTIWFN_TIMEOUT}s) sobre {molden_path.name}. "
+            f"{'Log parcial en ' + str(log_path) if partial else 'Sin salida capturada.'}"
+        )
+        return null_entry
+    except FileNotFoundError:
+        null_entry["warning"] = f"Multiwfn no encontrado en {MULTIWFN_BIN}"
+        return null_entry
+
+    log_path = esp_dir / "multiwfn_esp.log"
+    log_path.write_text(proc.stdout + "\n\n[stderr]\n" + proc.stderr, errors="replace")
+
+    parsed = _parse_multiwfn_esp_log(proc.stdout)
+    parsed["log_path"] = log_path
+    parsed["extrema_path"] = _find_extrema_export(esp_dir) if parsed["ok"] else None
+    if not parsed["ok"] and not parsed["warning"]:
+        parsed["warning"] = f"Ver log completo en {log_path}"
+    return parsed
+
+
+def run_multiwfn_esp_on_mol(mol_name: str) -> dict[str, dict]:
+    """
+    Corre el análisis ESP/Multiwfn sobre todos los confórmeros de
+    runs/<mol>/05_tddft/conf_*/.
+
+    Retorna dict conf_id -> resultado (ver run_multiwfn_esp_on_conf). Un
+    confórmero que falla no interrumpe el resto, igual que en GoodVibes.
+    """
+    mol_dir   = WORK_ROOT / mol_name
+    tddft_dir = mol_dir / ESP_SOURCE_SUBDIR
+
+    if not tddft_dir.exists():
+        warnings.warn(f"[Multiwfn/ESP] {tddft_dir} no existe — omitiendo {mol_name}.")
+        return {}
+
+    conf_dirs = sorted(tddft_dir.glob("conf_*"))
+    if not conf_dirs:
+        warnings.warn(f"[Multiwfn/ESP] Sin subdirectorios conf_* en {tddft_dir}.")
+        return {}
+
+    if not Path(MULTIWFN_BIN).exists():
+        warnings.warn(f"[Multiwfn/ESP] No se encontró el binario en {MULTIWFN_BIN}.")
+        return {c.name: {"ok": False, "warning": f"Multiwfn no disponible en {MULTIWFN_BIN}"}
+                for c in conf_dirs}
+    if not Path(ORCA_2MKL_BIN).exists():
+        warnings.warn(f"[Multiwfn/ESP] No se encontró orca_2mkl en {ORCA_2MKL_BIN}.")
+        return {c.name: {"ok": False, "warning": f"orca_2mkl no disponible en {ORCA_2MKL_BIN}"}
+                for c in conf_dirs}
+
+    print(f"  [Multiwfn/ESP] {len(conf_dirs)} confórmero(s) en {tddft_dir}")
+
+    results: dict[str, dict] = {}
+    for conf_dir in conf_dirs:
+        conf_id = conf_dir.name
+        print(f"    · {conf_id} ... ", end="", flush=True)
+        res = run_multiwfn_esp_on_conf(conf_dir)
+        results[conf_id] = res
+        print("OK" if res["ok"] else f"OMITIDO ({res['warning'][:80]})")
+
+    return results
+
+
+def compute_esp_summary_df(df_conf: "pd.DataFrame",
+                            esp_results: dict[str, dict]) -> "pd.DataFrame":
+    """
+    Arma el DataFrame resumen ESP/Multiwfn. Si df_conf (de collect_results)
+    trae columnas boltz_*, se hace merge por conformer para poder cruzar
+    extremos ESP con población Boltzmann de cada confórmero.
+    """
+    rows = []
+    for conf_id, res in esp_results.items():
+        row = {"conformer": conf_id}
+        row.update({k: v for k, v in res.items()
+                     if k not in ("log_path", "extrema_path")})
+        row["log_path"]     = str(res.get("log_path") or "")
+        row["extrema_path"] = str(res.get("extrema_path") or "")
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    if df_conf is not None and not df_conf.empty and "conformer" in df_conf.columns:
+        boltz_cols = [c for c in df_conf.columns if c.startswith("boltz_")]
+        if boltz_cols:
+            df = df.merge(df_conf[["conformer"] + boltz_cols], on="conformer", how="left")
+
+    return df
+
+
+def print_esp_summary(df_esp: "pd.DataFrame", mol_name: str):
+    print(f"\n{chr(9472)*74}")
+    print(f"  ESP DE SUPERFICIE (Multiwfn) -- {mol_name}")
+    print(f"{chr(9472)*74}")
+
+    if df_esp.empty:
+        print("  Sin resultados ESP disponibles (ver advertencias arriba).")
+        return
+
+    n_ok = int(df_esp["ok"].sum()) if "ok" in df_esp.columns else 0
+    print(f"  Confórmeros con análisis exitoso: {n_ok}/{len(df_esp)}")
+
+    cols = [c for c in ("conformer", "ESP_min_kcal", "ESP_max_kcal",
+                         "area_total_ang2", "avg_kcal", "MPI_kcal", "ok")
+            if c in df_esp.columns]
+    print(df_esp[cols].to_string(index=False))
+
+
+def export_esp_results(df_esp: "pd.DataFrame", mol_name: str, fmt: str):
+    if df_esp.empty:
+        return
+    mol_dir = WORK_ROOT / mol_name
+    if fmt in ("csv", "both"):
+        out = mol_dir / "esp_multiwfn_summary.csv"
+        df_esp.to_csv(out, index=False)
+        print(f"  ESP CSV -> {out}")
+    if fmt in ("xlsx", "both"):
+        xlsx_path = mol_dir / f"{mol_name}_results.xlsx"
+        mode = "a" if xlsx_path.exists() else "w"
+        kw   = {"if_sheet_exists": "replace"} if mode == "a" else {}
+        try:
+            with pd.ExcelWriter(xlsx_path, engine="openpyxl", mode=mode, **kw) as w:
+                df_esp.to_excel(w, sheet_name="ESP_Multiwfn", index=False)
+            print(f"  ESP -> {xlsx_path} (hoja: ESP_Multiwfn)")
+        except Exception as exc:
+            warnings.warn(f"[ESP export] {exc}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
