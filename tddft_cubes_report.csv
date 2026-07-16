@@ -1,0 +1,589 @@
+molecule,run_label,conf_id,kind,homo_or_hole,lumo_or_particle,coef,participation_ratio,fosc,cube_files,status,error
+GLYCINE,GA,conf_1,ground_state,19,20,,,,HOMO_mo19a.cube;LUMO_mo20a.cube,ok,
+GLYCINE,GA,conf_1,state1,,,,1.000,0.000296,,skipped_not_dominant,
+GLYCINE,GA,conf_1,state2,,,,1.089,0.060778,,skipped_not_dominant,
+GLYCINE,GA,conf_1,state3,19,20,0.76868662,1.589,0.180972,state3_hole_mo19a.cube;state3_particle_mo20a.cube;state3_hole_alt2_mo18a.cube;state3_particle_alt2_mo21a.cube,ok,
+GLYCINE,GA,conf_1,state4,,,,1.052,0.000090,,skipped_not_dominant,
+GLYCINE,GA,conf_1,state5,,,,1.474,0.064396,,skipped_not_dominant,
+GLYCINE,GA,conf_1,state6,,,,1.026,0.000416,,skipped_not_dominant,
+GLYCINE,GA,conf_1,state7,,,,1.030,0.003731,,skipped_not_dominant,
+GLYCINE,GA,conf_1,state8,,,,1.021,0.001402,,skipped_not_dominant,
+GLYCINE,GA,conf_1,state9,,,,1.120,0.021846,,skipped_not_dominant,
+GLYCINE,GA,conf_1,state10,,,,1.330,0.168886,,skipped_not_dominant,
+GLYCINE,GA,conf_1,state11,,,,1.226,0.056349,,skipped_not_dominant,
+GLYCINE,GA,conf_1,state12,,,,1.136,0.137586,,skipped_not_dominant,
+GLYCINE,GA,conf_1,state13,,,,1.092,0.013877,,skipped_not_dominant,
+GLYCINE,GA,conf_1,state14,,,,1.281,0.040326,,skipped_not_dominant,
+GLYCINE,GA,conf_1,state15,,,,1.533,0.003628,,skipped_not_dominant,
+GLYCINE,GA,conf_2,ground_state,19,20,,,,HOMO_mo19a.cube;LUMO_mo20a.cube,ok,
+GLYCINE,GA,conf_2,state1,,,,1.000,0.000231,,skipped_not_dominant,
+GLYCINE,GA,conf_2,state2,,,,1.353,0.047998,,skipped_not_dominant,
+GLYCINE,GA,conf_2,state3,,,,1.737,0.200470,,skipped_not_dominant,
+GLYCINE,GA,conf_2,state4,,,,1.036,0.000618,,skipped_not_dominant,
+GLYCINE,GA,conf_2,state5,,,,1.177,0.065886,,skipped_not_dominant,
+GLYCINE,GA,conf_2,state6,,,,1.147,0.016157,,skipped_not_dominant,
+GLYCINE,GA,conf_2,state7,,,,1.045,0.000491,,skipped_not_dominant,
+GLYCINE,GA,conf_2,state8,,,,1.019,0.001060,,skipped_not_dominant,
+GLYCINE,GA,conf_2,state9,,,,1.158,0.025864,,skipped_not_dominant,
+GLYCINE,GA,conf_2,state10,,,,1.669,0.017620,,skipped_not_dominant,
+GLYCINE,GA,conf_2,state11,,,,1.159,0.005467,,skipped_not_dominant,
+GLYCINE,GA,conf_2,state12,19,20,0.70407405,1.789,0.221852,state12_hole_mo19a.cube;state12_particle_mo20a.cube;state12_hole_alt2_mo18a.cube;state12_particle_alt2_mo21a.cube,ok,
+GLYCINE,GA,conf_2,state13,,,,1.038,0.008802,,skipped_not_dominant,
+GLYCINE,GA,conf_2,state14,,,,2.073,0.025919,,skipped_not_dominant,
+GLYCINE,GA,conf_2,state15,,,,2.532,0.045327,,skipped_not_dominant,
+GLYCINE,GB,conf_1,ground_state,19,20,,,,HOMO_mo19a.cube;LUMO_mo20a.cube,ok,
+GLYCINE,GB,conf_1,state1,,,,1.120,0.016522,,skipped_not_dominant,
+GLYCINE,GB,conf_1,state2,,,,1.098,0.010135,,skipped_not_dominant,
+GLYCINE,GB,conf_1,state3,,,,1.197,0.009208,,skipped_not_dominant,
+GLYCINE,GB,conf_1,state4,,,,1.134,0.009391,,skipped_not_dominant,
+GLYCINE,GB,conf_1,state5,19,20,0.70107408,1.811,0.163225,state5_hole_mo19a.cube;state5_particle_mo20a.cube;state5_hole_alt2_mo18a.cube;state5_particle_alt2_mo21a.cube,ok,
+GLYCINE,GB,conf_1,state6,,,,1.082,0.007021,,skipped_not_dominant,
+GLYCINE,GB,conf_1,state7,,,,1.506,0.051767,,skipped_not_dominant,
+GLYCINE,GB,conf_1,state8,,,,1.768,0.040898,,skipped_not_dominant,
+GLYCINE,GB,conf_1,state9,,,,2.277,0.127040,,skipped_not_dominant,
+GLYCINE,GB,conf_1,state10,,,,1.581,0.018080,,skipped_not_dominant,
+GLYCINE,GB,conf_1,state11,,,,1.176,0.000909,,skipped_not_dominant,
+GLYCINE,GB,conf_1,state12,,,,2.507,0.010700,,skipped_not_dominant,
+GLYCINE,GB,conf_1,state13,,,,1.244,0.045290,,skipped_not_dominant,
+GLYCINE,GB,conf_1,state14,,,,1.963,0.008182,,skipped_not_dominant,
+GLYCINE,GB,conf_1,state15,,,,2.076,0.022330,,skipped_not_dominant,
+GLYCINE,GD,conf_1,ground_state,19,20,,,,HOMO_mo19a.cube;LUMO_mo20a.cube,ok,
+GLYCINE,GD,conf_1,state1,,,,1.000,0.000011,,skipped_not_dominant,
+GLYCINE,GD,conf_1,state2,,,,1.025,0.046250,,skipped_not_dominant,
+GLYCINE,GD,conf_1,state3,,,,1.002,0.000006,,skipped_not_dominant,
+GLYCINE,GD,conf_1,state4,,,,1.032,0.084997,,skipped_not_dominant,
+GLYCINE,GD,conf_1,state5,,,,1.025,0.000006,,skipped_not_dominant,
+GLYCINE,GD,conf_1,state6,19,20,0.7048104,1.819,0.178643,state6_hole_mo19a.cube;state6_particle_mo20a.cube;state6_hole_alt2_mo18a.cube;state6_particle_alt2_mo21a.cube,ok,
+GLYCINE,GD,conf_1,state7,,,,1.304,0.095350,,skipped_not_dominant,
+GLYCINE,GD,conf_1,state8,,,,1.341,0.018401,,skipped_not_dominant,
+GLYCINE,GD,conf_1,state9,,,,1.018,0.002654,,skipped_not_dominant,
+GLYCINE,GD,conf_1,state10,,,,1.082,0.039090,,skipped_not_dominant,
+GLYCINE,GD,conf_1,state11,,,,1.166,0.015891,,skipped_not_dominant,
+GLYCINE,GD,conf_1,state12,,,,1.182,0.007397,,skipped_not_dominant,
+GLYCINE,GD,conf_1,state13,,,,2.038,0.002326,,skipped_not_dominant,
+GLYCINE,GD,conf_1,state14,,,,2.024,0.000201,,skipped_not_dominant,
+GLYCINE,GD,conf_1,state15,,,,1.099,0.002964,,skipped_not_dominant,
+GLYCINE,glycine,conf_1,ground_state,19,20,,,,HOMO_mo19a.cube;LUMO_mo20a.cube,ok,
+GLYCINE,glycine,conf_1,state1,,,,1.003,0.000476,,skipped_not_dominant,
+GLYCINE,glycine,conf_1,state2,,,,1.024,0.024812,,skipped_not_dominant,
+GLYCINE,glycine,conf_1,state3,,,,1.010,0.000222,,skipped_not_dominant,
+GLYCINE,glycine,conf_1,state4,,,,1.357,0.125715,,skipped_not_dominant,
+GLYCINE,glycine,conf_1,state5,,,,1.182,0.010132,,skipped_not_dominant,
+GLYCINE,glycine,conf_1,state6,,,,1.048,0.005913,,skipped_not_dominant,
+GLYCINE,glycine,conf_1,state7,,,,2.401,0.111999,,skipped_not_dominant,
+GLYCINE,glycine,conf_1,state8,,,,1.498,0.063914,,skipped_not_dominant,
+GLYCINE,glycine,conf_1,state9,,,,1.035,0.000110,,skipped_not_dominant,
+GLYCINE,glycine,conf_1,state10,,,,2.130,0.052259,,skipped_not_dominant,
+GLYCINE,glycine,conf_1,state11,,,,1.479,0.005956,,skipped_not_dominant,
+GLYCINE,glycine,conf_1,state12,,,,1.239,0.001649,,skipped_not_dominant,
+GLYCINE,glycine,conf_1,state13,,,,1.767,0.030154,,skipped_not_dominant,
+GLYCINE,glycine,conf_1,state14,19,20,0.70449155,1.849,0.152927,state14_hole_mo19a.cube;state14_particle_mo20a.cube;state14_hole_alt2_mo18a.cube;state14_particle_alt2_mo21a.cube,ok,
+GLYCINE,glycine,conf_1,state15,,,,2.759,0.006678,,skipped_not_dominant,
+GLYCINE,glycine,conf_2,ground_state,19,20,,,,HOMO_mo19a.cube;LUMO_mo20a.cube,ok,
+GLYCINE,glycine,conf_2,state1,,,,1.007,0.000299,,skipped_not_dominant,
+GLYCINE,glycine,conf_2,state2,,,,1.066,0.014169,,skipped_not_dominant,
+GLYCINE,glycine,conf_2,state3,,,,1.373,0.121818,,skipped_not_dominant,
+GLYCINE,glycine,conf_2,state4,,,,1.052,0.000063,,skipped_not_dominant,
+GLYCINE,glycine,conf_2,state5,,,,1.230,0.033876,,skipped_not_dominant,
+GLYCINE,glycine,conf_2,state6,,,,1.093,0.002142,,skipped_not_dominant,
+GLYCINE,glycine,conf_2,state7,,,,1.753,0.132877,,skipped_not_dominant,
+GLYCINE,glycine,conf_2,state8,,,,1.045,0.000190,,skipped_not_dominant,
+GLYCINE,glycine,conf_2,state9,,,,2.048,0.006437,,skipped_not_dominant,
+GLYCINE,glycine,conf_2,state10,,,,1.628,0.036238,,skipped_not_dominant,
+GLYCINE,glycine,conf_2,state11,,,,1.951,0.055327,,skipped_not_dominant,
+GLYCINE,glycine,conf_2,state12,,,,1.628,0.004038,,skipped_not_dominant,
+GLYCINE,glycine,conf_2,state13,,,,1.462,0.003271,,skipped_not_dominant,
+GLYCINE,glycine,conf_2,state14,,,,2.179,0.000188,,skipped_not_dominant,
+GLYCINE,glycine,conf_2,state15,19,20,0.93809143,1.137,0.205567,state15_hole_mo19a.cube;state15_particle_mo20a.cube,ok,
+GLYCINE,glycine,conf_3,ground_state,19,20,,,,HOMO_mo19a.cube;LUMO_mo20a.cube,ok,
+GLYCINE,glycine,conf_3,state1,,,,1.010,0.001616,,skipped_not_dominant,
+GLYCINE,glycine,conf_3,state2,,,,1.106,0.015050,,skipped_not_dominant,
+GLYCINE,glycine,conf_3,state3,,,,1.051,0.026659,,skipped_not_dominant,
+GLYCINE,glycine,conf_3,state4,,,,1.328,0.065278,,skipped_not_dominant,
+GLYCINE,glycine,conf_3,state5,,,,1.184,0.050051,,skipped_not_dominant,
+GLYCINE,glycine,conf_3,state6,,,,1.391,0.010935,,skipped_not_dominant,
+GLYCINE,glycine,conf_3,state7,,,,1.414,0.015310,,skipped_not_dominant,
+GLYCINE,glycine,conf_3,state8,19,20,0.61028068,2.225,0.191241,state8_hole_mo19a.cube;state8_particle_mo20a.cube;state8_hole_alt2_mo18a.cube;state8_particle_alt2_mo21a.cube,ok,
+GLYCINE,glycine,conf_3,state9,,,,1.652,0.002350,,skipped_not_dominant,
+GLYCINE,glycine,conf_3,state10,,,,1.905,0.050141,,skipped_not_dominant,
+GLYCINE,glycine,conf_3,state11,,,,1.595,0.057136,,skipped_not_dominant,
+GLYCINE,glycine,conf_3,state12,,,,1.877,0.019333,,skipped_not_dominant,
+GLYCINE,glycine,conf_3,state13,,,,1.856,0.018254,,skipped_not_dominant,
+GLYCINE,glycine,conf_3,state14,,,,1.087,0.006113,,skipped_not_dominant,
+GLYCINE,glycine,conf_3,state15,,,,1.567,0.013780,,skipped_not_dominant,
+MGLYVAL,A,conf_115,ground_state,91,92,,,,HOMO_mo91a.cube;LUMO_mo92a.cube,ok,
+MGLYVAL,A,conf_115,state1,91,92,0.99011028,1.052,0.693953,state1_hole_mo91a.cube;state1_particle_mo92a.cube,ok,
+MGLYVAL,A,conf_115,state2,,,,1.007,0.000794,,skipped_not_dominant,
+MGLYVAL,A,conf_115,state3,,,,1.007,0.003509,,skipped_not_dominant,
+MGLYVAL,A,conf_115,state4,,,,1.036,0.000364,,skipped_not_dominant,
+MGLYVAL,A,conf_115,state5,,,,1.048,0.013212,,skipped_not_dominant,
+MGLYVAL,A,conf_115,state6,,,,1.053,0.003726,,skipped_not_dominant,
+MGLYVAL,A,conf_115,state7,,,,2.001,0.023844,,skipped_not_dominant,
+MGLYVAL,A,conf_115,state8,,,,2.019,0.023937,,skipped_not_dominant,
+MGLYVAL,A,conf_115,state9,,,,1.718,0.020168,,skipped_not_dominant,
+MGLYVAL,A,conf_115,state10,,,,1.079,0.004487,,skipped_not_dominant,
+MGLYVAL,A,conf_115,state11,,,,1.470,0.039725,,skipped_not_dominant,
+MGLYVAL,A,conf_115,state12,,,,1.306,0.011205,,skipped_not_dominant,
+MGLYVAL,A,conf_115,state13,,,,1.280,0.057095,,skipped_not_dominant,
+MGLYVAL,A,conf_115,state14,,,,1.664,0.023067,,skipped_not_dominant,
+MGLYVAL,A,conf_115,state15,,,,1.728,0.058069,,skipped_not_dominant,
+MGLYVAL,A,conf_177,ground_state,91,92,,,,HOMO_mo91a.cube;LUMO_mo92a.cube,ok,
+MGLYVAL,A,conf_177,state1,91,92,0.9908694,1.052,0.748548,state1_hole_mo91a.cube;state1_particle_mo92a.cube,ok,
+MGLYVAL,A,conf_177,state2,,,,1.009,0.001681,,skipped_not_dominant,
+MGLYVAL,A,conf_177,state3,,,,1.004,0.002776,,skipped_not_dominant,
+MGLYVAL,A,conf_177,state4,,,,1.006,0.000493,,skipped_not_dominant,
+MGLYVAL,A,conf_177,state5,,,,1.012,0.027927,,skipped_not_dominant,
+MGLYVAL,A,conf_177,state6,,,,1.036,0.008023,,skipped_not_dominant,
+MGLYVAL,A,conf_177,state7,,,,1.307,0.026898,,skipped_not_dominant,
+MGLYVAL,A,conf_177,state8,,,,1.189,0.067389,,skipped_not_dominant,
+MGLYVAL,A,conf_177,state9,,,,1.056,0.005382,,skipped_not_dominant,
+MGLYVAL,A,conf_177,state10,,,,1.044,0.001996,,skipped_not_dominant,
+MGLYVAL,A,conf_177,state11,,,,1.193,0.026752,,skipped_not_dominant,
+MGLYVAL,A,conf_177,state12,,,,1.193,0.052291,,skipped_not_dominant,
+MGLYVAL,A,conf_177,state13,,,,1.402,0.005254,,skipped_not_dominant,
+MGLYVAL,A,conf_177,state14,,,,1.060,0.008922,,skipped_not_dominant,
+MGLYVAL,A,conf_177,state15,,,,1.423,0.008809,,skipped_not_dominant,
+MGLYVAL,A,conf_52,ground_state,91,92,,,,HOMO_mo91a.cube;LUMO_mo92a.cube,ok,
+MGLYVAL,A,conf_52,state1,91,92,0.99028822,1.051,0.674025,state1_hole_mo91a.cube;state1_particle_mo92a.cube,ok,
+MGLYVAL,A,conf_52,state2,,,,1.007,0.003234,,skipped_not_dominant,
+MGLYVAL,A,conf_52,state3,,,,1.538,0.014182,,skipped_not_dominant,
+MGLYVAL,A,conf_52,state4,,,,1.018,0.003285,,skipped_not_dominant,
+MGLYVAL,A,conf_52,state5,,,,1.581,0.007992,,skipped_not_dominant,
+MGLYVAL,A,conf_52,state6,,,,1.094,0.003645,,skipped_not_dominant,
+MGLYVAL,A,conf_52,state7,,,,1.340,0.041183,,skipped_not_dominant,
+MGLYVAL,A,conf_52,state8,,,,1.347,0.009581,,skipped_not_dominant,
+MGLYVAL,A,conf_52,state9,,,,1.134,0.011115,,skipped_not_dominant,
+MGLYVAL,A,conf_52,state10,,,,1.505,0.005587,,skipped_not_dominant,
+MGLYVAL,A,conf_52,state11,,,,1.457,0.069387,,skipped_not_dominant,
+MGLYVAL,A,conf_52,state12,,,,1.065,0.004303,,skipped_not_dominant,
+MGLYVAL,A,conf_52,state13,,,,1.136,0.031653,,skipped_not_dominant,
+MGLYVAL,A,conf_52,state14,,,,1.956,0.027805,,skipped_not_dominant,
+MGLYVAL,A,conf_52,state15,,,,1.878,0.064040,,skipped_not_dominant,
+MGLYVAL,B,conf_001,ground_state,91,92,,,,,error,"returncode=64: 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!                        FATAL ERROR ENCOUNTERED               !!!
+!!!                        -----------------------               !!!
+!!!                           CANNOT OPEN FILE                   !!!
+!!!               Filename: /home/kmilozeta/MGLYVAL/runs/B/05_tddft/conf_001/tddft.densitiesinfo                                   !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"
+MGLYVAL,B,conf_001,state1,91,92,0.98814812,1.058,0.891041,,error,"returncode=64: 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!                        FATAL ERROR ENCOUNTERED               !!!
+!!!                        -----------------------               !!!
+!!!                           CANNOT OPEN FILE                   !!!
+!!!               Filename: /home/kmilozeta/MGLYVAL/runs/B/05_tddft/conf_001/tddft.densitiesinfo                                   !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"
+MGLYVAL,B,conf_001,state2,,,,1.232,0.008384,,skipped_not_dominant,
+MGLYVAL,B,conf_001,state3,,,,1.203,0.000495,,skipped_not_dominant,
+MGLYVAL,B,conf_001,state4,,,,1.045,0.006561,,skipped_not_dominant,
+MGLYVAL,B,conf_001,state5,,,,1.058,0.000584,,skipped_not_dominant,
+MGLYVAL,B,conf_001,state6,,,,1.026,0.000131,,skipped_not_dominant,
+MGLYVAL,B,conf_001,state7,,,,1.074,0.001858,,skipped_not_dominant,
+MGLYVAL,B,conf_001,state8,,,,1.381,0.006176,,skipped_not_dominant,
+MGLYVAL,B,conf_001,state9,,,,2.131,0.054098,,skipped_not_dominant,
+MGLYVAL,B,conf_001,state10,,,,1.972,0.012013,,skipped_not_dominant,
+MGLYVAL,B,conf_001,state11,,,,2.123,0.015546,,skipped_not_dominant,
+MGLYVAL,B,conf_001,state12,,,,1.207,0.043354,,skipped_not_dominant,
+MGLYVAL,B,conf_001,state13,,,,1.783,0.004556,,skipped_not_dominant,
+MGLYVAL,B,conf_001,state14,,,,1.753,0.003646,,skipped_not_dominant,
+MGLYVAL,B,conf_001,state15,,,,1.044,0.004631,,skipped_not_dominant,
+MGLYVAL,B,conf_002,ground_state,91,92,,,,,error,"returncode=64: 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!                        FATAL ERROR ENCOUNTERED               !!!
+!!!                        -----------------------               !!!
+!!!                           CANNOT OPEN FILE                   !!!
+!!!               Filename: /home/kmilozeta/MGLYVAL/runs/B/05_tddft/conf_002/tddft.densitiesinfo                                   !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"
+MGLYVAL,B,conf_002,state1,91,92,0.98823228,1.058,0.883008,,error,"returncode=64: 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!                        FATAL ERROR ENCOUNTERED               !!!
+!!!                        -----------------------               !!!
+!!!                           CANNOT OPEN FILE                   !!!
+!!!               Filename: /home/kmilozeta/MGLYVAL/runs/B/05_tddft/conf_002/tddft.densitiesinfo                                   !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"
+MGLYVAL,B,conf_002,state2,,,,1.104,0.009172,,skipped_not_dominant,
+MGLYVAL,B,conf_002,state3,,,,1.081,0.000470,,skipped_not_dominant,
+MGLYVAL,B,conf_002,state4,,,,1.058,0.011470,,skipped_not_dominant,
+MGLYVAL,B,conf_002,state5,,,,1.057,0.000611,,skipped_not_dominant,
+MGLYVAL,B,conf_002,state6,,,,1.013,0.000040,,skipped_not_dominant,
+MGLYVAL,B,conf_002,state7,,,,2.334,0.002629,,skipped_not_dominant,
+MGLYVAL,B,conf_002,state8,,,,2.110,0.005001,,skipped_not_dominant,
+MGLYVAL,B,conf_002,state9,,,,2.000,0.055573,,skipped_not_dominant,
+MGLYVAL,B,conf_002,state10,,,,2.035,0.013588,,skipped_not_dominant,
+MGLYVAL,B,conf_002,state11,,,,1.146,0.043848,,skipped_not_dominant,
+MGLYVAL,B,conf_002,state12,,,,1.186,0.000637,,skipped_not_dominant,
+MGLYVAL,B,conf_002,state13,,,,1.726,0.008745,,skipped_not_dominant,
+MGLYVAL,B,conf_002,state14,,,,1.096,0.018643,,skipped_not_dominant,
+MGLYVAL,B,conf_002,state15,,,,1.096,0.009867,,skipped_not_dominant,
+MGLYVAL,B,conf_003,ground_state,91,92,,,,,error,"returncode=64: 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!                        FATAL ERROR ENCOUNTERED               !!!
+!!!                        -----------------------               !!!
+!!!                           CANNOT OPEN FILE                   !!!
+!!!               Filename: /home/kmilozeta/MGLYVAL/runs/B/05_tddft/conf_003/tddft.densitiesinfo                                   !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"
+MGLYVAL,B,conf_003,state1,91,92,0.98822022,1.056,0.882373,,error,"returncode=64: 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!                        FATAL ERROR ENCOUNTERED               !!!
+!!!                        -----------------------               !!!
+!!!                           CANNOT OPEN FILE                   !!!
+!!!               Filename: /home/kmilozeta/MGLYVAL/runs/B/05_tddft/conf_003/tddft.densitiesinfo                                   !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"
+MGLYVAL,B,conf_003,state2,,,,1.104,0.009257,,skipped_not_dominant,
+MGLYVAL,B,conf_003,state3,,,,1.080,0.000437,,skipped_not_dominant,
+MGLYVAL,B,conf_003,state4,,,,1.061,0.011501,,skipped_not_dominant,
+MGLYVAL,B,conf_003,state5,,,,1.061,0.000634,,skipped_not_dominant,
+MGLYVAL,B,conf_003,state6,,,,1.013,0.000045,,skipped_not_dominant,
+MGLYVAL,B,conf_003,state7,,,,2.182,0.004339,,skipped_not_dominant,
+MGLYVAL,B,conf_003,state8,,,,1.764,0.003216,,skipped_not_dominant,
+MGLYVAL,B,conf_003,state9,,,,2.026,0.056686,,skipped_not_dominant,
+MGLYVAL,B,conf_003,state10,,,,2.035,0.012755,,skipped_not_dominant,
+MGLYVAL,B,conf_003,state11,,,,1.160,0.043862,,skipped_not_dominant,
+MGLYVAL,B,conf_003,state12,,,,1.188,0.000549,,skipped_not_dominant,
+MGLYVAL,B,conf_003,state13,,,,1.742,0.008384,,skipped_not_dominant,
+MGLYVAL,B,conf_003,state14,,,,1.099,0.020395,,skipped_not_dominant,
+MGLYVAL,B,conf_003,state15,,,,1.091,0.009395,,skipped_not_dominant,
+MGLYVAL,B,conf_004,ground_state,91,92,,,,,error,"returncode=64: 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!                        FATAL ERROR ENCOUNTERED               !!!
+!!!                        -----------------------               !!!
+!!!                           CANNOT OPEN FILE                   !!!
+!!!               Filename: /home/kmilozeta/MGLYVAL/runs/B/05_tddft/conf_004/tddft.densitiesinfo                                   !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"
+MGLYVAL,B,conf_004,state1,91,92,0.98799251,1.058,0.889104,,error,"returncode=64: 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!                        FATAL ERROR ENCOUNTERED               !!!
+!!!                        -----------------------               !!!
+!!!                           CANNOT OPEN FILE                   !!!
+!!!               Filename: /home/kmilozeta/MGLYVAL/runs/B/05_tddft/conf_004/tddft.densitiesinfo                                   !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"
+MGLYVAL,B,conf_004,state2,,,,1.208,0.008318,,skipped_not_dominant,
+MGLYVAL,B,conf_004,state3,,,,1.170,0.001594,,skipped_not_dominant,
+MGLYVAL,B,conf_004,state4,,,,1.050,0.011523,,skipped_not_dominant,
+MGLYVAL,B,conf_004,state5,,,,1.059,0.000580,,skipped_not_dominant,
+MGLYVAL,B,conf_004,state6,,,,1.019,0.000038,,skipped_not_dominant,
+MGLYVAL,B,conf_004,state7,,,,1.302,0.001263,,skipped_not_dominant,
+MGLYVAL,B,conf_004,state8,,,,2.569,0.009428,,skipped_not_dominant,
+MGLYVAL,B,conf_004,state9,,,,1.957,0.041969,,skipped_not_dominant,
+MGLYVAL,B,conf_004,state10,,,,1.790,0.027299,,skipped_not_dominant,
+MGLYVAL,B,conf_004,state11,,,,1.576,0.021225,,skipped_not_dominant,
+MGLYVAL,B,conf_004,state12,,,,1.136,0.042678,,skipped_not_dominant,
+MGLYVAL,B,conf_004,state13,,,,1.407,0.003927,,skipped_not_dominant,
+MGLYVAL,B,conf_004,state14,,,,1.912,0.000571,,skipped_not_dominant,
+MGLYVAL,B,conf_004,state15,,,,1.042,0.000707,,skipped_not_dominant,
+MGLYVAL,B,conf_5,ground_state,91,92,,,,,error,"returncode=64: 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!                        FATAL ERROR ENCOUNTERED               !!!
+!!!                        -----------------------               !!!
+!!!                           CANNOT OPEN FILE                   !!!
+!!!               Filename: /Users/ieii/MAA-quantum-chemical-protocol/runs/B/05_tddft/conf_5/tddft.densitiesinfo                                   !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"
+MGLYVAL,B,conf_5,state1,91,92,0.98803633,1.058,0.889223,,error,"returncode=64: 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!                        FATAL ERROR ENCOUNTERED               !!!
+!!!                        -----------------------               !!!
+!!!                           CANNOT OPEN FILE                   !!!
+!!!               Filename: /Users/ieii/MAA-quantum-chemical-protocol/runs/B/05_tddft/conf_5/tddft.densitiesinfo                                   !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"
+MGLYVAL,B,conf_5,state2,,,,1.236,0.008679,,skipped_not_dominant,
+MGLYVAL,B,conf_5,state3,,,,1.205,0.000719,,skipped_not_dominant,
+MGLYVAL,B,conf_5,state4,,,,1.046,0.008376,,skipped_not_dominant,
+MGLYVAL,B,conf_5,state5,,,,1.050,0.000619,,skipped_not_dominant,
+MGLYVAL,B,conf_5,state6,,,,1.029,0.000075,,skipped_not_dominant,
+MGLYVAL,B,conf_5,state7,,,,1.136,0.000535,,skipped_not_dominant,
+MGLYVAL,B,conf_5,state8,,,,1.269,0.007192,,skipped_not_dominant,
+MGLYVAL,B,conf_5,state9,,,,2.035,0.057928,,skipped_not_dominant,
+MGLYVAL,B,conf_5,state10,,,,1.941,0.008198,,skipped_not_dominant,
+MGLYVAL,B,conf_5,state11,,,,1.221,0.042560,,skipped_not_dominant,
+MGLYVAL,B,conf_5,state12,,,,1.258,0.000578,,skipped_not_dominant,
+MGLYVAL,B,conf_5,state13,,,,1.923,0.004824,,skipped_not_dominant,
+MGLYVAL,B,conf_5,state14,,,,1.040,0.001364,,skipped_not_dominant,
+MGLYVAL,B,conf_5,state15,,,,1.491,0.038522,,skipped_not_dominant,
+MGLYVAL,B,conf_6,ground_state,91,92,,,,HOMO_mo91a.cube;LUMO_mo92a.cube,ok,
+MGLYVAL,B,conf_6,state1,91,92,0.98662499,1.057,0.752016,state1_hole_mo91a.cube;state1_particle_mo92a.cube,ok,
+MGLYVAL,B,conf_6,state2,,,,1.019,0.000559,,skipped_not_dominant,
+MGLYVAL,B,conf_6,state3,,,,1.238,0.031931,,skipped_not_dominant,
+MGLYVAL,B,conf_6,state4,,,,1.773,0.000513,,skipped_not_dominant,
+MGLYVAL,B,conf_6,state5,,,,1.277,0.001734,,skipped_not_dominant,
+MGLYVAL,B,conf_6,state6,,,,1.511,0.003239,,skipped_not_dominant,
+MGLYVAL,B,conf_6,state7,,,,1.265,0.000083,,skipped_not_dominant,
+MGLYVAL,B,conf_6,state8,,,,1.234,0.004557,,skipped_not_dominant,
+MGLYVAL,B,conf_6,state9,,,,2.174,0.009373,,skipped_not_dominant,
+MGLYVAL,B,conf_6,state10,,,,1.368,0.001053,,skipped_not_dominant,
+MGLYVAL,B,conf_6,state11,,,,2.598,0.004902,,skipped_not_dominant,
+MGLYVAL,B,conf_6,state12,,,,1.907,0.043027,,skipped_not_dominant,
+MGLYVAL,B,conf_6,state13,,,,1.394,0.002629,,skipped_not_dominant,
+MGLYVAL,B,conf_6,state14,,,,1.842,0.015171,,skipped_not_dominant,
+MGLYVAL,B,conf_6,state15,,,,1.056,0.005613,,skipped_not_dominant,
+MGLYVAL,C,conf_109,ground_state,91,92,,,,HOMO_mo91a.cube;LUMO_mo92a.cube,ok,
+MGLYVAL,C,conf_109,state1,91,92,0.98069729,1.063,0.747855,state1_hole_mo91a.cube;state1_particle_mo92a.cube,ok,
+MGLYVAL,C,conf_109,state2,,,,1.042,0.000830,,skipped_not_dominant,
+MGLYVAL,C,conf_109,state3,,,,1.067,0.031593,,skipped_not_dominant,
+MGLYVAL,C,conf_109,state4,,,,1.050,0.008777,,skipped_not_dominant,
+MGLYVAL,C,conf_109,state5,,,,1.567,0.004434,,skipped_not_dominant,
+MGLYVAL,C,conf_109,state6,,,,1.333,0.006188,,skipped_not_dominant,
+MGLYVAL,C,conf_109,state7,,,,2.158,0.008443,,skipped_not_dominant,
+MGLYVAL,C,conf_109,state8,,,,2.379,0.008450,,skipped_not_dominant,
+MGLYVAL,C,conf_109,state9,,,,1.995,0.039582,,skipped_not_dominant,
+MGLYVAL,C,conf_109,state10,,,,1.035,0.004497,,skipped_not_dominant,
+MGLYVAL,C,conf_109,state11,,,,1.268,0.008987,,skipped_not_dominant,
+MGLYVAL,C,conf_109,state12,,,,1.218,0.038934,,skipped_not_dominant,
+MGLYVAL,C,conf_109,state13,,,,2.635,0.009467,,skipped_not_dominant,
+MGLYVAL,C,conf_109,state14,,,,2.368,0.014031,,skipped_not_dominant,
+MGLYVAL,C,conf_109,state15,,,,1.734,0.098421,,skipped_not_dominant,
+MGLYVAL,C,conf_14,ground_state,91,92,,,,,error,"returncode=64: 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!                        FATAL ERROR ENCOUNTERED               !!!
+!!!                        -----------------------               !!!
+!!!                           CANNOT OPEN FILE                   !!!
+!!!               Filename: /Users/ieii/MAA-quantum-chemical-protocol/runs/C/05_tddft/conf_14/tddft.densitiesinfo                                   !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"
+MGLYVAL,C,conf_14,state1,91,92,0.9789149,1.072,0.843684,,error,"returncode=64: 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!                        FATAL ERROR ENCOUNTERED               !!!
+!!!                        -----------------------               !!!
+!!!                           CANNOT OPEN FILE                   !!!
+!!!               Filename: /Users/ieii/MAA-quantum-chemical-protocol/runs/C/05_tddft/conf_14/tddft.densitiesinfo                                   !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"
+MGLYVAL,C,conf_14,state2,,,,1.019,0.002797,,skipped_not_dominant,
+MGLYVAL,C,conf_14,state3,,,,1.045,0.002029,,skipped_not_dominant,
+MGLYVAL,C,conf_14,state4,,,,1.088,0.001349,,skipped_not_dominant,
+MGLYVAL,C,conf_14,state5,,,,1.518,0.002882,,skipped_not_dominant,
+MGLYVAL,C,conf_14,state6,,,,1.918,0.008729,,skipped_not_dominant,
+MGLYVAL,C,conf_14,state7,,,,1.761,0.009524,,skipped_not_dominant,
+MGLYVAL,C,conf_14,state8,,,,1.336,0.011457,,skipped_not_dominant,
+MGLYVAL,C,conf_14,state9,,,,2.564,0.011543,,skipped_not_dominant,
+MGLYVAL,C,conf_14,state10,,,,1.708,0.011131,,skipped_not_dominant,
+MGLYVAL,C,conf_14,state11,,,,1.024,0.006304,,skipped_not_dominant,
+MGLYVAL,C,conf_14,state12,,,,1.173,0.008205,,skipped_not_dominant,
+MGLYVAL,C,conf_14,state13,,,,2.724,0.009738,,skipped_not_dominant,
+MGLYVAL,C,conf_14,state14,,,,2.390,0.002721,,skipped_not_dominant,
+MGLYVAL,C,conf_14,state15,,,,2.139,0.038047,,skipped_not_dominant,
+MGLYVAL,C,conf_20,ground_state,91,92,,,,HOMO_mo91a.cube;LUMO_mo92a.cube,ok,
+MGLYVAL,C,conf_20,state1,91,92,0.97828656,1.071,0.854890,state1_hole_mo91a.cube;state1_particle_mo92a.cube,ok,
+MGLYVAL,C,conf_20,state2,,,,1.029,0.002695,,skipped_not_dominant,
+MGLYVAL,C,conf_20,state3,,,,1.058,0.002376,,skipped_not_dominant,
+MGLYVAL,C,conf_20,state4,,,,1.074,0.001370,,skipped_not_dominant,
+MGLYVAL,C,conf_20,state5,,,,1.590,0.003791,,skipped_not_dominant,
+MGLYVAL,C,conf_20,state6,,,,1.267,0.004722,,skipped_not_dominant,
+MGLYVAL,C,conf_20,state7,,,,1.852,0.006974,,skipped_not_dominant,
+MGLYVAL,C,conf_20,state8,,,,1.798,0.015581,,skipped_not_dominant,
+MGLYVAL,C,conf_20,state9,,,,2.789,0.017314,,skipped_not_dominant,
+MGLYVAL,C,conf_20,state10,,,,1.536,0.008589,,skipped_not_dominant,
+MGLYVAL,C,conf_20,state11,,,,1.199,0.008404,,skipped_not_dominant,
+MGLYVAL,C,conf_20,state12,,,,3.790,0.006276,,skipped_not_dominant,
+MGLYVAL,C,conf_20,state13,,,,2.898,0.014296,,skipped_not_dominant,
+MGLYVAL,C,conf_20,state14,,,,3.025,0.003690,,skipped_not_dominant,
+MGLYVAL,C,conf_20,state15,,,,2.128,0.031254,,skipped_not_dominant,
+MGLYVAL,C,conf_23,ground_state,91,92,,,,,error,"returncode=64: 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!                        FATAL ERROR ENCOUNTERED               !!!
+!!!                        -----------------------               !!!
+!!!                           CANNOT OPEN FILE                   !!!
+!!!               Filename: /Users/ieii/MAA-quantum-chemical-protocol/runs/C/05_tddft/conf_23/tddft.densitiesinfo                                   !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"
+MGLYVAL,C,conf_23,state1,91,92,0.97874379,1.069,0.820878,,error,"returncode=64: 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!                        FATAL ERROR ENCOUNTERED               !!!
+!!!                        -----------------------               !!!
+!!!                           CANNOT OPEN FILE                   !!!
+!!!               Filename: /Users/ieii/MAA-quantum-chemical-protocol/runs/C/05_tddft/conf_23/tddft.densitiesinfo                                   !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"
+MGLYVAL,C,conf_23,state2,,,,1.013,0.003343,,skipped_not_dominant,
+MGLYVAL,C,conf_23,state3,,,,1.059,0.004586,,skipped_not_dominant,
+MGLYVAL,C,conf_23,state4,,,,1.306,0.003884,,skipped_not_dominant,
+MGLYVAL,C,conf_23,state5,,,,1.194,0.003588,,skipped_not_dominant,
+MGLYVAL,C,conf_23,state6,,,,1.414,0.005116,,skipped_not_dominant,
+MGLYVAL,C,conf_23,state7,,,,2.108,0.002602,,skipped_not_dominant,
+MGLYVAL,C,conf_23,state8,,,,1.355,0.003582,,skipped_not_dominant,
+MGLYVAL,C,conf_23,state9,,,,1.637,0.040687,,skipped_not_dominant,
+MGLYVAL,C,conf_23,state10,,,,3.219,0.007667,,skipped_not_dominant,
+MGLYVAL,C,conf_23,state11,,,,2.344,0.016772,,skipped_not_dominant,
+MGLYVAL,C,conf_23,state12,,,,1.656,0.026109,,skipped_not_dominant,
+MGLYVAL,C,conf_23,state13,,,,1.233,0.010050,,skipped_not_dominant,
+MGLYVAL,C,conf_23,state14,,,,3.177,0.012854,,skipped_not_dominant,
+MGLYVAL,C,conf_23,state15,,,,1.800,0.015332,,skipped_not_dominant,
+MGLYVAL,D,conf_3,ground_state,91,92,,,,HOMO_mo91a.cube;LUMO_mo92a.cube,ok,
+MGLYVAL,D,conf_3,state1,91,92,0.98657319,1.055,0.729049,state1_hole_mo91a.cube;state1_particle_mo92a.cube,ok,
+MGLYVAL,D,conf_3,state2,,,,1.039,0.004604,,skipped_not_dominant,
+MGLYVAL,D,conf_3,state3,,,,1.043,0.001504,,skipped_not_dominant,
+MGLYVAL,D,conf_3,state4,,,,1.029,0.033818,,skipped_not_dominant,
+MGLYVAL,D,conf_3,state5,,,,1.212,0.005494,,skipped_not_dominant,
+MGLYVAL,D,conf_3,state6,,,,1.581,0.001156,,skipped_not_dominant,
+MGLYVAL,D,conf_3,state7,,,,1.908,0.005169,,skipped_not_dominant,
+MGLYVAL,D,conf_3,state8,,,,1.846,0.004827,,skipped_not_dominant,
+MGLYVAL,D,conf_3,state9,,,,1.691,0.001467,,skipped_not_dominant,
+MGLYVAL,D,conf_3,state10,,,,1.661,0.001620,,skipped_not_dominant,
+MGLYVAL,D,conf_3,state11,,,,1.585,0.046633,,skipped_not_dominant,
+MGLYVAL,D,conf_3,state12,,,,2.309,0.011131,,skipped_not_dominant,
+MGLYVAL,D,conf_3,state13,,,,2.020,0.021050,,skipped_not_dominant,
+MGLYVAL,D,conf_3,state14,,,,2.180,0.036562,,skipped_not_dominant,
+MGLYVAL,D,conf_3,state15,,,,1.416,0.009198,,skipped_not_dominant,
+MGLYVAL,D,conf_36,ground_state,91,92,,,,HOMO_mo91a.cube;LUMO_mo92a.cube,ok,
+MGLYVAL,D,conf_36,state1,91,92,0.98801321,1.056,0.769396,state1_hole_mo91a.cube;state1_particle_mo92a.cube,ok,
+MGLYVAL,D,conf_36,state2,,,,1.034,0.000281,,skipped_not_dominant,
+MGLYVAL,D,conf_36,state3,,,,1.036,0.004224,,skipped_not_dominant,
+MGLYVAL,D,conf_36,state4,,,,1.019,0.000147,,skipped_not_dominant,
+MGLYVAL,D,conf_36,state5,,,,1.024,0.000240,,skipped_not_dominant,
+MGLYVAL,D,conf_36,state6,,,,1.044,0.000370,,skipped_not_dominant,
+MGLYVAL,D,conf_36,state7,,,,1.067,0.004888,,skipped_not_dominant,
+MGLYVAL,D,conf_36,state8,,,,1.124,0.008653,,skipped_not_dominant,
+MGLYVAL,D,conf_36,state9,,,,1.341,0.000718,,skipped_not_dominant,
+MGLYVAL,D,conf_36,state10,,,,1.051,0.040170,,skipped_not_dominant,
+MGLYVAL,D,conf_36,state11,,,,1.413,0.008795,,skipped_not_dominant,
+MGLYVAL,D,conf_36,state12,,,,1.959,0.022543,,skipped_not_dominant,
+MGLYVAL,D,conf_36,state13,,,,2.065,0.032656,,skipped_not_dominant,
+MGLYVAL,D,conf_36,state14,,,,1.099,0.015524,,skipped_not_dominant,
+MGLYVAL,D,conf_36,state15,,,,1.076,0.089338,,skipped_not_dominant,
+MGLYVAL,R,conf_1,ground_state,91,92,,,,HOMO_mo91a.cube;LUMO_mo92a.cube,ok,
+MGLYVAL,R,conf_1,state1,91,92,0.98403082,1.059,0.726223,state1_hole_mo91a.cube;state1_particle_mo92a.cube,ok,
+MGLYVAL,R,conf_1,state2,,,,1.009,0.004535,,skipped_not_dominant,
+MGLYVAL,R,conf_1,state3,,,,1.108,0.004151,,skipped_not_dominant,
+MGLYVAL,R,conf_1,state4,,,,1.223,0.001969,,skipped_not_dominant,
+MGLYVAL,R,conf_1,state5,,,,1.100,0.003512,,skipped_not_dominant,
+MGLYVAL,R,conf_1,state6,,,,1.556,0.006083,,skipped_not_dominant,
+MGLYVAL,R,conf_1,state7,,,,2.368,0.005132,,skipped_not_dominant,
+MGLYVAL,R,conf_1,state8,,,,2.413,0.009921,,skipped_not_dominant,
+MGLYVAL,R,conf_1,state9,,,,1.543,0.018752,,skipped_not_dominant,
+MGLYVAL,R,conf_1,state10,,,,1.319,0.002027,,skipped_not_dominant,
+MGLYVAL,R,conf_1,state11,,,,1.429,0.025184,,skipped_not_dominant,
+MGLYVAL,R,conf_1,state12,,,,1.197,0.003069,,skipped_not_dominant,
+MGLYVAL,R,conf_1,state13,,,,1.121,0.055563,,skipped_not_dominant,
+MGLYVAL,R,conf_1,state14,,,,1.072,0.000501,,skipped_not_dominant,
+MGLYVAL,R,conf_1,state15,,,,1.254,0.009735,,skipped_not_dominant,
+MGLYVAL,R,conf_118,ground_state,91,92,,,,HOMO_mo91a.cube;LUMO_mo92a.cube,ok,
+MGLYVAL,R,conf_118,state1,91,92,0.98490163,1.056,0.691993,state1_hole_mo91a.cube;state1_particle_mo92a.cube,ok,
+MGLYVAL,R,conf_118,state2,,,,1.010,0.002432,,skipped_not_dominant,
+MGLYVAL,R,conf_118,state3,,,,1.147,0.003865,,skipped_not_dominant,
+MGLYVAL,R,conf_118,state4,,,,1.247,0.008955,,skipped_not_dominant,
+MGLYVAL,R,conf_118,state5,,,,1.091,0.008433,,skipped_not_dominant,
+MGLYVAL,R,conf_118,state6,,,,1.622,0.008033,,skipped_not_dominant,
+MGLYVAL,R,conf_118,state7,,,,1.511,0.002975,,skipped_not_dominant,
+MGLYVAL,R,conf_118,state8,,,,1.268,0.001799,,skipped_not_dominant,
+MGLYVAL,R,conf_118,state9,,,,1.169,0.029812,,skipped_not_dominant,
+MGLYVAL,R,conf_118,state10,,,,1.071,0.003294,,skipped_not_dominant,
+MGLYVAL,R,conf_118,state11,,,,1.108,0.001207,,skipped_not_dominant,
+MGLYVAL,R,conf_118,state12,,,,1.091,0.022702,,skipped_not_dominant,
+MGLYVAL,R,conf_118,state13,,,,1.059,0.010005,,skipped_not_dominant,
+MGLYVAL,R,conf_118,state14,,,,1.420,0.029105,,skipped_not_dominant,
+MGLYVAL,R,conf_118,state15,,,,1.065,0.001075,,skipped_not_dominant,
+MGLYVAL,R,conf_2,ground_state,91,92,,,,HOMO_mo91a.cube;LUMO_mo92a.cube,ok,
+MGLYVAL,R,conf_2,state1,91,92,0.98403795,1.059,0.726304,state1_hole_mo91a.cube;state1_particle_mo92a.cube,ok,
+MGLYVAL,R,conf_2,state2,,,,1.009,0.004552,,skipped_not_dominant,
+MGLYVAL,R,conf_2,state3,,,,1.109,0.004180,,skipped_not_dominant,
+MGLYVAL,R,conf_2,state4,,,,1.228,0.001983,,skipped_not_dominant,
+MGLYVAL,R,conf_2,state5,,,,1.102,0.003590,,skipped_not_dominant,
+MGLYVAL,R,conf_2,state6,,,,1.559,0.006080,,skipped_not_dominant,
+MGLYVAL,R,conf_2,state7,,,,2.341,0.005236,,skipped_not_dominant,
+MGLYVAL,R,conf_2,state8,,,,2.401,0.009708,,skipped_not_dominant,
+MGLYVAL,R,conf_2,state9,,,,1.562,0.019202,,skipped_not_dominant,
+MGLYVAL,R,conf_2,state10,,,,1.340,0.002173,,skipped_not_dominant,
+MGLYVAL,R,conf_2,state11,,,,1.449,0.025094,,skipped_not_dominant,
+MGLYVAL,R,conf_2,state12,,,,1.195,0.003078,,skipped_not_dominant,
+MGLYVAL,R,conf_2,state13,,,,1.121,0.055370,,skipped_not_dominant,
+MGLYVAL,R,conf_2,state14,,,,1.072,0.000524,,skipped_not_dominant,
+MGLYVAL,R,conf_2,state15,,,,1.253,0.009711,,skipped_not_dominant,
+SHINORINE,SB,conf_001,ground_state,87,88,,,,,error,"returncode=64: 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!                        FATAL ERROR ENCOUNTERED               !!!
+!!!                        -----------------------               !!!
+!!!                           CANNOT OPEN FILE                   !!!
+!!!               Filename: /home/kmilozeta/MGLYVAL/runs/SB/05_tddft/conf_001/tddft.densitiesinfo                                   !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"
+SHINORINE,SB,conf_001,state1,87,88,0.98743541,1.054,0.809882,,error,"returncode=64: 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!                        FATAL ERROR ENCOUNTERED               !!!
+!!!                        -----------------------               !!!
+!!!                           CANNOT OPEN FILE                   !!!
+!!!               Filename: /home/kmilozeta/MGLYVAL/runs/SB/05_tddft/conf_001/tddft.densitiesinfo                                   !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"
+SHINORINE,SB,conf_001,state2,,,,1.088,0.001360,,skipped_not_dominant,
+SHINORINE,SB,conf_001,state3,,,,1.047,0.034461,,skipped_not_dominant,
+SHINORINE,SB,conf_001,state4,,,,1.276,0.007744,,skipped_not_dominant,
+SHINORINE,SB,conf_001,state5,,,,1.317,0.000277,,skipped_not_dominant,
+SHINORINE,SB,conf_001,state6,,,,1.214,0.012850,,skipped_not_dominant,
+SHINORINE,SB,conf_001,state7,,,,1.179,0.004251,,skipped_not_dominant,
+SHINORINE,SB,conf_001,state8,,,,1.177,0.001644,,skipped_not_dominant,
+SHINORINE,SB,conf_001,state9,,,,2.674,0.015153,,skipped_not_dominant,
+SHINORINE,SB,conf_001,state10,,,,1.096,0.004175,,skipped_not_dominant,
+SHINORINE,SB,conf_001,state11,,,,1.169,0.006065,,skipped_not_dominant,
+SHINORINE,SB,conf_001,state12,,,,2.080,0.011361,,skipped_not_dominant,
+SHINORINE,SB,conf_001,state13,,,,1.276,0.037499,,skipped_not_dominant,
+SHINORINE,SB,conf_001,state14,,,,1.040,0.005841,,skipped_not_dominant,
+SHINORINE,SB,conf_001,state15,,,,1.376,0.035530,,skipped_not_dominant,
+SHINORINE,SB,conf_002,ground_state,87,88,,,,,error,"returncode=64: 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!                        FATAL ERROR ENCOUNTERED               !!!
+!!!                        -----------------------               !!!
+!!!                           CANNOT OPEN FILE                   !!!
+!!!               Filename: /home/kmilozeta/MGLYVAL/runs/SB/05_tddft/conf_002/tddft.densitiesinfo                                   !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"
+SHINORINE,SB,conf_002,state1,87,88,0.98816342,1.057,0.880370,,error,"returncode=64: 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!                        FATAL ERROR ENCOUNTERED               !!!
+!!!                        -----------------------               !!!
+!!!                           CANNOT OPEN FILE                   !!!
+!!!               Filename: /home/kmilozeta/MGLYVAL/runs/SB/05_tddft/conf_002/tddft.densitiesinfo                                   !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"
+SHINORINE,SB,conf_002,state2,,,,2.021,0.000272,,skipped_not_dominant,
+SHINORINE,SB,conf_002,state3,,,,2.019,0.001237,,skipped_not_dominant,
+SHINORINE,SB,conf_002,state4,,,,1.050,0.001599,,skipped_not_dominant,
+SHINORINE,SB,conf_002,state5,,,,1.040,0.000046,,skipped_not_dominant,
+SHINORINE,SB,conf_002,state6,,,,1.133,0.000993,,skipped_not_dominant,
+SHINORINE,SB,conf_002,state7,,,,1.181,0.000842,,skipped_not_dominant,
+SHINORINE,SB,conf_002,state8,,,,1.936,0.018982,,skipped_not_dominant,
+SHINORINE,SB,conf_002,state9,,,,1.625,0.005863,,skipped_not_dominant,
+SHINORINE,SB,conf_002,state10,,,,2.391,0.016959,,skipped_not_dominant,
+SHINORINE,SB,conf_002,state11,,,,1.377,0.002948,,skipped_not_dominant,
+SHINORINE,SB,conf_002,state12,,,,1.865,0.006643,,skipped_not_dominant,
+SHINORINE,SB,conf_002,state13,,,,1.046,0.042662,,skipped_not_dominant,
+SHINORINE,SB,conf_002,state14,,,,1.393,0.022729,,skipped_not_dominant,
+SHINORINE,SB,conf_002,state15,,,,1.438,0.018676,,skipped_not_dominant,
+SHINORINE,SB,conf_003,ground_state,87,88,,,,,error,"returncode=64: 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!                        FATAL ERROR ENCOUNTERED               !!!
+!!!                        -----------------------               !!!
+!!!                           CANNOT OPEN FILE                   !!!
+!!!               Filename: /home/kmilozeta/MGLYVAL/runs/SB/05_tddft/conf_003/tddft.densitiesinfo                                   !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"
+SHINORINE,SB,conf_003,state1,87,88,0.9851137,1.060,0.772303,,error,"returncode=64: 
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!                        FATAL ERROR ENCOUNTERED               !!!
+!!!                        -----------------------               !!!
+!!!                           CANNOT OPEN FILE                   !!!
+!!!               Filename: /home/kmilozeta/MGLYVAL/runs/SB/05_tddft/conf_003/tddft.densitiesinfo                                   !!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+"
+SHINORINE,SB,conf_003,state2,,,,1.351,0.014714,,skipped_not_dominant,
+SHINORINE,SB,conf_003,state3,,,,1.171,0.003941,,skipped_not_dominant,
+SHINORINE,SB,conf_003,state4,,,,1.169,0.011034,,skipped_not_dominant,
+SHINORINE,SB,conf_003,state5,,,,1.498,0.004297,,skipped_not_dominant,
+SHINORINE,SB,conf_003,state6,,,,1.042,0.000462,,skipped_not_dominant,
+SHINORINE,SB,conf_003,state7,,,,1.011,0.000047,,skipped_not_dominant,
+SHINORINE,SB,conf_003,state8,,,,1.130,0.000993,,skipped_not_dominant,
+SHINORINE,SB,conf_003,state9,,,,1.207,0.006900,,skipped_not_dominant,
+SHINORINE,SB,conf_003,state10,,,,1.752,0.025731,,skipped_not_dominant,
+SHINORINE,SB,conf_003,state11,,,,1.759,0.014430,,skipped_not_dominant,
+SHINORINE,SB,conf_003,state12,,,,1.503,0.025974,,skipped_not_dominant,
+SHINORINE,SB,conf_003,state13,,,,1.652,0.009262,,skipped_not_dominant,
+SHINORINE,SB,conf_003,state14,,,,1.597,0.005220,,skipped_not_dominant,
+SHINORINE,SB,conf_003,state15,,,,2.277,0.021612,,skipped_not_dominant,

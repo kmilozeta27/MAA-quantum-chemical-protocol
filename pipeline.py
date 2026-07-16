@@ -1869,14 +1869,129 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
         censo_dir / "CENSO" / "1_SCREENING.out",
         censo_dir / "prescreening" / "1_SCREENING.out",
     ]
-    _has_screening = any(
-        parse_censo_screening_out(_p) for _p in _screening_out_candidates
-    )
+    _screening_conf_ids: Optional[list[str]] = None
+    for _p in _screening_out_candidates:
+        _parsed = parse_censo_screening_out(_p)
+        if _parsed:
+            _screening_conf_ids = _parsed
+            break
+    _has_screening = _screening_conf_ids is not None
 
-    # Skip solo si el ensemble existe Y hay evidencia de screening real
+    # ── Reconstrucción DIRECTA desde 1_SCREENING.out + 1_SCREENING.xyz ───────
+    # FIX (2026-07-14): si el SCREENING (no solo el prescreening) ya terminó
+    # — es decir, _has_screening es True —, NO hace falta invocar CENSO de
+    # nuevo bajo ninguna forma (ni limpio, ni --reload): las energías
+    # Gtot/ΔGtot/Boltzmann y las geometrías de los confórmeros sobrevivientes
+    # YA están en disco (1_SCREENING.out + 1_SCREENING.xyz). Este bloque se
+    # ejecuta ANTES de la verificación de output_xyz y ANTES del bloque de
+    # diagnóstico/--reload sobre 0_PRESCREENING/ más abajo.
+    #
+    # Bug real que esto corrige: con prescreening Y screening ya 100%
+    # completos en disco, el flujo anterior igual llegaba al bloque de
+    # "recuperación de carpeta parcial de CENSO" (_censo_prescreen_diagnose_dir
+    # sobre 0_PRESCREENING/), que diagnostica sobre las carpetas CONF* del
+    # PRESCREENING — no sabe nada de que el SCREENING ya terminó — y podía
+    # terminar relanzando CENSO (limpio o con --reload) para un trabajo que
+    # ya estaba hecho y disponible en 1_SCREENING.out. Ahora, apenas se
+    # confirma que 1_SCREENING.out es parseable, se intenta reconstruir el
+    # ensemble directamente desde los archivos existentes y se retorna sin
+    # tocar CENSO en absoluto.
+    if _has_screening:
+        _screening_out_path = next(
+            (p for p in _screening_out_candidates if parse_censo_screening_out(p)),
+            None,
+        )
+        # Fuentes de geometría en orden de prioridad:
+        #   1. conformers_xyz original de CREST (comentarios "CONF7  -E")
+        #   2. 1_SCREENING.xyz generado por CENSO (comentarios = solo CONF#)
+        _geom_sources = [conformers_xyz]
+        if _screening_out_path is not None:
+            for _cand in (
+                _screening_out_path.parent / "1_SCREENING.xyz",
+                _screening_out_path.parent.parent / "1_SCREENING.xyz",
+            ):
+                if _cand.exists() and _cand.stat().st_size > 0 and _cand not in _geom_sources:
+                    _geom_sources.append(_cand)
+        _rebuilt_direct = False
+        for _geom_src in _geom_sources:
+            if extract_conformers_by_id(_geom_src, _screening_conf_ids, output_xyz, log):
+                log.info(
+                    f"[CENSO]  ✓  screening ya completo en disco "
+                    f"({(_screening_out_path.relative_to(censo_dir) if _screening_out_path else '1_SCREENING.out')}) "
+                    f"— {len(_screening_conf_ids)} confórmero(s), ensemble reconstruido "
+                    f"SIN invocar CENSO (geometrías: {_geom_src.name}) → {output_xyz.name}"
+                )
+                _rebuilt_direct = True
+                break
+            log.debug(
+                f"[CENSO]  fuente {_geom_src.name} no contiene los CONF# de "
+                f"1_SCREENING.out — probando siguiente fuente de geometrías"
+            )
+        if _rebuilt_direct:
+            return output_xyz
+        log.warning(
+            f"[CENSO]  ⚠  1_SCREENING.out parseable ({len(_screening_conf_ids)} conf(s)) "
+            f"pero ninguna fuente de geometría disponible ({', '.join(g.name for g in _geom_sources)}) "
+            f"contiene esos CONF# — se continúa con la verificación de "
+            f"{output_xyz.name} / recovery de prescreening más abajo"
+        )
+
+    # ── Verificación cruzada output_xyz ↔ 1_SCREENING.out / conformers_xyz ──
+    # El bug real: "existe output_xyz" y "existe 1_SCREENING.out parseable"
+    # se verificaban por separado, sin comprobar que ambos describen el
+    # MISMO screening. Un censo_ensemble_sorted.xyz viejo (de un run
+    # anterior, --reload fallido, --multitemp sin subdir, etc.) que quedó
+    # en este mismo censo_dir podía convivir con un 1_SCREENING.out fresco
+    # y válido, y esta función los trataba como pareja sin más evidencia.
+    # Ahora exigimos que output_xyz tenga el mismo n° de átomos por frame
+    # que el ensemble CREST de este run (conformers_xyz, ya garantizado
+    # correcto porque viene del mismo mol_dir), y que al menos el CONF#
+    # de mayor peso Boltzmann del .out exista como frame real en output_xyz.
+    # Si algo no cuadra, no confiamos en el archivo viejo: se re-corre CENSO.
     if output_xyz.exists() and output_xyz.stat().st_size > 0 and _has_screening:
-        log.info(f"[CENSO]  ↩  screening ya completado — saltando ({output_xyz.name})")
-        return output_xyz
+        _stale_reason = None
+        try:
+            _crest_atoms = read(str(conformers_xyz), index="0")
+            _expected_n = len(_crest_atoms)
+            _out_atoms = read(str(output_xyz), index=":")
+            if not isinstance(_out_atoms, list):
+                _out_atoms = [_out_atoms]
+            if not _out_atoms:
+                _stale_reason = f"{output_xyz.name} no tiene frames"
+            elif len(_out_atoms[0]) != _expected_n:
+                _stale_reason = (
+                    f"{output_xyz.name} tiene {len(_out_atoms[0])} átomos/frame, "
+                    f"pero el ensemble CREST de este run ({conformers_xyz.name}) "
+                    f"tiene {_expected_n} — no pueden ser del mismo screening"
+                )
+            else:
+                _out_text = output_xyz.read_text(errors="replace")
+                _top_conf = _screening_conf_ids[0] if _screening_conf_ids else None
+                if _top_conf and _top_conf not in _out_text:
+                    _stale_reason = (
+                        f"el confórmero de mayor peso según 1_SCREENING.out "
+                        f"({_top_conf}) no aparece en {output_xyz.name}"
+                    )
+        except Exception as e:
+            _stale_reason = f"no se pudo verificar consistencia ({e})"
+
+        if _stale_reason is None:
+            log.info(f"[CENSO]  ↩  screening ya completado — saltando ({output_xyz.name})")
+            return output_xyz
+        else:
+            log.warning(
+                f"[CENSO]  ⚠  {output_xyz.name} existe y hay un 1_SCREENING.out "
+                f"parseable, pero NO son consistentes entre sí: {_stale_reason}. "
+                f"Esto indica un {output_xyz.name} obsoleto de otra corrida "
+                f"(posiblemente otro estado de protonación) que quedó en "
+                f"{censo_dir} y no fue sobrescrito. Se lo descarta y se "
+                f"relanza CENSO desde cero para regenerarlo correctamente."
+            )
+            try:
+                output_xyz.unlink()
+            except OSError:
+                pass
+            _has_screening = False
 
     if output_xyz.exists() and output_xyz.stat().st_size > 0 and not _has_screening:
         log.warning(
@@ -2898,7 +3013,8 @@ def _extract_conf_ids_from_xyz(source_xyz: Path) -> dict[int, str]:
 
 def stage_opt(conformers_xyz: Path, mol_dir: Path,
               charge: int, nconf: int, log: logging.Logger,
-              conf_ids: Optional[list[str]] = None) -> list[Path]:
+              conf_ids: Optional[list[str]] = None,
+              expected_natoms: Optional[int] = None) -> list[Path]:
     """
     Etapa 02_opt: optimización DFT de cada confórmero.
     `nconf` viene de select_nconf_auto() o select_nconf_boltzmann().
@@ -2908,6 +3024,24 @@ def stage_opt(conformers_xyz: Path, mol_dir: Path,
                    Si se especifica, se ignora nconf y se seleccionan los frames
                    correspondientes del ensemble. Si es None, se toman los primeros
                    nconf frames (comportamiento clásico).
+        expected_natoms : número de átomos que DEBE tener cada confórmero,
+                   derivado de la molécula base (mol_xyz) que dio origen a
+                   este mol_dir/charge. Si se especifica y no coincide con
+                   el ensemble leído, se aborta con RuntimeError en vez de
+                   seguir adelante silenciosamente.
+
+                   Esta validación existe porque conformers_xyz, mol_dir y
+                   charge llegan aquí como tres valores independientes: nada
+                   impide en el nivel de orquestación (p.ej. al iterar sobre
+                   varios estados de protonación A/B/C/D/R) pasar el
+                   ensemble de un estado con el charge de otro. Ni
+                   read_conformers() ni el modo Boltzmann verifican eso por
+                   sí solos — ambos toman lo que se les da y confían en que
+                   ya está alineado. expected_natoms es el candado que
+                   faltaba: si no coincide, es evidencia directa de un cruce
+                   de estado/charge, y ORCA fallaría en el SCF (o, peor,
+                   convergería a una geometría sin sentido químico) en vez
+                   de avisar aquí.
 
     Corre OPT_BATCH_SIZE confórmeros en paralelo (ThreadPoolExecutor),
     cada uno con NPROCS cores y MAXCORE MB. El paralelismo entre confórmeros
@@ -2972,6 +3106,40 @@ def stage_opt(conformers_xyz: Path, mol_dir: Path,
     if not conformers:
         log.error("[OPT] el archivo de confórmeros está vacío")
         return []
+
+    # ── Validación estado/charge: el candado que faltaba ─────────────────
+    # conformers_xyz, mol_dir y charge llegan aquí como argumentos
+    # independientes. Si en el nivel de orquestación se cruzó el ensemble
+    # de un estado de protonación con el charge de otro (p.ej. al iterar
+    # A/B/C/D/R), nada dentro de esta función lo detectaría por sí solo:
+    # read_conformers() hace slicing posicional puro y el modo Boltzmann
+    # solo empareja por CONF#, ninguno de los dos sabe qué charge
+    # "debería" tener el ensemble que se le pasó. Si el llamador conoce el
+    # conteo de átomos esperado (derivado de mol_xyz para este estado),
+    # lo verificamos aquí y abortamos con un mensaje claro en vez de dejar
+    # que ORCA falle en el SCF — o, peor, converja sin sentido químico.
+    _actual_natoms = len(conformers[0])
+    if any(len(c) != _actual_natoms for c in conformers):
+        log.error(
+            f"[OPT] los confórmeros leídos de {conformers_xyz} no tienen "
+            f"todos el mismo número de átomos (esperado {_actual_natoms} "
+            f"según el primer frame). Ensemble corrupto o mezclado."
+        )
+        return []
+    if expected_natoms is not None and _actual_natoms != expected_natoms:
+        raise RuntimeError(
+            f"[OPT] DESALINEACIÓN estado/charge detectada: "
+            f"conformers_xyz={conformers_xyz} tiene {_actual_natoms} átomos "
+            f"por frame, pero se esperaban {expected_natoms} átomos para "
+            f"mol_dir={mol_dir} con charge={charge}. "
+            f"Esto es exactamente el tipo de cruce que produce geometrías "
+            f"como 'opt.inp de 46 átomos con charge de un estado de 49 "
+            f"átomos': el conformers_xyz de un estado de protonación se "
+            f"pasó junto con el charge de otro. Verifica en el nivel de "
+            f"orquestación (el ciclo que itera sobre los estados A/B/C/D/R) "
+            f"que conformers_xyz, mol_dir y charge correspondan todos al "
+            f"mismo estado antes de llamar a stage_opt()."
+        )
 
     log.info(f"[OPT] {len(conformers)} confórmeros disponibles — "
              f"batch {OPT_BATCH_SIZE}x{NPROCS} cores")
@@ -4841,9 +5009,25 @@ def _run_one(args, parser):
         else:
             nconf = select_nconf_auto(conformers_xyz, log)
 
+        # expected_natoms se deriva directamente de mol_xyz: es la molécula
+        # base de ESTE estado de protonación (A/B/C/D/R), la misma que
+        # arrancó CREST para este mol_dir/charge. Si conformers_xyz apunta
+        # al ensemble de otro estado, este número no va a coincidir, y
+        # stage_opt() lo detecta antes de escribir ningún opt.inp.
+        try:
+            _mol_atoms = read(str(mol_xyz))
+            _expected_natoms = len(_mol_atoms)
+        except Exception as e:
+            log.warning(
+                f"[OPT] no se pudo leer {mol_xyz} para derivar expected_natoms "
+                f"({e}); se omite la validación estado/charge."
+            )
+            _expected_natoms = None
+
         opt_dirs = stage_opt(
             conformers_xyz, mol_dir, args.charge, nconf, log,
             conf_ids=boltz_conf_ids if boltz_conf_ids else None,
+            expected_natoms=_expected_natoms,
         )
         if not opt_dirs:
             log.error("Ningún confórmero optimizado correctamente. Abortando.")
