@@ -66,25 +66,25 @@ MÓDULOS DE ANÁLISIS
 USO
 ═══════════════════════════════════════════════════════════════════════════════
 
-  python results_collector.py                                   # --mol MGLYVAL (default), modo compare
-  python results_collector.py --mol MGLYVAL                     # compara TODOS los estados de protonación
-  python results_collector.py --mol MGLYVAL --plot
-  python results_collector.py --mol MGLYVAL --export xlsx
-  python results_collector.py --mol MGLYVAL --ref mglyval_neutral
-  python results_collector.py --mol MGLYVAL --state mglyval_neutral        # un solo estado
-  python results_collector.py --mol MGLYVAL --state mglyval_neutral --plot
-  python results_collector.py --pka --acid mglyval_neutral --base mglyval_anion
+  python results_collector.py --mol MGLYVAL --state D            # un estado
+  python results_collector.py --mol MGLYVAL --state D --export xlsx
+  python results_collector.py --mol MGLYVAL --state D --plot
+  python results_collector.py --mol MGLYVAL --compare-states     # todos los estados
+  python results_collector.py --mol MGLYVAL --compare-states --plot
+  python results_collector.py --mol MGLYVAL --compare-states --ref N
+  python results_collector.py --mol MGLYVAL --state D --project-root /home/kmilozeta/PAPER1
 
---mol NAME apunta al proyecto bajo PAPER1/, p.ej. --mol MGLYVAL resuelve a
-  /home/kmilozeta/PAPER1/MGLYVAL/runs/
-Dentro de ese runs/ se autodetectan automáticamente todos los estados de
-protonación disponibles (cualquier subdirectorio con 04_sp/ dentro) y se
-comparan entre sí — este es el modo por defecto (equivalente al antiguo
---compare). Usa --state NAME si en cambio quieres analizar un único estado
-de protonación en detalle.
+Estructura de carpetas esperada:
+  <PROJECT_ROOT>/<MOL>/runs/<state>/04_sp/conf_xxx/sp.out
+  <PROJECT_ROOT>/<MOL>/runs/<state>/02_opt/conf_xxx/opt.out
+  <PROJECT_ROOT>/<MOL>/runs/<state>/03_numfreq/conf_xxx/freq.out
+  <PROJECT_ROOT>/<MOL>/runs/<state>/05_tddft/conf_xxx/tddft.out
+donde <MOL> es la molecula (p.ej. MGLYVAL) y <state> es el estado de
+protonacion o condicion (p.ej. D, N). PROJECT_ROOT por defecto es
+/home/kmilozeta/PAPER1 y puede sobreescribirse con --project-root.
 
 Para el pKa, cada estado debe tener un SP en fase gas bajo:
-  runs/<estado>/06_sp_gas/conf_<best>/sp_gas.out
+  <MOL>/runs/<state>/06_sp_gas/conf_<best>/sp_gas.out
 (calcular con el mismo funcional/base que el SP acuoso pero sin CPCM)
 """
 
@@ -107,8 +107,17 @@ except ImportError:
 #  CONSTANTES
 # ─────────────────────────────────────────────
 
-WORK_ROOT       = Path("runs")     # se reasigna en main() vía resolve_work_root()
-PAPER1_ROOT     = Path("/home/kmilozeta/PAPER1")
+# Raíz del proyecto donde viven las carpetas de cada molécula, p.ej.:
+#   PROJECT_ROOT/MGLYVAL/runs/<state>/04_sp/conf_xxx/...
+# Se puede sobrescribir con --project-root; por defecto usa la ruta real
+# del sistema de kmilozeta.
+PROJECT_ROOT    = Path("/home/kmilozeta/PAPER1")
+
+# WORK_ROOT se recalcula en main() a partir de --mol como
+#   PROJECT_ROOT / <MOL> / "runs"
+# y cada "state" (antes llamado mol_name en todo el código) es un
+# subdirectorio de WORK_ROOT: WORK_ROOT / <state> / 04_sp / conf_xxx / ...
+WORK_ROOT       = Path("runs")
 HARTREE_TO_KCAL = 627.5094740631
 HARTREE_TO_KJ   = HARTREE_TO_KCAL * 4.184
 HARTREE_TO_EV   = 27.211396132
@@ -141,7 +150,7 @@ PKA_GAS_SP_SUBDIR = "06_sp_gas"
 # ── Constantes Multiwfn / ESP de superficie ─────────────────────────────────
 # Ejecutables (rutas completas — mismo criterio que ORCA: nunca confiar en PATH)
 ORCA_2MKL_BIN   = "/home/kmilozeta/orca_6_1_1_avx2/orca_2mkl"
-MULTIWFN_BIN    = "/home/kmilozeta/multiwfn/Multiwfn"
+MULTIWFN_BIN    = "/home/kmilozeta/multiwfn/Multiwfn_2026.6.2_bin_Linux/Multiwfn"
 
 # Subcarpeta del pipeline donde vive la función de onda de cada confórmero
 # (el .gbw usado para el análisis ESP es el de la etapa TDDFT: runs/<mol>/05_tddft/conf_XXX/)
@@ -154,7 +163,14 @@ ESP_SUBDIR        = "esp_multiwfn"
 # (mapeo + búsqueda de extremos sobre miles de puntos) puede tardar varios
 # minutos por confórmero según el tamaño de la molécula y la densidad de malla.
 ORCA_2MKL_TIMEOUT = 120     # s
-MULTIWFN_TIMEOUT  = 900     # s — 15 min por confórmero
+MULTIWFN_TIMEOUT  = 21600   # s — 6 h por confórmero (ESP puede demorar bastante)
+
+# Multiwfn respeta OMP_NUM_THREADS para paralelizar el análisis de superficie
+# ESP (mapeo de malla + búsqueda de extremos). Por defecto hereda el entorno
+# del proceso padre, que puede estar limitado a 2. Ajustar según núcleos
+# disponibles en la máquina (ver también compquim-kmilozeta: MKL/OpenBLAS a 1
+# para evitar sobre-suscripción cuando Multiwfn ya reparte con OMP).
+MULTIWFN_NTHREADS = 8
 
 
 # ─────────────────────────────────────────────
@@ -1254,55 +1270,6 @@ def print_pka_analysis(pka_result: dict, mol_acid: str, mol_base: str):
 #  COLECTOR PRINCIPAL
 # ─────────────────────────────────────────────
 
-def resolve_work_root(mol_name: str) -> Path:
-    """
-    Resuelve el directorio runs/ del proyecto a partir de --mol.
-
-    --mol ahora identifica el proyecto bajo PAPER1/ (p.ej. --mol MGLYVAL),
-    no un estado de protonación individual. Se resuelve a:
-
-        /home/kmilozeta/PAPER1/<MOL_NAME.upper()>/runs/
-
-    Si esa ruta no existe, se intenta como fallback interpretar mol_name
-    directamente como una ruta (relativa o absoluta) a un directorio runs/
-    ya existente, para no romper flujos antiguos que corrían el script
-    desde dentro del proyecto con `runs/` local.
-    """
-    project_dir = PAPER1_ROOT / mol_name.upper()
-    candidate = project_dir / "runs"
-    if candidate.is_dir():
-        return candidate
-
-    fallback = Path(mol_name)
-    if fallback.is_dir():
-        warnings.warn(
-            f"[resolve_work_root] {candidate} no existe; usando fallback "
-            f"'{fallback}' (¿corriendo desde dentro del proyecto?)"
-        )
-        return fallback
-
-    raise FileNotFoundError(
-        f"No se encontró runs/ para --mol {mol_name!r}. Se esperaba: "
-        f"{candidate}\n"
-        f"Estructura esperada: PAPER1/{mol_name.upper()}/runs/<estado>/04_sp/..."
-    )
-
-
-def detect_protonation_states(work_root: Path) -> list[str]:
-    """
-    Autodetecta todos los estados de protonación disponibles dentro de
-    work_root: cualquier subdirectorio que contenga al menos 04_sp/
-    (la etapa mínima para tener energías utilizables) se considera un
-    estado válido.
-    """
-    if not work_root.exists():
-        return []
-    return sorted(
-        p.name for p in work_root.iterdir()
-        if p.is_dir() and (p / "04_sp").exists()
-    )
-
-
 def collect_results(mol_name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Devuelve (df_conf, df_tddft) con todos los campos enriquecidos:
@@ -1481,15 +1448,12 @@ def compare_protonation_states(
 
     Retorna DataFrame de comparación.
     """
-    mols = detect_protonation_states(WORK_ROOT)
+    mols = sorted(p.name for p in WORK_ROOT.iterdir()
+                  if p.is_dir() and (p / "04_sp").exists())
 
     if not mols:
-        print(f"No se encontraron estados de protonación con resultados SP "
-              f"bajo {WORK_ROOT}/")
+        print("No se encontraron resultados SP en ninguna molécula bajo runs/")
         return pd.DataFrame()
-
-    print(f"  Estados de protonación detectados en {WORK_ROOT}: "
-          f"{', '.join(mols)}")
 
     rows = []
     dfs_conf: dict[str, pd.DataFrame] = {}
@@ -1796,6 +1760,7 @@ def plot_comparison(dfs_conf: dict, dfs_tddft: dict,
 # ═══════════════════════════════════════════════════════════════════════════════
 
 import json
+import os
 import subprocess
 import sys
 
@@ -2839,8 +2804,22 @@ MULTIWFN_ESP_MENU_START          = "0"   # Start analysis now! (ESP es la funci�
 MULTIWFN_ESP_MENU_EXPORT_EXTREMA = "2"   # Exportar extremos de superficie a archivo
                                           # (deliberadamente NO la opción de "ver"/mostrar
                                           #  en consola -- esa es la que se queda pegada)
-MULTIWFN_ESP_MENU_RETURN         = "0"   # volver al menú de superficie / al menú principal
+MULTIWFN_ESP_MENU_BACK            = "q"   # volver un nivel de menú
 MULTIWFN_ESP_MENU_QUIT           = "q"   # salir de Multiwfn limpiamente
+
+# NOTA IMPORTANTE (bug encontrado 2026-07-16): en el menú de post-análisis de
+# superficie, la opción numerada "0" NO es un "volver" genérico -- antes de
+# correr el análisis "0" = "Start analysis now!", pero UNA VEZ que el análisis
+# ya corrió, ese mismo "0" cambia de significado a "Enter the graphical
+# interface" (abre una ventana GUI de visualización que solo se cierra con
+# clic manual en "Return" dentro de la ventana; ver sobereva.com/196, sección
+# 2: "此时会看到后处理菜单。选选项0进入图形界面"). Bajo subprocess.run(input=...)
+# sin display interactivo, Multiwfn se queda esperando esa interacción para
+# siempre -- este era el punto exacto donde el pipeline se colgaba (justo
+# después de exportar el .pdb con la opción "2", que sí es no-interactiva y
+# termina normalmente). La convención correcta de Multiwfn para retroceder de
+# nivel de menú es "q", nunca un número -- los números son siempre opciones
+# de menú específicas del contexto.
 
 
 def _build_multiwfn_esp_batch() -> str:
@@ -2853,14 +2832,15 @@ def _build_multiwfn_esp_batch() -> str:
     el timing exacto de cada prompt deja de importar; lo único que importa es
     que la SECUENCIA de respuestas sea correcta. Se evita explícitamente
     cualquier comando de "ver"/"mostrar en consola" (ver docstring del
-    módulo) usando en su lugar el comando de EXPORTAR a archivo.
+    módulo) usando en su lugar el comando de EXPORTAR a archivo, y se evita
+    reusar "0" para "volver" (ver nota arriba) usando "q" en su lugar.
     """
     commands = [
         MULTIWFN_ESP_MENU_MAIN,              # 1. entrar a análisis cuantitativo de superficie
         MULTIWFN_ESP_MENU_START,              # 2. iniciar análisis (imprime resumen: min/max/área/...)
         MULTIWFN_ESP_MENU_EXPORT_EXTREMA,     # 3. exportar extremos a archivo (NO "ver" en consola)
-        MULTIWFN_ESP_MENU_RETURN,             # 4. volver al menú de superficie
-        "0",                                  # 5. volver al menú principal
+        MULTIWFN_ESP_MENU_BACK,               # 4. volver al menú de función 12 (NO "0" -- eso abre la GUI)
+        MULTIWFN_ESP_MENU_BACK,               # 5. volver al menú principal de Multiwfn
         MULTIWFN_ESP_MENU_QUIT,               # 6. salir de Multiwfn
     ]
     return "\n".join(commands) + "\n"
@@ -3014,6 +2994,15 @@ def run_multiwfn_esp_on_conf(conf_dir: Path) -> dict:
 
     batch = _build_multiwfn_esp_batch()
 
+    # OMP_NUM_THREADS controla la paralelización interna de Multiwfn para el
+    # análisis de superficie ESP. MKL/OpenBLAS se fijan a 1 para evitar
+    # sobre-suscripción de núcleos (mismo criterio que el resto del pipeline
+    # de compquim-kmilozeta).
+    multiwfn_env = os.environ.copy()
+    multiwfn_env["OMP_NUM_THREADS"] = str(MULTIWFN_NTHREADS)
+    multiwfn_env["MKL_NUM_THREADS"] = "1"
+    multiwfn_env["OPENBLAS_NUM_THREADS"] = "1"
+
     try:
         proc = subprocess.run(
             [MULTIWFN_BIN, str(molden_path)],
@@ -3021,6 +3010,7 @@ def run_multiwfn_esp_on_conf(conf_dir: Path) -> dict:
             capture_output=True, text=True,
             timeout=MULTIWFN_TIMEOUT,
             cwd=str(esp_dir),
+            env=multiwfn_env,
         )
     except subprocess.TimeoutExpired as exc:
         # Aunque haya vencido el timeout, guardamos lo que alcanzó a
@@ -3391,7 +3381,8 @@ def compare_adc2_tddft(
     Retorna DataFrame con una fila por molécula.
     """
     if mols is None:
-        mols = detect_protonation_states(WORK_ROOT)
+        mols = sorted(p.name for p in WORK_ROOT.iterdir()
+                      if p.is_dir() and (p / "04_sp").exists())
 
     rows = []
     for mol in mols:
@@ -3824,34 +3815,34 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Ejemplos:
-  python results_collector.py                                # --mol MGLYVAL, compara todos los estados
-  python results_collector.py --mol MGLYVAL                  # idem, explícito
-  python results_collector.py --mol MGLYVAL --export xlsx --plot
-  python results_collector.py --mol MGLYVAL --ref mglyval_neutral
-  python results_collector.py --mol MGLYVAL --state mglyval_neutral
-  python results_collector.py --mol MGLYVAL --state mglyval_neutral --goodvibes --export csv
-
---mol NAME resuelve /home/kmilozeta/PAPER1/NAME/runs/ y autodetecta ahí
-todos los estados de protonación (subdirectorios con 04_sp/). Ese es el
-modo por defecto (compare). Usa --state para analizar un único estado.
+  python results_collector.py --mol MGLYVAL --state D
+  python results_collector.py --mol MGLYVAL --state D --export xlsx --plot
+  python results_collector.py --mol MGLYVAL --state D --goodvibes
+  python results_collector.py --mol MGLYVAL --state D --goodvibes --export csv
+  python results_collector.py --mol MGLYVAL --state D --esp --export xlsx
+  python results_collector.py --mol MGLYVAL --compare-states
+  python results_collector.py --mol MGLYVAL --compare-states --plot --ref N
+  python results_collector.py --mol MGLYVAL --state D --project-root /home/kmilozeta/PAPER1
         """,
     )
 
-    parser.add_argument("--mol",     metavar="NAME", default="MGLYVAL",
-                        help="proyecto bajo PAPER1/ (ej. MGLYVAL -> "
-                             "/home/kmilozeta/PAPER1/MGLYVAL/runs/). "
-                             "Default: MGLYVAL")
-    parser.add_argument("--state",   metavar="NAME", default=None,
-                        help="analizar un único estado de protonación "
-                             "(subdirectorio de runs/) en vez del modo "
-                             "comparación por defecto")
-    parser.add_argument("--compare", action="store_true",
-                        help="(deprecado, ya no es necesario) comparar todos "
-                             "los estados de protonación — es el comportamiento "
-                             "por defecto cuando no se pasa --state")
+    parser.add_argument("--mol", metavar="MOL", required=True,
+                        help="nombre de la molecula (carpeta bajo "
+                             "PROJECT_ROOT/<MOL>/runs/), p.ej. MGLYVAL")
+    parser.add_argument("--project-root", metavar="PATH", default=None,
+                        help=f"raiz del proyecto donde vive <MOL>/runs/ "
+                             f"(default: {PROJECT_ROOT})")
+
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--state",   metavar="NAME",
+                      help="analizar un solo estado de protonacion "
+                           "(nombre del directorio en <MOL>/runs/), p.ej. D")
+    mode.add_argument("--compare-states", action="store_true",
+                      help="comparar todos los estados de protonacion "
+                           "disponibles en <MOL>/runs/")
 
     parser.add_argument("--ref",    metavar="NAME", default=None,
-                        help="estado de referencia para dE relativa (modo compare)")
+                        help="estado de referencia para dE relativa (solo con --compare-states)")
     parser.add_argument("--export", choices=["csv", "xlsx", "both"], default=None,
                         help="exportar tablas")
     parser.add_argument("--plot",   action="store_true",
@@ -3860,13 +3851,19 @@ modo por defecto (compare). Usa --state para analizar un único estado.
                         help="correr GoodVibes (mRRHO Grimme) sobre cada "
                              "freq.out y comparar contra el G_corr de ORCA "
                              "(solo con --state). Imprime y exporta el apendice "
-                             "de comparacion a runs/<estado>/.")
+                             "de comparacion a <MOL>/runs/<state>/.")
     parser.add_argument("--adc2",   action="store_true",
                         help="extraer lambda_max ADC(2) y comparar con TD-DFT. "
                              "Con --state: analiza ese estado. "
-                             "En modo compare (default): compara todos los "
-                             "estados y evalua la sistematicidad del "
-                             "desplazamiento TDDFT-ADC2.")
+                             "Con --compare-states: compara todos los estados y "
+                             "evalua la sistematicidad del desplazamiento "
+                             "TDDFT-ADC2.")
+    parser.add_argument("--esp",    action="store_true",
+                        help="correr analisis ESP de superficie molecular via "
+                             "Multiwfn (orca_2mkl -> molden -> Multiwfn) sobre "
+                             "cada conf_* de 05_tddft/ (solo con --state). "
+                             "Imprime y exporta el resumen ESP_min/ESP_max/MPI "
+                             "a <MOL>/runs/<state>/.")
     parser.add_argument("--sigma",  type=float, default=20.0,
                         help="anchura Gaussiana en nm para los plots (default: 20)")
     parser.add_argument("--xmin",   type=float, default=200.0,
@@ -3875,15 +3872,21 @@ modo por defecto (compare). Usa --state para analizar un único estado.
                         help="limite superior del eje lambda en nm (default: 500)")
     args = parser.parse_args()
 
+    # ── Resolver WORK_ROOT = PROJECT_ROOT / <MOL> / "runs" ──────────────────
+    global WORK_ROOT
+    project_root = Path(args.project_root) if args.project_root else PROJECT_ROOT
+    WORK_ROOT = project_root / args.mol / "runs"
+
+    if not WORK_ROOT.exists():
+        parser.error(
+            f"No se encontro la carpeta de runs para la molecula '{args.mol}': "
+            f"{WORK_ROOT}\n"
+            f"Verifica --mol y/o --project-root (default: {PROJECT_ROOT})."
+        )
+
     x_range = (args.xmin, args.xmax)
 
-    # ── Resolver runs/ del proyecto a partir de --mol ──────────────────────
-    global WORK_ROOT
-    WORK_ROOT = resolve_work_root(args.mol)
-    print(f"  Proyecto: {args.mol.upper()}  →  runs/: {WORK_ROOT}")
-
     if args.state:
-        # ── Modo estado único (comportamiento del antiguo --mol) ──────────
         df_conf, df_tddft = collect_results(args.state)
         print_summary(df_conf, df_tddft, args.state)
 
@@ -3905,7 +3908,7 @@ modo por defecto (compare). Usa --state para analizar un único estado.
                           sigma=args.sigma, x_range=x_range)
         if args.goodvibes:
             print(f"\n{chr(9472)*74}")
-            print(f"  GOODVIBES (mRRHO Grimme) vs ORCA (RRHO) -- {args.state}")
+            print(f"  GOODVIBES (mRRHO Grimme) vs ORCA (RRHO) -- {args.mol}/{args.state}")
             print(f"{chr(9472)*74}")
             gv_results = run_goodvibes_on_mol(args.state)
             df_gv = compute_gv_appendix(args.state, df_conf, gv_results)
@@ -3913,8 +3916,14 @@ modo por defecto (compare). Usa --state para analizar un único estado.
             if args.export:
                 export_gv_appendix(df_gv, args.state, args.export)
 
-    else:
-        # ── Modo compare (default): autodetecta todos los estados ─────────
+        if args.esp:
+            esp_results = run_multiwfn_esp_on_mol(args.state)
+            df_esp = compute_esp_summary_df(df_conf, esp_results)
+            print_esp_summary(df_esp, args.state)
+            if args.export:
+                export_esp_results(df_esp, args.state, args.export)
+
+    elif args.compare_states:
         result = compare_protonation_states(ref_mol=args.ref)
         if isinstance(result, tuple):
             df_cmp, dfs_conf, dfs_tddft = result

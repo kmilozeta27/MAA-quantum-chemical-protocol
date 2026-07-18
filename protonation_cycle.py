@@ -1500,24 +1500,52 @@ def compute_pka(
         result["G_total_acid_Eh"] = G_total_acid
         result["G_total_base_Eh"] = G_total_base
 
-        use_born_macro = (method == "born")
+        if method == "born":
+            use_born_macro = True
+        elif method == "direct":
+            use_born_macro = False
+        else:  # "auto"
+            # Exacto sin SP de fase gas, por la derivación algebraica de
+            # arriba: el ciclo de Born se reduce a la misma resta CPCM que
+            # 'direct', solo con la constante G_HPLUS_AQ_BORN en vez de
+            # G_HPLUS_AQ_DIRECT. No hay razón para que 'auto' degrade a
+            # 'direct' aquí — a diferencia de la rama simple, donde 'auto'
+            # SÍ depende de si existen los SP de fase gas.
+            use_born_macro = True
+
         if use_born_macro:
             result["G_hplus_aq_kcal"] = G_HPLUS_AQ_BORN
             result["method"] = "born"
-            _warn(
-                f"method='born' with a combined neutral+zwitterion macrostate "
-                f"({mol_acid if data_acid.get('is_macrostate') else mol_base}): "
-                f"no gas-phase SP is used (or needed) for the mixture. ΔG_aq "
-                f"is obtained via the algebraic reduction of the Born cycle "
-                f"to G_total_CPCM(base) − G_total_CPCM(acid) + G_HPLUS_AQ_BORN "
-                f"— the same reduction that already applies to a single "
-                f"species in this script, since the E_gas terms cancel "
-                f"identically (see the derivation note above "
-                f"compute_pka_montecarlo())."
-            )
+            if method == "auto":
+                _warn(
+                    f"method='auto' resolved to 'born' for the combined "
+                    f"neutral+zwitterion macrostate "
+                    f"({mol_acid if data_acid.get('is_macrostate') else mol_base}): "
+                    f"no gas-phase SP is needed here (see derivation note "
+                    f"above), so 'born' is used exactly, same as it would be "
+                    f"for a single species with gas-phase SPs available."
+                )
+            else:
+                _warn(
+                    f"method='born' with a combined neutral+zwitterion macrostate "
+                    f"({mol_acid if data_acid.get('is_macrostate') else mol_base}): "
+                    f"no gas-phase SP is used (or needed) for the mixture. ΔG_aq "
+                    f"is obtained via the algebraic reduction of the Born cycle "
+                    f"to G_total_CPCM(base) − G_total_CPCM(acid) + G_HPLUS_AQ_BORN "
+                    f"— the same reduction that already applies to a single "
+                    f"species in this script, since the E_gas terms cancel "
+                    f"identically (see the derivation note above "
+                    f"compute_pka_montecarlo())."
+                )
         else:
             result["G_hplus_aq_kcal"] = G_HPLUS_AQ_DIRECT
             result["method"] = "direct"
+            if method == "direct":
+                _warn(
+                    f"method='direct' explicitly requested for the combined "
+                    f"neutral+zwitterion macrostate "
+                    f"({mol_acid if data_acid.get('is_macrostate') else mol_base})."
+                )
 
         dG_aq_kcal = (
             (G_total_base - G_total_acid) * HARTREE_TO_KCAL
@@ -2588,7 +2616,8 @@ def print_pka_summary(pka_list: list):
     print(f"  de Tissandier/Kelly usada en 'born', que está calibrada para SP en")
     print(f"  fase gas pura. Cada método usa su propia referencia del protón.")
     print(f"  Los pasos que involucran el macroestado neutro/zwitterión combinado")
-    print(f"  siempre usan 'direct' (ver advertencias arriba si pediste 'born').")
+    print(f"  resuelven method='auto' a 'born' (exacto, sin SP fase gas — ver")
+    print(f"  advertencias arriba). Con --method direct explícito usan 'direct'.")
     print(f"{sep}\n")
 
 
@@ -2602,14 +2631,17 @@ def _cross_validate_ph_scale(
     """
     Diagnóstico de consistencia de escala de energía libre del protón.
 
-    Problema que resuelve: pKa₁ (R/D→B) SIEMPRE usa method='direct' porque
-    el lado ácido es un macroestado (ver rama is_macrostate en compute_pka),
-    mientras que pKa₂ (B→C) usa method='auto' y puede resolver a 'born' si
-    hay SP fase gas para B y C. 'direct' y 'born' usan constantes G(H⁺,aq)
-    distintas y NO intercambiables (Pliego & Riveros −264.61 kcal/mol vs.
-    Tissandier/Kelly −272.18 kcal/mol) — sumar un pKa 'direct' con un pKa
-    'born' en la misma cadena mezcla dos escalas de referencia del protón
-    sin que nada lo señale.
+    Problema que resuelve: con method='auto', pKa₁ (R/D→B, macroestado) y
+    pKa₂ (B→C, simple) pueden resolver a métodos distintos. pKa₁ resuelve a
+    'born' siempre que involucre el macroestado (exacto ahí, sin necesitar
+    SP fase gas — ver rama is_macrostate en compute_pka), mientras que pKa₂
+    depende de si existen SP fase gas para B y C. 'direct' y 'born' usan
+    constantes G(H⁺,aq) distintas y NO intercambiables (Pliego & Riveros
+    −264.61 kcal/mol vs. Tissandier/Kelly −272.18 kcal/mol) — sumar un pKa
+    'direct' con un pKa 'born' en la misma cadena mezcla dos escalas de
+    referencia del protón. Bajo method='auto' esto ahora se trata como error
+    duro en el caller (ver chequeo tras _cross_validate_ph_scale más abajo),
+    no solo como diagnóstico.
 
     Esta función NO reemplaza el resultado ya calculado (`result`); solo
     lo audita. Si `result['method'] == 'born'`, recalcula el mismo par
@@ -3920,6 +3952,33 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
         )
         if ph_scale_diag.get("applicable"):
             _print_ph_scale_diagnostic(ph_scale_diag, label="pKa₂ (B→C)")
+
+        # Con method='auto', pKa1 (macroestado) y pKa2 (simple) pueden ahora
+        # resolver a métodos distintos ('born' vs 'direct') dependiendo de si
+        # existen SP de fase gas para B y C. Antes esto quedaba escondido
+        # porque pKa1 SIEMPRE caía a 'direct' (bug ya corregido arriba); con
+        # el fix, mezclar 'born' (G_HPLUS_AQ_BORN) y 'direct'
+        # (G_HPLUS_AQ_DIRECT) en la misma cadena de pKa's suma dos escalas de
+        # G(H+,aq) no intercambiables sin que nada lo señale. Se aborta en
+        # vez de solo advertir.
+        if (args.method == "auto" and pka1_result is not None
+                and pka1_result.get("ok") and pka2_result.get("ok")
+                and pka1_result.get("method") != pka2_result.get("method")):
+            raise SystemExit(
+                f"\n❌ INCONSISTENT G(H+,aq) REFERENCE within the same pKa "
+                f"chain under method='auto':\n"
+                f"   pKa₁ ([R/D]→{args.anion}) resolved to "
+                f"'{pka1_result.get('method')}'\n"
+                f"   pKa₂ ({args.anion}→{args.dianion}) resolved to "
+                f"'{pka2_result.get('method')}'\n"
+                f"   These use different, non-interchangeable G(H+,aq) "
+                f"constants (Pliego-Riveros {G_HPLUS_AQ_DIRECT:.2f} kcal/mol "
+                f"vs. Tissandier/Kelly {G_HPLUS_AQ_BORN:.2f} kcal/mol).\n"
+                f"   Fix: either provide gas-phase SPs for all species in the "
+                f"chain (so 'auto' resolves to 'born' everywhere), or force "
+                f"a single method explicitly with --method direct or "
+                f"--method born."
+            )
 
     # Nota #8 del review: reconstruye tautómero+macroestado y recalcula
     # pKa0/1/2 en las 4 T de TEMPS_K (no solo re-evalúa RT·ln10 a T fija).
