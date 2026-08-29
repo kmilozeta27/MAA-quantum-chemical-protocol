@@ -2565,6 +2565,138 @@ def extract_conformers_by_id(
 
 
 # ─────────────────────────────────────────────
+#  CENSO STANDALONE (--censo-standalone)
+# ─────────────────────────────────────────────
+#
+# Motivación (ago 2026): Kmilo seguía invocando `censo` pelado a mano en la
+# terminal para correr un ensemble suelto (fuera del flujo CREST->pipeline),
+# perdiendo con eso TODO el aislamiento de cores que stage_censo_prescreen()
+# ya tiene resuelto (taskset -c sobre un pool que evita mezclar SMT/E-core/
+# LP-core, OMP_NUM_THREADS=maxcores + MKL/OPENBLAS_NUM_THREADS=1, lockfile
+# para no relanzar sobre un CENSO que ya sigue vivo). Resultado medido: los
+# mismos síntomas que ya se habían diagnosticado y arreglado una vez —
+# varios sub-jobs de CENSO compitiendo por los mismos cores físicos en vez
+# de repartirse el pool completo, con throttling térmico de por medio.
+#
+# run_censo_standalone() NO reimplementa nada nuevo: arma el mismo `cmd` y
+# usa exactamente el mismo trío _acquire_cpu_pool() + build_omp_env(...,
+# set_pe_list=False) + _run_censo_locked() que ya usan los dos call-sites
+# reales de CENSO (lanzamiento limpio y --reload, ver stage_censo_prescreen
+# más arriba). A diferencia de stage_censo_prescreen(), a propósito NO
+# hace diagnóstico/recovery de corridas parciales previas — es un modo para
+# invocaciones manuales puntuales sobre un ensemble ya filtrado o crudo, no
+# para el flujo automatizado completo del pipeline (para eso, seguir usando
+# el pipeline normal, que sí hace recovery).
+def run_censo_standalone(input_xyz: Path, charge: int, out_dir: Path,
+                          temperature: float, maxcores: int,
+                          log: logging.Logger) -> bool:
+    """
+    Corre CENSO (--prescreening --screening) sobre `input_xyz` dentro de
+    `out_dir`, con el mismo aislamiento de cores que usa el pipeline
+    completo para CENSO. Devuelve True si CENSO terminó con returncode 0
+    (independientemente de si se pudo localizar un ensemble de salida
+    reconocible — eso solo afecta el nivel del log final).
+    """
+    owner_pid = _censo_lock_owner(out_dir, log)
+    if owner_pid is not None:
+        log.error(
+            f"[CENSO-STANDALONE]  ✗  ya hay un proceso CENSO activo sobre "
+            f"{out_dir} (PID {owner_pid}) — no se relanza para no pisarle "
+            f"el trabajo (este era exactamente el bug de relanzamientos "
+            f"duplicados ya diagnosticado antes). Espera a que termine o "
+            f"revisa si el lock quedó huérfano."
+        )
+        return False
+
+    local_input = out_dir / input_xyz.name
+    if not safe_copy(input_xyz, local_input):
+        log.error(f"[CENSO-STANDALONE]  ✗  no se pudo copiar {input_xyz.name} "
+                  f"a {out_dir}")
+        return False
+
+    cmd = [
+        str(CENSO_BIN),
+        "--prescreening", "--screening",   # sin --screening, CENSO 3.x se
+                                            # detiene tras prescreening
+        "-i", local_input.name,
+        "-c", str(charge),
+        "-u", "0",                        # MULT global siempre 1 (singlete)
+        "--solvent", "water",
+        "--maxcores", str(maxcores),
+        "-T", f"{temperature:.2f}",
+    ]
+
+    log.info(f"[CENSO-STANDALONE]  ▶  lanzando sobre {input_xyz.name} "
+             f"(carga={charge}, T={temperature:.2f} K, maxcores={maxcores}) "
+             f"en {out_dir}" + ("  [nohup]" if USE_NOHUP else ""))
+
+    cpu_pool = _acquire_cpu_pool(maxcores, log, "CENSO-STANDALONE")
+    try:
+        proc = _run_censo_locked(
+            cmd, out_dir, out_dir / "censo.log",
+            build_omp_env(maxcores, cpu_list=cpu_pool, set_pe_list=False),
+            CENSO_TIMEOUT_HOURS,
+            cpu_list=cpu_pool,
+        )
+    except subprocess.TimeoutExpired:
+        log.error(f"[CENSO-STANDALONE]  ✗  TIMEOUT ({CENSO_TIMEOUT_HOURS} h)")
+        return False
+    except FileNotFoundError as e:
+        if "taskset" in str(e):
+            log.error("[CENSO-STANDALONE]  ✗  no se encontró 'taskset' en PATH "
+                      "(paquete util-linux)")
+        else:
+            log.error(f"[CENSO-STANDALONE]  ✗  no se encontró el ejecutable "
+                      f"({CENSO_BIN}) — ¿'conda activate sciencebitch'?")
+        return False
+    finally:
+        _cpu_lock_release()
+
+    if proc.returncode != 0:
+        log.error(f"[CENSO-STANDALONE]  ✗  CENSO terminó con returncode="
+                  f"{proc.returncode} — revisa {out_dir / 'censo.log'}")
+        return False
+
+    for _name in ("censo_ensemble_sorted.xyz", "censo_ensemble.xyz",
+                  "crest_conformers_sorted.xyz", "crest_conformers.xyz.sorted"):
+        _p = out_dir / _name
+        if _p.exists() and _p.stat().st_size > 0:
+            log.info(f"[CENSO-STANDALONE]  ✓  ensemble filtrado → {_p}")
+            return True
+
+    log.warning(
+        f"[CENSO-STANDALONE]  ⚠  CENSO terminó (returncode=0) pero no se "
+        f"encontró un ensemble de salida reconocible en {out_dir} — revisa "
+        f"censo.log / 1_SCREENING.out a mano."
+    )
+    return True
+
+
+def _run_censo_standalone_cli(args) -> None:
+    """Punto de entrada de --censo-standalone: valida args, prepara out_dir
+    y logger, y delega en run_censo_standalone(). Sale del proceso con
+    código 0/1 según éxito."""
+    input_xyz = args.censo_standalone.resolve()
+    if not input_xyz.is_file():
+        print(f"ERROR: no existe el ensemble {input_xyz}")
+        raise SystemExit(1)
+
+    out_dir = (args.out.resolve() if args.out
+               else input_xyz.parent / f"{input_xyz.stem}_censo")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    log = setup_logging(out_dir)
+    check_required_bins(log)
+
+    maxcores = args.cores if args.cores else NPROCS_CREST
+    ok = run_censo_standalone(
+        input_xyz=input_xyz, charge=args.charge, out_dir=out_dir,
+        temperature=args.temperature, maxcores=maxcores, log=log,
+    )
+    raise SystemExit(0 if ok else 1)
+
+
+# ─────────────────────────────────────────────
 #  CENSO MULTI-TEMPERATURA
 # ─────────────────────────────────────────────
 
@@ -5198,6 +5330,12 @@ Ejemplos (modo normal):
   # Ver estado de todos los runs
   python pipeline.py --status
 
+  # Correr SOLO CENSO sobre un ensemble ya existente (reemplaza invocar
+  # `censo` a mano en la terminal — arma OMP_NUM_THREADS/MKL/OPENBLAS y
+  # taskset igual que el pipeline completo, evita saturación de cores):
+  python pipeline.py --censo-standalone runs/A/01_crest/crest_conformers.xyz \\
+                      --charge -1 --temperature 274.15 --cores 12
+
 Ejemplos (modo multi-molécula, --mol repetido):
   # Corre B.xyz (carga -1) y luego C.xyz (carga -2), consecutivamente.
   # Cada molécula toma las especificaciones que la siguen en la terminal
@@ -5229,6 +5367,26 @@ Ejemplos (modo multi-molécula, --mol repetido):
                              "sus directorios.")
     parser.add_argument("--status", action="store_true",
                         help="mostrar estado de todos los runs y salir")
+    parser.add_argument(
+        "--censo-standalone", type=Path, default=None, metavar="ENSEMBLE_XYZ",
+        help=(
+            "Corre SOLO CENSO (--prescreening --screening) sobre un ensemble "
+            "multi-XYZ ya existente (p.ej. crest_conformers.xyz), con el "
+            "MISMO aislamiento de cores (taskset + OMP_NUM_THREADS/MKL/"
+            "OPENBLAS + lockfile anti-relanzamiento) que usa el pipeline "
+            "normal para CENSO — evita el problema de invocar `censo` a "
+            "mano sin esas variables, que hace que sature mal los cores y "
+            "arriesgue pisar una corrida anterior sobre el mismo directorio. "
+            "Ignora --mol/--start/--multitemp/etc. Usa --charge (obligatorio "
+            "si != 0), --temperature y --cores (total de cores para CENSO; "
+            "default: mismo NPROCS_CREST del pipeline). Salida en "
+            "<ENSEMBLE_XYZ>_censo/ junto al xyz de entrada, salvo --out."
+        ),
+    )
+    parser.add_argument(
+        "--out", type=Path, default=None, metavar="DIR",
+        help="(solo con --censo-standalone) directorio de salida.",
+    )
     parser.add_argument(
         "--skipnumfreq", action="store_true",
         help=(
@@ -5369,6 +5527,16 @@ Ejemplos (modo multi-molécula, --mol repetido):
 
 
     raw_argv = sys.argv[1:]
+
+    # --censo-standalone es global y de mayor prioridad, igual que --status:
+    # si aparece, se ignora todo lo demas (--mol, --start, --multitemp...) y
+    # solo se corre CENSO sobre el ensemble dado, vía _run_censo_standalone_cli
+    # (que sale del proceso por su cuenta con SystemExit).
+    if "--censo-standalone" in raw_argv:
+        cs_args = parser.parse_args(raw_argv)
+        if cs_args.censo_standalone:
+            _run_censo_standalone_cli(cs_args)
+            return
 
     # --status es global y de mayor prioridad: si aparece en cualquier
     # parte del comando, se ignora todo lo demas (incluyendo --mol
