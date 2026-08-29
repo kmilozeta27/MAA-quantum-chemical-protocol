@@ -175,6 +175,50 @@ MULT       = 1                      # multiplicidad siempre 1
 CREST_TIMEOUT_HOURS = 24.0          # timeout CREST (horas)
 CENSO_TIMEOUT_HOURS = 24.0          # timeout CENSO pre-screening (horas)
 
+# ── Bug nuevo (ago 2026): OMP_NUM_THREADS puesto al tamaño del POOL
+#    completo, no al de CADA sub-job paralelo de CENSO ─────────────────────
+# Hasta ahora, todos los call-sites de CENSO armaban su env con
+# build_omp_env(NPROCS_CREST, ...) -> OMP_NUM_THREADS = str(NPROCS_CREST)
+# (ej. "12"). Pero CENSO congela ENVIRON una sola vez al arrancar (ver
+# comentario extenso junto a build_omp_env() más abajo: "no existe ningún
+# gancho de env-por-tarea expuesto") y pasa ESE MISMO entorno, sin tocar
+# OMP_NUM_THREADS, a CADA sub-job xtb/orca que lanza en paralelo — no
+# reparte el valor entre sub-jobs concurrentes.
+#
+# Con --maxcores 12 y el --omp-min por defecto de CENSO (4), CENSO decide
+# internamente correr n_parallel = maxcores // omp_min = 3 sub-jobs a la
+# vez. Si OMP_NUM_THREADS=12 (el pool completo) en vez de ~4 (lo que le
+# tocaría a CADA uno de esos 3 sub-jobs), los 3 sub-jobs concurrentes piden
+# 12 hilos OpenMP CADA UNO -> 36 hilos compitiendo por los 12 cores
+# confinados por taskset. Eso es sobre-suscripción real (3x), no solo mal
+# reparto del kernel: explica el patrón reportado (12 procesos orca
+# lanzados, pero solo ~6 cores con trabajo útil real, throttling térmico
+# por contención, y sub-jobs pisándose entre sí) incluso con taskset +
+# set_pe_list=False ya aplicados correctamente.
+#
+# Fix: fijar --omp-min explícitamente (en vez de confiar en el default de
+# CENSO) y usar ESE MISMO valor -- no maxcores -- como OMP_NUM_THREADS del
+# env que se le pasa a CENSO. Así el número de hilos que cada sub-job
+# concurrente realmente pide (heredado del ENVIRON congelado) coincide con
+# lo que CENSO asume que le tocó a cada uno, en vez de que cada uno crea
+# que tiene el pool completo para sí solo.
+CENSO_OMP_MIN = 4    # mismo valor que se pasa a --omp-min en el CLI de CENSO
+
+
+def censo_threads_per_job(maxcores: int, omp_min: int = CENSO_OMP_MIN) -> int:
+    """
+    Replica (aproximada) de cómo CENSO reparte maxcores entre sub-jobs
+    paralelos dado --omp-min: n_parallel = maxcores // omp_min sub-jobs
+    corriendo a la vez, cada uno con maxcores // n_parallel hilos OpenMP.
+    Este es el valor que hay que usar como OMP_NUM_THREADS del env que
+    hereda TODO el árbol de CENSO -- no maxcores -- para que cada sub-job
+    concurrente pida la cantidad de hilos que efectivamente le corresponde
+    y no el pool completo (ver comentario junto a CENSO_OMP_MIN arriba).
+    """
+    n_parallel = max(1, maxcores // max(omp_min, 1))
+    return max(1, maxcores // n_parallel)
+
+
 # DEPRECADO (2026-07): reparto manual de slots de cores para los SP/OPT
 # paralelos internos de CENSO (ver MAAQC_CENSO_SLOTS junto a
 # build_omp_env() y partition_cpu_pool_into_slots()). Ya no se usa en
@@ -2111,6 +2155,12 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
                     "-u", "0",
                     "--solvent", "water",
                     "--maxcores", str(NPROCS_CREST),
+                    "--omp-min", str(CENSO_OMP_MIN),   # fijo explícito — ver
+                                                        # CENSO_OMP_MIN arriba;
+                                                        # sin esto, OMP_NUM_THREADS
+                                                        # del env quedaba puesto
+                                                        # al pool completo en vez
+                                                        # de a hilos-por-sub-job
                     "-T", f"{temperature:.2f}",
                     "--reload", str(_recovered_json),
                 ]
@@ -2129,11 +2179,19 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
                     # con otras instancias de pipeline.py corriendo en
                     # paralelo), y el kernel reparte libremente los
                     # sub-jobs internos de CENSO dentro de ese pool.
+                    #
+                    # ago 2026: OMP_NUM_THREADS del env ya NO es NPROCS_CREST
+                    # (el pool completo) sino censo_threads_per_job(...) —
+                    # ver CENSO_OMP_MIN arriba para el porqué (sin esto, cada
+                    # sub-job concurrente de CENSO pedía el pool completo de
+                    # hilos para sí mismo, sobre-suscribiendo 3x el pool
+                    # confinado por taskset).
                     _recover_cpu_pool = _acquire_cpu_pool(NPROCS_CREST, log, "CENSO-RECOVER")
                     _proc = _run_censo_locked(
                         cmd_reload, censo_dir,
                         censo_dir / "censo_recover.log",
-                        build_omp_env(NPROCS_CREST, cpu_list=_recover_cpu_pool,
+                        build_omp_env(censo_threads_per_job(NPROCS_CREST),
+                                       cpu_list=_recover_cpu_pool,
                                        set_pe_list=False),
                         CENSO_TIMEOUT_HOURS,
                         cpu_list=_recover_cpu_pool,
@@ -2266,6 +2324,13 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
         # prog/func/basis se leen de ~/.censo2rc ([prescreening] prog=xtb, func=gfn2, smgsolv=alpb)
         # --prog fue eliminado en CENSO 2.x; ya no se pasa por CLI
         "--maxcores", str(NPROCS_CREST),
+        "--omp-min", str(CENSO_OMP_MIN),   # fijo explícito — ver CENSO_OMP_MIN
+                                            # arriba: sin esto, OMP_NUM_THREADS
+                                            # del env quedaba puesto al pool
+                                            # completo en vez de a hilos-por-
+                                            # sub-job, sobre-suscribiendo el
+                                            # pool confinado por taskset cuando
+                                            # CENSO corre varios sub-jobs a la vez
         "-T", f"{temperature:.2f}",             # temperatura configurable (default 274.15 K = 1°C Antártico)
     ]
 
@@ -2287,10 +2352,24 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
         # scheduler del kernel — set_pe_list=False evita que se le imponga
         # un MAAQC_PE_LIST compartido entre sub-jobs (esa era la causa raíz
         # original del solapamiento, ver Bug #1 junto a build_omp_env()).
+        #
+        # ago 2026: OMP_NUM_THREADS del env ya NO es NPROCS_CREST (el pool
+        # completo) sino censo_threads_per_job(NPROCS_CREST) — ver
+        # CENSO_OMP_MIN arriba. Causa raíz nueva encontrada: CENSO congela
+        # ENVIRON una sola vez y lo hereda IDÉNTICO en cada sub-job
+        # concurrente (no reparte OMP_NUM_THREADS entre ellos), así que con
+        # OMP_NUM_THREADS=pool-completo, cada uno de los N sub-jobs
+        # paralelos pedía el pool completo de hilos para sí — con N=3
+        # (maxcores=12 // omp-min=4), eso es 3x sobre-suscripción real
+        # sobre las 12 CPUs confinadas por taskset, no solo mal reparto del
+        # kernel. Con --omp-min fijo explícito y OMP_NUM_THREADS = hilos-
+        # por-sub-job (4, no 12), cada sub-job pide lo que efectivamente le
+        # corresponde.
         censo_cpu_pool = _acquire_cpu_pool(NPROCS_CREST, log, "CENSO")
         proc = _run_censo_locked(
             cmd, censo_dir, censo_dir / "censo.log",
-            build_omp_env(NPROCS_CREST, cpu_list=censo_cpu_pool,
+            build_omp_env(censo_threads_per_job(NPROCS_CREST),
+                           cpu_list=censo_cpu_pool,
                            set_pe_list=False),
             CENSO_TIMEOUT_HOURS,
             cpu_list=censo_cpu_pool,
@@ -2589,7 +2668,8 @@ def extract_conformers_by_id(
 # el pipeline normal, que sí hace recovery).
 def run_censo_standalone(input_xyz: Path, charge: int, out_dir: Path,
                           temperature: float, maxcores: int,
-                          log: logging.Logger) -> bool:
+                          log: logging.Logger,
+                          omp_min: int = CENSO_OMP_MIN) -> bool:
     """
     Corre CENSO (--prescreening --screening) sobre `input_xyz` dentro de
     `out_dir`, con el mismo aislamiento de cores que usa el pipeline
@@ -2623,18 +2703,29 @@ def run_censo_standalone(input_xyz: Path, charge: int, out_dir: Path,
         "-u", "0",                        # MULT global siempre 1 (singlete)
         "--solvent", "water",
         "--maxcores", str(maxcores),
+        "--omp-min", str(omp_min),        # fijo explícito — ver CENSO_OMP_MIN;
+                                           # debe coincidir con el valor usado
+                                           # para calcular OMP_NUM_THREADS abajo
         "-T", f"{temperature:.2f}",
     ]
 
     log.info(f"[CENSO-STANDALONE]  ▶  lanzando sobre {input_xyz.name} "
-             f"(carga={charge}, T={temperature:.2f} K, maxcores={maxcores}) "
-             f"en {out_dir}" + ("  [nohup]" if USE_NOHUP else ""))
+             f"(carga={charge}, T={temperature:.2f} K, maxcores={maxcores}, "
+             f"omp-min={omp_min}) en {out_dir}"
+             + ("  [nohup]" if USE_NOHUP else ""))
 
     cpu_pool = _acquire_cpu_pool(maxcores, log, "CENSO-STANDALONE")
     try:
+        # OMP_NUM_THREADS = hilos-por-sub-job (censo_threads_per_job), NO
+        # maxcores — ver CENSO_OMP_MIN arriba. Con maxcores el pool
+        # completo, cada uno de los N sub-jobs paralelos que CENSO corre a
+        # la vez pedía el pool completo para sí mismo (CENSO congela
+        # ENVIRON una sola vez y no reparte OMP_NUM_THREADS entre
+        # sub-jobs), sobre-suscribiendo el pool confinado por taskset.
         proc = _run_censo_locked(
             cmd, out_dir, out_dir / "censo.log",
-            build_omp_env(maxcores, cpu_list=cpu_pool, set_pe_list=False),
+            build_omp_env(censo_threads_per_job(maxcores, omp_min),
+                           cpu_list=cpu_pool, set_pe_list=False),
             CENSO_TIMEOUT_HOURS,
             cpu_list=cpu_pool,
         )
@@ -2692,6 +2783,7 @@ def _run_censo_standalone_cli(args) -> None:
     ok = run_censo_standalone(
         input_xyz=input_xyz, charge=args.charge, out_dir=out_dir,
         temperature=args.temperature, maxcores=maxcores, log=log,
+        omp_min=args.omp_min,
     )
     raise SystemExit(0 if ok else 1)
 
@@ -5386,6 +5478,16 @@ Ejemplos (modo multi-molécula, --mol repetido):
     parser.add_argument(
         "--out", type=Path, default=None, metavar="DIR",
         help="(solo con --censo-standalone) directorio de salida.",
+    )
+    parser.add_argument(
+        "--omp-min", type=int, default=CENSO_OMP_MIN, metavar="N",
+        help=(
+            "(solo con --censo-standalone) hilos OpenMP mínimos por "
+            f"sub-job de CENSO — se pasa tal cual a `censo --omp-min` Y se "
+            f"usa para calcular OMP_NUM_THREADS del entorno (nunca el pool "
+            f"completo de --cores; ver CENSO_OMP_MIN en el código para el "
+            f"porqué). Default: {CENSO_OMP_MIN}, igual que el default de CENSO."
+        ),
     )
     parser.add_argument(
         "--skipnumfreq", action="store_true",
