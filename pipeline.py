@@ -219,6 +219,70 @@ def censo_threads_per_job(maxcores: int, omp_min: int = CENSO_OMP_MIN) -> int:
     return max(1, maxcores // n_parallel)
 
 
+def censo_n_parallel_jobs(maxcores: int, omp_min: int = CENSO_OMP_MIN) -> int:
+    """
+    Cuántos sub-jobs corre CENSO en paralelo dado maxcores/omp_min (ver
+    get_cluster() en censo/parallel.py: threads_per_worker = ncores //
+    ompmin, y Dask solo admite tantas tareas concurrentes como el
+    presupuesto de recursos "CPU" alcance). Usado para dimensionar
+    MAAQC_CENSO_SLOTS -- necesitamos exactamente un slot de CPUs por
+    sub-job concurrente posible, ni más ni menos.
+    """
+    return max(1, maxcores // max(omp_min, 1))
+
+
+# ── Bug nuevo (ago 2026, hallado al revisar por qué CENSO seguía
+#    sobre-suscribiendo cores pese a censo_threads_per_job()) ─────────────
+# _acquire_cpu_pool(n_cores, ...) puede devolver una lista MÁS CORTA que
+# n_cores (incluso vacía) cuando otra instancia de pipeline.py ya tiene
+# PUs reservados (ver _cpu_lock_busy_cpus() / assign_cpu_pool()). Pero
+# los tres call-sites que lanzan CENSO seguían usando el valor NOMINAL
+# (NPROCS_CREST / maxcores pedido) tanto para "--maxcores" como para
+# censo_threads_per_job(), nunca len(cpu_pool) (el valor REAL reservado).
+#
+# Con 2+ instancias corriendo a la vez, la segunda podía recibir p.ej.
+# solo 4 PUs (8 ya tomados por la primera) pero seguir lanzando CENSO con
+# --maxcores 12 y OMP_NUM_THREADS=censo_threads_per_job(12,4)=4 — CENSO
+# entonces decide correr 3 sub-jobs concurrentes de 4 hilos c/u (12
+# hilos) sobre un taskset confinado a solo 4 PUs reales: 3x
+# sobre-suscripción real. Peor aún si cpu_pool queda vacío: _run_censo_locked
+# ni siquiera aplica taskset (`if cpu_list:` es falso con lista vacía), así
+# que esa instancia corre sin confinar, pisando lo que sea que la otra use.
+#
+# Fix: reconciliar (--maxcores, --omp-min) contra len(cpu_pool) real
+# DESPUÉS de reservarlo, en vez de asumir que siempre coincide con lo
+# pedido. Si el pool queda vacío, abortar el lanzamiento en vez de correr
+# CENSO sin taskset.
+def _reconcile_censo_budget(requested_cores: int, omp_min: int,
+                             cpu_pool: list[int], log: logging.Logger,
+                             tag: str) -> tuple[int, int]:
+    """
+    Ajusta (effective_maxcores, effective_omp_min) al tamaño REAL de
+    cpu_pool (devuelto por _acquire_cpu_pool()), que puede ser menor que
+    requested_cores si otra instancia de pipeline.py ya reservó PUs.
+
+    Devuelve (0, omp_min) si cpu_pool quedó vacío — el caller debe
+    interpretar maxcores == 0 como señal de abortar el lanzamiento de
+    CENSO (liberando el lock) en vez de correrlo sin taskset.
+    """
+    n_reserved = len(cpu_pool)
+    if n_reserved == 0:
+        log.error(
+            f"[{tag}] pool de CPUs vacío (todo reservado por otra "
+            f"instancia de pipeline.py) — abortando lanzamiento de CENSO "
+            f"en vez de correrlo sin confinar"
+        )
+        return 0, omp_min
+    if n_reserved < requested_cores:
+        log.warning(
+            f"[{tag}] pool reducido: pedidos {requested_cores}, "
+            f"reservados {n_reserved} (otra instancia tiene el resto) — "
+            f"ajustando --maxcores/--omp-min/OMP_NUM_THREADS al valor real "
+            f"en vez de sobre-suscribir el taskset confinado"
+        )
+    return n_reserved, min(omp_min, n_reserved)
+
+
 # DEPRECADO (2026-07): reparto manual de slots de cores para los SP/OPT
 # paralelos internos de CENSO (ver MAAQC_CENSO_SLOTS junto a
 # build_omp_env() y partition_cpu_pool_into_slots()). Ya no se usa en
@@ -2125,12 +2189,32 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
         if _recovered_json is not None:
             # ── Relanzar CENSO con --reload sobre el JSON reconstruido ──────
             local_input = censo_dir / conformers_xyz.name
+            _reload_attempted = False  # default: sin esto, referenciar
+                                        # _reload_attempted más abajo lanzaría
+                                        # NameError si safe_copy falla aquí
             if not safe_copy(conformers_xyz, local_input):
                 log.warning(
                     f"[CENSO-RECOVER]  no se pudo copiar {conformers_xyz.name} "
                     f"— abortando recovery, relanzando limpio"
                 )
             else:
+                # ago 2026: reservar el pool y reconciliarlo ANTES de armar
+                # cmd_reload — mismo fix que en el lanzamiento principal, ver
+                # _reconcile_censo_budget(). Si el pool queda vacío, no se
+                # intenta el --reload: se deja _reload_attempted=False para
+                # que el flujo caiga directo a la limpieza + relanzamiento
+                # normal más abajo (que reconcilia el pool de nuevo, fresco,
+                # sin dejar _diag en un estado inconsistente).
+                _recover_cpu_pool = _acquire_cpu_pool(NPROCS_CREST, log, "CENSO-RECOVER")
+                _eff_maxcores, _eff_omp_min = _reconcile_censo_budget(
+                    NPROCS_CREST, CENSO_OMP_MIN, _recover_cpu_pool, log, "CENSO-RECOVER"
+                )
+                _reload_attempted = _eff_maxcores > 0
+                if not _reload_attempted:
+                    log.error(f"[CENSO-RECOVER]  ✗  sin CPUs disponibles — "
+                              f"se omite --reload, se limpiará la carpeta y "
+                              f"CENSO correrá desde cero")
+            if _reload_attempted:
                 cmd_reload = [
                     str(CENSO_BIN),
                     # FIX (bug del 10 jul): NO pasar "--prescreening" aquí.
@@ -2154,13 +2238,10 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
                     "-c", str(charge),
                     "-u", "0",
                     "--solvent", "water",
-                    "--maxcores", str(NPROCS_CREST),
-                    "--omp-min", str(CENSO_OMP_MIN),   # fijo explícito — ver
-                                                        # CENSO_OMP_MIN arriba;
-                                                        # sin esto, OMP_NUM_THREADS
-                                                        # del env quedaba puesto
-                                                        # al pool completo en vez
-                                                        # de a hilos-por-sub-job
+                    "--maxcores", str(_eff_maxcores),   # ago 2026: reconciliado
+                                                         # contra len(_recover_cpu_pool)
+                                                         # real, no NPROCS_CREST nominal
+                    "--omp-min", str(_eff_omp_min),     # ídem
                     "-T", f"{temperature:.2f}",
                     "--reload", str(_recovered_json),
                 ]
@@ -2311,34 +2392,48 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
                     f"— usando ensemble CREST sin filtrar")
         return conformers_xyz
 
-    cmd = [
-        str(CENSO_BIN),
-        "--prescreening",
-        "--screening",               # FIX: faltaba — sin esto CENSO 3.x corre
-                                      # SOLO prescreening y nunca llega a
-                                      # screening (1_SCREENING.out nunca existe).
-        "-i", local_input.name,
-        "-c", str(charge),
-        "-u", "0",                  # MULT global siempre 1 → singlete, capa cerrada
-        "--solvent", "water",
-        # prog/func/basis se leen de ~/.censo2rc ([prescreening] prog=xtb, func=gfn2, smgsolv=alpb)
-        # --prog fue eliminado en CENSO 2.x; ya no se pasa por CLI
-        "--maxcores", str(NPROCS_CREST),
-        "--omp-min", str(CENSO_OMP_MIN),   # fijo explícito — ver CENSO_OMP_MIN
-                                            # arriba: sin esto, OMP_NUM_THREADS
-                                            # del env quedaba puesto al pool
-                                            # completo en vez de a hilos-por-
-                                            # sub-job, sobre-suscribiendo el
-                                            # pool confinado por taskset cuando
-                                            # CENSO corre varios sub-jobs a la vez
-        "-T", f"{temperature:.2f}",             # temperatura configurable (default 274.15 K = 1°C Antártico)
-    ]
-
     log.info(f"[CENSO]  ▶  lanzando pre-screening sobre {conformers_xyz.name} "
              f"(carga={charge}, T={temperature:.2f} K)"
              + ("  [nohup]" if USE_NOHUP else ""))
     t0 = time.time()
     try:
+        # ago 2026: reservar el pool ANTES de armar --maxcores/--omp-min —
+        # ver _reconcile_censo_budget() arriba. Sin esto, --maxcores usaba
+        # siempre NPROCS_CREST nominal aunque censo_cpu_pool viniera más
+        # chico (otra instancia de pipeline.py con PUs ya reservados),
+        # causando que CENSO programe más sub-jobs concurrentes / más
+        # hilos por sub-job de los que el taskset confinado realmente
+        # soporta.
+        censo_cpu_pool = _acquire_cpu_pool(NPROCS_CREST, log, "CENSO")
+        eff_maxcores, eff_omp_min = _reconcile_censo_budget(
+            NPROCS_CREST, CENSO_OMP_MIN, censo_cpu_pool, log, "CENSO"
+        )
+        if eff_maxcores == 0:
+            _cpu_lock_release()
+            log.error(f"[CENSO]  ✗  sin CPUs disponibles — "
+                      f"usando ensemble CREST sin filtrar")
+            return conformers_xyz
+
+        cmd = [
+            str(CENSO_BIN),
+            "--prescreening",
+            "--screening",               # FIX: faltaba — sin esto CENSO 3.x corre
+                                          # SOLO prescreening y nunca llega a
+                                          # screening (1_SCREENING.out nunca existe).
+            "-i", local_input.name,
+            "-c", str(charge),
+            "-u", "0",                  # MULT global siempre 1 → singlete, capa cerrada
+            "--solvent", "water",
+            # prog/func/basis se leen de ~/.censo2rc ([prescreening] prog=xtb, func=gfn2, smgsolv=alpb)
+            # --prog fue eliminado en CENSO 2.x; ya no se pasa por CLI
+            "--maxcores", str(eff_maxcores),    # ago 2026: reconciliado contra
+                                                 # len(censo_cpu_pool) real, no
+                                                 # NPROCS_CREST nominal — ver
+                                                 # _reconcile_censo_budget()
+            "--omp-min", str(eff_omp_min),      # ídem — antes CENSO_OMP_MIN fijo,
+                                                 # ahora acotado al pool real
+            "-T", f"{temperature:.2f}",             # temperatura configurable (default 274.15 K = 1°C Antártico)
+        ]
         # 2026-07: se abandonó el intento de repartir manualmente los
         # sub-jobs internos de CENSO (MAAQC_CENSO_SLOTS + parche local en
         # orca_processor.py) — seguía mostrando colisión parcial entre
@@ -2353,22 +2448,17 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
         # un MAAQC_PE_LIST compartido entre sub-jobs (esa era la causa raíz
         # original del solapamiento, ver Bug #1 junto a build_omp_env()).
         #
-        # ago 2026: OMP_NUM_THREADS del env ya NO es NPROCS_CREST (el pool
-        # completo) sino censo_threads_per_job(NPROCS_CREST) — ver
-        # CENSO_OMP_MIN arriba. Causa raíz nueva encontrada: CENSO congela
-        # ENVIRON una sola vez y lo hereda IDÉNTICO en cada sub-job
-        # concurrente (no reparte OMP_NUM_THREADS entre ellos), así que con
-        # OMP_NUM_THREADS=pool-completo, cada uno de los N sub-jobs
-        # paralelos pedía el pool completo de hilos para sí — con N=3
-        # (maxcores=12 // omp-min=4), eso es 3x sobre-suscripción real
-        # sobre las 12 CPUs confinadas por taskset, no solo mal reparto del
-        # kernel. Con --omp-min fijo explícito y OMP_NUM_THREADS = hilos-
-        # por-sub-job (4, no 12), cada sub-job pide lo que efectivamente le
-        # corresponde.
-        censo_cpu_pool = _acquire_cpu_pool(NPROCS_CREST, log, "CENSO")
+        # ago 2026 (segunda vuelta): censo_threads_per_job() ya usaba
+        # hilos-por-sub-job en vez del pool completo, pero seguía
+        # calculándolo sobre el valor NOMINAL pedido (NPROCS_CREST),
+        # ignorando que censo_cpu_pool puede venir más chico si otra
+        # instancia de pipeline.py ya reservó PUs — ver
+        # _reconcile_censo_budget() arriba, que ahora fija
+        # (eff_maxcores, eff_omp_min) al tamaño REAL del pool antes de
+        # armar --maxcores/--omp-min/OMP_NUM_THREADS.
         proc = _run_censo_locked(
             cmd, censo_dir, censo_dir / "censo.log",
-            build_omp_env(censo_threads_per_job(NPROCS_CREST),
+            build_omp_env(censo_threads_per_job(eff_maxcores, eff_omp_min),
                            cpu_list=censo_cpu_pool,
                            set_pe_list=False),
             CENSO_TIMEOUT_HOURS,
@@ -2694,6 +2784,19 @@ def run_censo_standalone(input_xyz: Path, charge: int, out_dir: Path,
                   f"a {out_dir}")
         return False
 
+    # ago 2026: reservar y reconciliar el pool ANTES de armar --maxcores/
+    # --omp-min — ver _reconcile_censo_budget(). Antes, --maxcores usaba
+    # siempre el `maxcores` pedido aunque cpu_pool viniera más chico (otra
+    # instancia de pipeline.py con PUs ya reservados).
+    cpu_pool = _acquire_cpu_pool(maxcores, log, "CENSO-STANDALONE")
+    eff_maxcores, eff_omp_min = _reconcile_censo_budget(
+        maxcores, omp_min, cpu_pool, log, "CENSO-STANDALONE"
+    )
+    if eff_maxcores == 0:
+        _cpu_lock_release()
+        log.error(f"[CENSO-STANDALONE]  ✗  sin CPUs disponibles — abortando")
+        return False
+
     cmd = [
         str(CENSO_BIN),
         "--prescreening", "--screening",   # sin --screening, CENSO 3.x se
@@ -2702,19 +2805,18 @@ def run_censo_standalone(input_xyz: Path, charge: int, out_dir: Path,
         "-c", str(charge),
         "-u", "0",                        # MULT global siempre 1 (singlete)
         "--solvent", "water",
-        "--maxcores", str(maxcores),
-        "--omp-min", str(omp_min),        # fijo explícito — ver CENSO_OMP_MIN;
-                                           # debe coincidir con el valor usado
-                                           # para calcular OMP_NUM_THREADS abajo
+        "--maxcores", str(eff_maxcores),  # ago 2026: reconciliado contra
+                                           # len(cpu_pool) real, no el
+                                           # `maxcores` nominal pedido
+        "--omp-min", str(eff_omp_min),    # ídem
         "-T", f"{temperature:.2f}",
     ]
 
     log.info(f"[CENSO-STANDALONE]  ▶  lanzando sobre {input_xyz.name} "
-             f"(carga={charge}, T={temperature:.2f} K, maxcores={maxcores}, "
-             f"omp-min={omp_min}) en {out_dir}"
+             f"(carga={charge}, T={temperature:.2f} K, maxcores={eff_maxcores}, "
+             f"omp-min={eff_omp_min}) en {out_dir}"
              + ("  [nohup]" if USE_NOHUP else ""))
 
-    cpu_pool = _acquire_cpu_pool(maxcores, log, "CENSO-STANDALONE")
     try:
         # OMP_NUM_THREADS = hilos-por-sub-job (censo_threads_per_job), NO
         # maxcores — ver CENSO_OMP_MIN arriba. Con maxcores el pool
@@ -2724,7 +2826,7 @@ def run_censo_standalone(input_xyz: Path, charge: int, out_dir: Path,
         # sub-jobs), sobre-suscribiendo el pool confinado por taskset.
         proc = _run_censo_locked(
             cmd, out_dir, out_dir / "censo.log",
-            build_omp_env(censo_threads_per_job(maxcores, omp_min),
+            build_omp_env(censo_threads_per_job(eff_maxcores, eff_omp_min),
                            cpu_list=cpu_pool, set_pe_list=False),
             CENSO_TIMEOUT_HOURS,
             cpu_list=cpu_pool,
