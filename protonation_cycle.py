@@ -227,6 +227,288 @@ PH_ANTARCTIC   = 8.1
 PH_STANDARD    = 7.0
 
 
+# ═════════════════════════════════════════════════════════════════════════
+#  CORRECCIÓN EMPÍRICA  (calibración externa Gly/Val/Asp)
+# ═════════════════════════════════════════════════════════════════════════
+#
+# El ciclo de Born/CPCM a ωB97X-D3/def2-TZVPD tiene un error sistemático
+# conocido (Ho & Coote 2010) que NO es uniforme entre tipos de grupo
+# funcional: la desprotonación de un carboxilo (COOH → COO⁻) está bien
+# descrita por un continuo dieléctrico puro, pero la de un amonio
+# (NH₃⁺ → NH₂) está sistemáticamente sobreestimada, porque el continuo no
+# captura la primera capa de solvatación explícita (H-bonds agua↔NH₃⁺) que
+# domina la energía libre de esa especie cargada y localizada.
+#
+# Esta calibración corre exactamente el mismo protocolo (mismo nivel de
+# teoría, mismo método 'born' con macroestado neutro/zwitterión, T=298.15 K)
+# sobre glicina y valina — los DOS aminoácidos que efectivamente componen
+# M-Gly:Val — más ácido aspártico como tercer punto independiente para el
+# tipo 'carboxyl' (mismo grupo α-COOH, pKa experimental bien tabulado).
+# Los pKa's calculados vienen directo de las corridas de calibración
+# (protonation_cycle.py --goodvibes, método 'born'); los experimentales son
+# valores estándar de bioquímica (Carey & Giuliano, Organic Chemistry, 8th
+# ed., 2011; pKa1(Asp) = 1.88 de la compilación de Master Organic Chemistry,
+# consistente con CRC Handbook).
+#
+# 'carboxyl' = primera desprotonación de la cadena (catión protonado →
+#              macroestado neutro/zwitterión). pKa₀ en la convención A→R/D
+#              de este script.
+# 'amino'    = segunda desprotonación (macroestado neutro/zwitterión →
+#              anión). pKa₁ en la convención R/D→B. Solo Gly y Val: la
+#              corrida de calibración de Asp no pudo cerrar este paso
+#              (fallo de validación de carga/N° átomos para el anión AB,
+#              ver advertencias de esa corrida) así que no aporta un tercer
+#              punto para este tipo.
+#
+# IMPORTANTE — alcance de la corrección:
+#   Esta calibración vale para el MISMO tipo de grupo funcional (α-COOH
+#   libre / α-NH₃⁺ libre de un aminoácido) al MISMO nivel de teoría. Antes
+#   de aplicarla a un pKa de M-Gly:Val u otra MAA hay que verificar que la
+#   transición de estados en cuestión efectivamente corresponde a ese tipo
+#   de grupo (p. ej. si en M-Gly:Val el primer pKa corresponde a la amina
+#   secundaria del anillo de ciclohexenona en vez de a un α-NH₃⁺ libre, la
+#   corrección 'amino' calibrada aquí puede no transferir directamente —
+#   repórtalo como una limitación, no lo apliques a ciegas). Ver
+#   --empirical-correction en el CLI para activarla explícitamente por pKa.
+#
+# 'amino_dianion' — CASO APARTE, NO es una variante de 'amino':
+#   El tipo 'amino' de arriba (Gly/Val, n=2) calibra la desprotonación de un
+#   α-NH₃⁺ que NO tiene ninguna otra carga formal cercana en la molécula
+#   (la especie de partida, R/D, es neutra). Esa calibración no transfiere a
+#   una desprotonación de NH₃⁺ que ocurre con DOS grupos carboxilato ya
+#   formados en la misma molécula (especie de partida con carga -1, producto
+#   con carga -2) — la electrostática de campo cercano y sobre todo el
+#   apantallamiento de primera esfera de agua que le falta al continuo CPCM
+#   son cualitativamente distintos en ese entorno.
+#
+#   Esto se verificó corriendo el ciclo completo de ácido glutámico (GA/GR/
+#   GD/GB/GC), que tiene exactamente esa topología (GB→GC: NH₃⁺ flanqueado
+#   por 2×COO⁻ → NH₂ + 2×COO⁻, igual que el paso B→C de M-Gly:Val). El
+#   pKa₂ calculado con el método 'born' (17.89 armónico / 17.89 goodvibes,
+#   ambas pasadas dan prácticamente el mismo valor) queda ~8 unidades por
+#   encima del pKa₂ experimental de Glu (~9.60, promedio de rangos de
+#   literatura 9.47-9.70), un error MUY superior al ±1-2 típico del método y
+#   a la corrección 'amino' de Gly/Val (que solo cubre ~2.4-2.5 unidades).
+#   Esto descarta que el problema sea específico de M-Gly:Val: es un sesgo
+#   sistemático del ciclo Born/CPCM para transiciones NH₃⁺→NH₂ con doble
+#   carga negativa vecina, reproducido de forma casi idéntica en dos
+#   moléculas independientes (M-Gly:Val cruda: pKa₂=18.02; Glu cruda:
+#   pKa₂=17.89 — diferencia de solo 0.13 unidades entre sí, ambas ~8
+#   unidades por encima de lo esperado). La hipótesis física más plausible
+#   es que CPCM, al ser un continuo dieléctrico isotrópico, no resuelve el
+#   apantallamiento explícito de agua de primera esfera alrededor de los dos
+#   carboxilatos, que en realidad amortigua mucho del costo electrostático
+#   de desprotonar el amonio vecino — un efecto de solvatación específica
+#   que un continuo no puede capturar por construcción.
+#
+#   n=1 (un solo punto, Glu): no permite estimar RMSE de calibración: el
+#   ajuste por desplazamiento puro (m=1, b=exp−calc) es exacto por
+#   definición con un único punto. Se reporta igualmente porque un análogo
+#   topológico exacto con n=1 es preferible a extrapolar 'amino' (n=2, sin
+#   ninguna carga vecina) fuera de su dominio de calibración — pero el
+#   resultado corregido debe presentarse con esta salvedad explícita en el
+#   paper, no como un número con la misma confianza que 'carboxyl' (n=3).
+EMPIRICAL_CALIBRATION: dict[str, list[dict]] = {
+    "carboxyl": [
+        {"mol": "Glycine",  "calc_harmonic": 2.50, "calc_goodvibes": 2.45,
+         "exp": 2.34, "exp_ref": "Carey & Giuliano 2011"},
+        {"mol": "Valine",   "calc_harmonic": 2.38, "calc_goodvibes": 2.37,
+         "exp": 2.32, "exp_ref": "Carey & Giuliano 2011"},
+        {"mol": "Aspartic", "calc_harmonic": 2.09, "calc_goodvibes": 2.01,
+         "exp": 1.88, "exp_ref": "Master Organic Chemistry / CRC Handbook"},
+    ],
+    "amino": [
+        {"mol": "Glycine",  "calc_harmonic": 11.95, "calc_goodvibes": 11.91,
+         "exp": 9.60, "exp_ref": "Carey & Giuliano 2011"},
+        {"mol": "Valine",   "calc_harmonic": 12.18, "calc_goodvibes": 12.19,
+         "exp": 9.62, "exp_ref": "Carey & Giuliano 2011"},
+    ],
+    "amino_dianion": [
+        {"mol": "Glutamic", "calc_harmonic": 17.89, "calc_goodvibes": 17.89,
+         "exp": 9.60, "exp_ref": "Carey & Giuliano 2011 (promedio pKa2 Glu, "
+                                  "rango de literatura 9.47-9.70)"},
+    ],
+}
+
+
+def _ols_fit(x: list[float], y: list[float]) -> dict:
+    """
+    Regresión lineal simple y = m·x + b por mínimos cuadrados (sin
+    dependencia de scipy — solo numpy). Retorna pendiente, intercepto, R² y
+    RMSE de los residuos. ok=False si hay <2 puntos o varianza nula en x.
+    """
+    xa = np.asarray(x, dtype=float)
+    ya = np.asarray(y, dtype=float)
+    n = len(xa)
+    if n < 2:
+        return {"ok": False, "n": n}
+    mean_x, mean_y = xa.mean(), ya.mean()
+    sxx = float(np.sum((xa - mean_x) ** 2))
+    if sxx == 0:
+        return {"ok": False, "n": n}
+    sxy = float(np.sum((xa - mean_x) * (ya - mean_y)))
+    m = sxy / sxx
+    b = mean_y - m * mean_x
+    y_pred = m * xa + b
+    resid = ya - y_pred
+    ss_res = float(np.sum(resid ** 2))
+    ss_tot = float(np.sum((ya - mean_y) ** 2))
+    r2 = (1 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
+    rmse = float(np.sqrt(ss_res / n))
+    return {"ok": True, "n": n, "slope": float(m), "intercept": float(b),
+            "r2": float(r2), "rmse": rmse, "residuals": resid.tolist()}
+
+
+def fit_empirical_correction(group_type: str, gcorr_source: str = "goodvibes",
+                             mode: str = "auto") -> dict:
+    """
+    Ajusta la corrección empírica pKa_exp ≈ m·pKa_calc + b para un tipo de
+    grupo funcional ('carboxyl' o 'amino'), a partir de EMPIRICAL_CALIBRATION.
+
+    mode:
+      'auto'   (default) — regresión lineal completa (m, b) si hay ≥3 puntos
+               de calibración disponibles para ese (group_type, gcorr_source);
+               si hay exactamente 2, cae a corrección de desplazamiento puro
+               (m=1, b=sesgo medio), porque una recta por 2 puntos ajusta de
+               forma EXACTA (0 grados de libertad) y no permite verificar la
+               pendiente. Con 1 punto, siempre usa desplazamiento puro.
+      'linear' — fuerza la regresión lineal completa aunque haya solo 2
+               puntos (se documenta la advertencia en el resultado).
+      'offset' — fuerza desplazamiento puro (m=1, b=mean(exp − calc))
+               independientemente de cuántos puntos haya (≥1).
+    """
+    calib = EMPIRICAL_CALIBRATION.get(group_type)
+    if not calib:
+        return {"ok": False,
+                "reason": f"tipo de grupo desconocido: '{group_type}' "
+                          f"(válidos: {list(EMPIRICAL_CALIBRATION)})"}
+
+    calc_key = "calc_goodvibes" if gcorr_source == "goodvibes" else "calc_harmonic"
+    pts = [(pt[calc_key], pt["exp"], pt["mol"]) for pt in calib
+           if pt.get(calc_key) is not None and pt.get("exp") is not None]
+    n = len(pts)
+    if n < 1:
+        return {"ok": False,
+                "reason": f"sin puntos de calibración disponibles para "
+                          f"'{group_type}' / gcorr_source='{gcorr_source}'"}
+
+    x = [p[0] for p in pts]
+    y = [p[1] for p in pts]
+    mols = [p[2] for p in pts]
+    warn: list[str] = []
+
+    use_mode = ("linear" if n >= 3 else "offset") if mode == "auto" else mode
+
+    if use_mode == "linear" and n < 2:
+        warn.append("Se pidió regresión lineal pero solo hay 1 punto de "
+                    "calibración disponible; se usa desplazamiento puro.")
+        use_mode = "offset"
+
+    if use_mode == "linear":
+        fit = _ols_fit(x, y)
+        slope, intercept, r2, rmse = fit["slope"], fit["intercept"], fit["r2"], fit["rmse"]
+        if n == 2:
+            warn.append("Regresión lineal con solo 2 puntos de calibración: "
+                        "el ajuste es EXACTO (0 grados de libertad), R² no "
+                        "es informativo y la pendiente no está verificada "
+                        "estadísticamente. Considera --empirical-correction-"
+                        "mode offset para este tipo.")
+    else:  # 'offset'
+        bias = [yi - xi for xi, yi in zip(x, y)]
+        intercept = float(np.mean(bias))
+        slope = 1.0
+        resid = [yi - (xi + intercept) for xi, yi in zip(x, y)]
+        rmse = float(np.sqrt(np.mean(np.square(resid)))) if n > 0 else float("nan")
+        r2 = float("nan")
+
+    if n < 3:
+        warn.append(f"Calibración con solo n={n} punto(s) para "
+                    f"'{group_type}'. La incertidumbre de esta corrección "
+                    f"es grande y se suma (no reemplaza) a la incertidumbre "
+                    f"típica ±1-2 unidades de pKa del método Born/CPCM.")
+
+    return {"ok": True, "group_type": group_type, "gcorr_source": gcorr_source,
+            "mode": use_mode, "n": n, "molecules": mols,
+            "slope": slope, "intercept": intercept, "r2": r2, "rmse": rmse,
+            "calib_x": x, "calib_y": y, "warnings": warn}
+
+
+def apply_empirical_correction(pka_value: Optional[float], group_type: str,
+                               gcorr_source: str = "goodvibes",
+                               mode: str = "auto") -> dict:
+    """
+    Aplica fit_empirical_correction() a un valor de pKa crudo (Born/CPCM).
+    Retorna dict con pKa_raw, pKa_corrected, delta, y los metadatos del
+    ajuste; ok=False (con 'reason') si no se puede aplicar (pKa None o sin
+    calibración disponible para ese tipo/gcorr_source).
+    """
+    if pka_value is None:
+        return {"ok": False, "reason": "pKa crudo no disponible (None)"}
+    fit = fit_empirical_correction(group_type, gcorr_source=gcorr_source, mode=mode)
+    if not fit["ok"]:
+        return {"ok": False, "reason": fit.get("reason", "ajuste no disponible")}
+    corrected = fit["slope"] * pka_value + fit["intercept"]
+    out = {"ok": True, "pKa_raw": pka_value, "pKa_corrected": corrected,
+           "delta": corrected - pka_value}
+    out.update({k: fit[k] for k in
+                ("group_type", "gcorr_source", "mode", "n", "molecules",
+                 "slope", "intercept", "r2", "rmse", "warnings")})
+    return out
+
+
+def _print_empirical_correction(corr: Optional[dict], label: str):
+    """Imprime el bloque de corrección empírica para un pKa, si aplica."""
+    if not corr or not corr.get("ok"):
+        return
+    sep = "  " + "─" * 70
+    print(f"\n{sep}")
+    print(f"  CORRECCIÓN EMPÍRICA  —  {label}  (tipo: {corr['group_type']})")
+    print(sep)
+    mode_txt = {
+        "linear": "regresión lineal  (pKa_exp ≈ m·pKa_calc + b)",
+        "offset": "desplazamiento puro  (pKa_exp ≈ pKa_calc + b, m=1)",
+    }[corr["mode"]]
+    print(f"  Calibración: {', '.join(corr['molecules'])}  "
+          f"(n={corr['n']}, gcorr_source={corr['gcorr_source']})")
+    print(f"  Ajuste: {mode_txt}")
+    r2_txt = f"   R² = {corr['r2']:.4f}" if not np.isnan(corr["r2"]) else ""
+    print(f"    m = {corr['slope']:.4f}   b = {corr['intercept']:+.4f}{r2_txt}")
+    print(f"    RMSE (residuos de calibración) = {corr['rmse']:.3f} unidades de pKa")
+    for w in corr["warnings"]:
+        print(f"    ⚠  {w}")
+    print(f"\n    pKa (Born/CPCM, crudo)         = {corr['pKa_raw']:.2f}")
+    print(f"    pKa (corregido empíricamente)  = {corr['pKa_corrected']:.2f}"
+          f"   (Δ = {corr['delta']:+.2f})")
+    print(sep)
+
+
+def _parse_empirical_correction_spec(spec: Optional[str]) -> dict[str, str]:
+    """
+    Parsea el argumento --empirical-correction, formato
+    'pKa0=carboxyl,pKa1=amino'. Retorna {} si spec es None/vacío. Aborta
+    con SystemExit si el formato o el tipo de grupo no son válidos.
+    """
+    if not spec:
+        return {}
+    out: dict[str, str] = {}
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "=" not in part:
+            raise SystemExit(
+                f"--empirical-correction: formato inválido en '{part}' "
+                f"(se espera 'pKaN=tipo', p. ej. 'pKa0=carboxyl')")
+        key, val = part.split("=", 1)
+        key, val = key.strip(), val.strip().lower()
+        if val not in EMPIRICAL_CALIBRATION:
+            raise SystemExit(
+                f"--empirical-correction: tipo desconocido '{val}' en "
+                f"'{part}'. Tipos válidos: {list(EMPIRICAL_CALIBRATION)}")
+        out[key] = val
+    return out
+
+
 # ─────────────────────────────────────────────
 #  PARSERS  (extraídos de results_collector.py,
 #            sin dependencias cruzadas)
@@ -3377,6 +3659,15 @@ def export_results(
             "dG_aq_kJ":          (pka_r.get("dG_aq_kcal") or 0) * 4.184,
             "pKa":               pka_r.get("pKa"),
             "ok":                pka_r.get("ok"),
+            # Corrección empírica (--empirical-correction), si se aplicó a
+            # este pKa; columnas quedan en None/NaN si no se pidió corrección.
+            "pKa_raw":           pka_r.get("pKa_raw"),
+            "pKa_corrected":     pka_r.get("pKa_corrected"),
+            "correction_type":   (pka_r.get("correction") or {}).get("group_type"),
+            "correction_mode":   (pka_r.get("correction") or {}).get("mode"),
+            "correction_n_calib": (pka_r.get("correction") or {}).get("n"),
+            "correction_slope":  (pka_r.get("correction") or {}).get("slope"),
+            "correction_intercept": (pka_r.get("correction") or {}).get("intercept"),
         })
 
     df_cycle = pd.DataFrame(cycle_rows)
@@ -3599,7 +3890,41 @@ Ejemplos:
     parser.add_argument("--mc-seed", type=int, default=None, metavar="N",
                         help="Semilla para reproducibilidad del Monte Carlo "
                              "(default: sin fijar)")
+    parser.add_argument("--empirical-correction", metavar="pKaN=TIPO[,pKaN=TIPO...]",
+                        default=None,
+                        help="Aplica la corrección empírica calibrada con "
+                             "Gly/Val/Asp/Glu (ver EMPIRICAL_CALIBRATION) a "
+                             "los pKa's indicados. Formato: "
+                             "'pKa0=carboxyl,pKa1=carboxyl,pKa2=amino_dianion' "
+                             "(tipos válidos: 'carboxyl' [n=3, Gly/Val/Asp], "
+                             "'amino' [n=2, Gly/Val — SOLO para NH₃⁺ sin "
+                             "otra carga formal vecina], 'amino_dianion' "
+                             "[n=1, Glu — para NH₃⁺ flanqueado por 2×COO⁻ "
+                             "ya formados, p. ej. el paso B→C de M-Gly:Val; "
+                             "'amino' subestima la corrección necesaria en "
+                             "~5-6 unidades en ese entorno, ver comentario "
+                             "junto a EMPIRICAL_CALIBRATION]; las claves son "
+                             "'pKa0', 'pKa1', 'pKa2' según la cadena que "
+                             "estés corriendo). El pKa corregido reemplaza "
+                             "al crudo en la distribución de especies, el pI "
+                             "y los gráficos de aquí en adelante; el valor "
+                             "crudo del ciclo Born/CPCM se sigue imprimiendo "
+                             "y exportando para trazabilidad. Sin este flag, "
+                             "el comportamiento es idéntico al original (sin "
+                             "corrección).")
+    parser.add_argument("--empirical-correction-mode",
+                        choices=["auto", "linear", "offset"], default="auto",
+                        help="Modo de ajuste de --empirical-correction (ver "
+                             "fit_empirical_correction()). 'auto' (default): "
+                             "regresión lineal si hay ≥3 puntos de "
+                             "calibración para ese tipo, desplazamiento puro "
+                             "si hay exactamente 2 (recomendado — con 2 "
+                             "puntos la pendiente de una regresión no está "
+                             "verificada).")
     args = parser.parse_args()
+
+    args.empirical_correction_spec = _parse_empirical_correction_spec(
+        args.empirical_correction)
 
     GV_CUTOFF = args.gv_cutoff
     GV_QS     = args.gv_qs
@@ -3724,8 +4049,41 @@ def _run_classic(args, gcorr_source: str = "harmonic"):
 
     print_pka_summary([(pka1_result, "pKa₁"), (pka2_result, "pKa₂")])
 
-    pKa1 = pka1_result["pKa"] if (pka1_result and pka1_result["ok"]) else None
-    pKa2 = pka2_result["pKa"] if (pka2_result and pka2_result["ok"]) else None
+    pKa1_raw = pka1_result["pKa"] if (pka1_result and pka1_result["ok"]) else None
+    pKa2_raw = pka2_result["pKa"] if (pka2_result and pka2_result["ok"]) else None
+
+    # ── Corrección empírica (--empirical-correction) ───────────────────────
+    ec_spec = getattr(args, "empirical_correction_spec", {}) or {}
+    ec_mode = getattr(args, "empirical_correction_mode", "auto")
+    corr1 = corr2 = None
+    if ec_spec:
+        if "pKa1" in ec_spec:
+            corr1 = apply_empirical_correction(pKa1_raw, ec_spec["pKa1"],
+                                               gcorr_source=gcorr_source, mode=ec_mode)
+        if "pKa2" in ec_spec:
+            corr2 = apply_empirical_correction(pKa2_raw, ec_spec["pKa2"],
+                                               gcorr_source=gcorr_source, mode=ec_mode)
+        _print_empirical_correction(corr1, "pKa₁")
+        _print_empirical_correction(corr2, "pKa₂")
+        if any(c and c.get("ok") for c in (corr1, corr2)):
+            print(f"\n  Nota: la distribución de especies, el pI y los "
+                  f"gráficos de aquí en adelante usan los pKa's CORREGIDOS "
+                  f"EMPÍRICAMENTE donde se pidió corrección (ver arriba). "
+                  f"El escaneo de temperatura (arriba) sigue mostrando "
+                  f"valores CRUDOS Born/CPCM sin corregir: la calibración "
+                  f"empírica solo se ajustó a T=298.15 K. Si además usas "
+                  f"--montecarlo, esa propagación de incertidumbre corre "
+                  f"sobre el ciclo de Born crudo (no conoce la corrección "
+                  f"empírica); súmale el RMSE de calibración reportado "
+                  f"arriba como una fuente de error sistemático aparte.")
+        for c, pka_result in ((corr1, pka1_result), (corr2, pka2_result)):
+            if c and c.get("ok") and pka_result is not None:
+                pka_result["pKa_raw"] = c["pKa_raw"]
+                pka_result["pKa_corrected"] = c["pKa_corrected"]
+                pka_result["correction"] = c
+
+    pKa1 = corr1["pKa_corrected"] if (corr1 and corr1.get("ok")) else pKa1_raw
+    pKa2 = corr2["pKa_corrected"] if (corr2 and corr2.get("ok")) else pKa2_raw
 
     if pKa1 is not None:
         pH_range = np.arange(args.ph_range[0], args.ph_range[1] + args.ph_step / 2,
@@ -3811,6 +4169,8 @@ def _run_classic(args, gcorr_source: str = "harmonic"):
     return {
         "gcorr_source": gcorr_source,
         "pKa1": pKa1, "pKa2": pKa2,
+        "pKa1_raw": pKa1_raw, "pKa2_raw": pKa2_raw,
+        "correction": {"pKa1": corr1, "pKa2": corr2},
         "df_dist": df_dist,
         "data_list": data_list,
         "chain_mc": chain_mc,
@@ -3994,9 +4354,47 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
         (pka2_result, "pKa₂ (B→C)"),
     ])
 
-    pKa0 = pka0_result["pKa"] if (pka0_result and pka0_result["ok"]) else None
-    pKa1 = pka1_result["pKa"] if (pka1_result and pka1_result["ok"]) else None
-    pKa2 = pka2_result["pKa"] if (pka2_result and pka2_result["ok"]) else None
+    pKa0_raw = pka0_result["pKa"] if (pka0_result and pka0_result["ok"]) else None
+    pKa1_raw = pka1_result["pKa"] if (pka1_result and pka1_result["ok"]) else None
+    pKa2_raw = pka2_result["pKa"] if (pka2_result and pka2_result["ok"]) else None
+
+    # ── Corrección empírica (--empirical-correction) ───────────────────────
+    ec_spec = getattr(args, "empirical_correction_spec", {}) or {}
+    ec_mode = getattr(args, "empirical_correction_mode", "auto")
+    corr0 = corr1 = corr2 = None
+    if ec_spec:
+        if "pKa0" in ec_spec:
+            corr0 = apply_empirical_correction(pKa0_raw, ec_spec["pKa0"],
+                                               gcorr_source=gcorr_source, mode=ec_mode)
+        if "pKa1" in ec_spec:
+            corr1 = apply_empirical_correction(pKa1_raw, ec_spec["pKa1"],
+                                               gcorr_source=gcorr_source, mode=ec_mode)
+        if "pKa2" in ec_spec:
+            corr2 = apply_empirical_correction(pKa2_raw, ec_spec["pKa2"],
+                                               gcorr_source=gcorr_source, mode=ec_mode)
+        _print_empirical_correction(corr0, "pKa₀ (A→R/D)")
+        _print_empirical_correction(corr1, "pKa₁ (R/D→B)")
+        _print_empirical_correction(corr2, "pKa₂ (B→C)")
+        if any(c and c.get("ok") for c in (corr0, corr1, corr2)):
+            print(f"\n  Nota: la distribución de especies, el pI y los "
+                  f"gráficos de aquí en adelante usan los pKa's CORREGIDOS "
+                  f"EMPÍRICAMENTE donde se pidió corrección (ver arriba). "
+                  f"El escaneo de temperatura (arriba) sigue mostrando "
+                  f"valores CRUDOS Born/CPCM sin corregir: la calibración "
+                  f"empírica solo se ajustó a T=298.15 K. Si además usas "
+                  f"--montecarlo, esa propagación de incertidumbre corre "
+                  f"sobre el ciclo de Born crudo (no conoce la corrección "
+                  f"empírica); súmale el RMSE de calibración reportado "
+                  f"arriba como una fuente de error sistemático aparte.")
+        for c, pka_result in ((corr0, pka0_result), (corr1, pka1_result), (corr2, pka2_result)):
+            if c and c.get("ok") and pka_result is not None:
+                pka_result["pKa_raw"] = c["pKa_raw"]
+                pka_result["pKa_corrected"] = c["pKa_corrected"]
+                pka_result["correction"] = c
+
+    pKa0 = corr0["pKa_corrected"] if (corr0 and corr0.get("ok")) else pKa0_raw
+    pKa1 = corr1["pKa_corrected"] if (corr1 and corr1.get("ok")) else pKa1_raw
+    pKa2 = corr2["pKa_corrected"] if (corr2 and corr2.get("ok")) else pKa2_raw
     f_R, f_D = taut_result["f_R"], taut_result["f_D"]
 
     if pKa0 is None and pKa1 is None:
@@ -4093,6 +4491,8 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
     return {
         "gcorr_source": gcorr_source,
         "pKa0": pKa0, "pKa1": pKa1, "pKa2": pKa2,
+        "pKa0_raw": pKa0_raw, "pKa1_raw": pKa1_raw, "pKa2_raw": pKa2_raw,
+        "correction": {"pKa0": corr0, "pKa1": corr1, "pKa2": corr2},
         "f_R": f_R, "f_D": f_D,
         "df_dist": df_dist,
         "data_list": data_list,
