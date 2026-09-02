@@ -1100,6 +1100,19 @@ end
 * xyzfile {CHARGE} {MULT} opt_opt.xyz
 """
 
+TEMPLATE_SP_SMD = """\
+! wB97X-D3 def2-TZVPD def2/J SMD(water) RIJCOSX TightSCF defgrid3
+%scf
+  MaxIter 300
+end
+%maxcore {MAXCORE}
+%pal
+  nprocs {NPROCS}
+end
+
+* xyzfile {CHARGE} {MULT} opt_opt.xyz
+"""
+
 TEMPLATE_SP_NROOT = """\
 ! wB97X-D3 def2-TZVPD def2/J CPCM(water) RIJCOSX TightSCF defgrid3
 %scf
@@ -1178,6 +1191,7 @@ def get_template(step: str) -> str:
         "numfreq_restart": TEMPLATE_NUMFREQ_RESTART,
         "sp":              TEMPLATE_SP,
         "sp_gas":          TEMPLATE_SP_GAS,
+        "sp_smd":          TEMPLATE_SP_SMD,
         "sp_nroot":        TEMPLATE_SP_NROOT,
         "tddft":           TEMPLATE_TDDFT,
         "adc2":            TEMPLATE_ADC2,
@@ -3798,6 +3812,131 @@ def stage_sp_gas(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
     return successful
 
 
+def stage_sp_smd(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
+                  batch_size: int = 0,
+                  nprocs_per_job: Optional[int] = None,
+                  maxcore_per_job: Optional[int] = None) -> list[Path]:
+    """
+    Etapa 04c_sp_smd (OPCIONAL — requiere --spsmd): single point con
+    SMD(water) (idéntico al SP con CPCM(water) pero usando SMD en vez de
+    CPCM), sobre los mismos confórmeros y con la misma geometría/charge/mult
+    que un 04_sp/<conf_id>/ ya exitoso.
+
+    Devuelve directorios 04c_sp_smd/<conf_id>/ exitosos.
+
+    batch_size=0  → usa SP_BATCH_SIZE global (comparte recursos con SP normal).
+    nprocs_per_job / maxcore_per_job sobreescriben los globals NPROCS / MAXCORE
+    para cada worker paralelo; si son None se usan los globals vigentes.
+    """
+    _batch   = batch_size if batch_size > 0 else SP_BATCH_SIZE
+    _nprocs  = nprocs_per_job  if nprocs_per_job  is not None else NPROCS
+    _maxcore = maxcore_per_job if maxcore_per_job is not None else MAXCORE
+
+    log.info(f"[SP_SMD] single point SMD(water) para {len(sp_dirs)} confórmeros "
+             f"(batch={_batch}, {_nprocs} cores/job)")
+    template   = get_template("sp_smd")
+    successful = []
+
+    n_lotes = -(-len(sp_dirs) // _batch)   # ceiling division
+    log.info(f"[SP_SMD] {len(sp_dirs)} SPs SMD en {n_lotes} lote(s) de ≤{_batch} "
+             f"(CPUs activos/lote: {_batch * _nprocs})")
+
+    tasks_all = [
+        {
+            "conf_id":  d.name,
+            "sp_dir":   d,
+            "template": template,
+            "nprocs":   _nprocs,
+            "maxcore":  _maxcore,
+            "mol_dir":  mol_dir,
+            "log":      log,
+        }
+        for d in sp_dirs
+    ]
+
+    _check_cpu_budget(_batch, _nprocs, log)
+
+    idx      = 0
+    lote_num = 0
+    while idx < len(tasks_all):
+        want      = min(_batch, len(tasks_all) - idx)
+        cpu_lists = _acquire_cpu_lists(want, _nprocs, log, "SP_SMD")
+        if not cpu_lists:
+            log.error("[SP_SMD] no hay suficientes cores físicos independientes "
+                       "para asignar ni un solo job — abortando etapa SP_SMD")
+            break
+        batch    = tasks_all[idx: idx + len(cpu_lists)]
+        lote_num += 1
+        ids      = [t["conf_id"] for t in batch]
+
+        for t, cl in zip(batch, cpu_lists):
+            t["cpu_list"] = cl
+
+        log.info(f"[SP_SMD] ── Lote {lote_num}/~{n_lotes}: {ids}  "
+                 f"(cores: {[','.join(map(str, cl)) for cl in cpu_lists]})")
+
+        with ThreadPoolExecutor(max_workers=len(batch)) as pool:
+            futures = {pool.submit(_sp_smd_worker, t): t["conf_id"] for t in batch}
+            try:
+                for fut in as_completed(futures):
+                    res = fut.result()
+                    tag = "✓" if res["success"] else "✗"
+                    log.info(f"[SP_SMD]   {tag} {res['conf_id']}  ({res['elapsed']:.1f} min)")
+                    if res["success"] and res["sp_smd_dir"] is not None:
+                        successful.append(res["sp_smd_dir"])
+                    else:
+                        log.warning(f"[SP_SMD] {res['conf_id']} falló — excluido")
+            except KeyboardInterrupt:
+                log.warning("[SP_SMD] Ctrl-C — cancelando lote, esperando workers…")
+                pool.shutdown(wait=False, cancel_futures=True)
+                _kill_active_procs()
+                _cpu_lock_release()
+                sys.exit(130)
+
+        _cpu_lock_release()
+        idx += len(cpu_lists)
+
+    log.info(f"[SP_SMD] {len(successful)}/{len(sp_dirs)} completados")
+    return successful
+
+
+def stage_spsmd_batch(group_dir: Path, log: logging.Logger) -> None:
+    """
+    Modo batch de --spsmd: recorre TODAS las corridas dentro de una carpeta
+    de grupo (<grupo>/runs/*/04_sp/conf_*) y calcula el SP_SMD que falte
+    para cada confórmero con SP CPCM ya exitoso, sin tocar CREST/OPT/
+    NUMFREQ/TDDFT de ninguna. Como stage_sp_smd usa check_success() para
+    saltar los ya hechos, correr el mismo comando dos veces es seguro
+    (solo procesa los faltantes).
+
+    Se invoca cuando --spsmd se pasa con --mol apuntando a una carpeta de
+    grupo (ej. MGLYVAL) en vez de a un .xyz específico.
+    """
+    runs_dir = group_dir / "runs"
+    if not runs_dir.is_dir():
+        sys.exit(f"ERROR: no se encontró {runs_dir} — "
+                  f"¿'{group_dir.name}' es una carpeta de grupo válida?")
+
+    total_ok, total_pend = 0, 0
+    for mol_dir in sorted(runs_dir.iterdir()):
+        if not mol_dir.is_dir():
+            continue
+        sp_root = mol_dir / "04_sp"
+        if not sp_root.exists():
+            continue
+        sp_dirs = [d for d in sorted(sp_root.glob("conf_*"))
+                   if check_success(d / "sp.out")]
+        if not sp_dirs:
+            continue
+
+        log.info(f"[SP_SMD] {mol_dir.name}: {len(sp_dirs)} confórmeros con SP CPCM completo")
+        done = stage_sp_smd(sp_dirs, mol_dir, log)
+        total_ok += len(done)
+        total_pend += len(sp_dirs) - len(done)
+
+    log.info(f"[SP_SMD] batch finalizado: {total_ok} completados, {total_pend} pendientes/fallidos")
+
+
 def stage_spgas_batch(group_dir: Path, log: logging.Logger) -> None:
     """
     Modo batch de --spgas: recorre TODAS las corridas dentro de una carpeta
@@ -4431,6 +4570,78 @@ def _sp_gas_worker(task: dict) -> dict:
     }
 
 
+def _sp_smd_worker(task: dict) -> dict:
+    """
+    Worker para un único SP con SMD(water), diseñado para ejecutarse en un
+    hilo de ThreadPoolExecutor. Idéntico patrón que _sp_gas_worker, pero:
+      - en vez de fase-gas (sin bloque de solvente), usa SMD(water) en lugar
+        del CPCM(water) del SP original.
+      - parte de un 04_sp/<conf_id>/ ya exitoso (sp_dir), no de un freq_dir.
+      - charge/mult se leen de sp_dir/"sp.inp" (no de task["charge"]), para
+        garantizar que coincide exactamente con el SP CPCM que le dio origen.
+      - la geometría se copia desde sp_dir/"opt_opt.xyz" (la misma que usó
+        el SP CPCM), no desde 02_opt/ ni 03_numfreq/ directamente — así el
+        SP_SMD queda 100% trazable al mismo SP.
+
+    task debe contener:
+        conf_id, sp_dir, template, nprocs, maxcore, mol_dir, log
+    Opcional:
+        cpu_list: list[int] de CPUs lógicas exclusivas para este worker.
+
+    Devuelve:
+        dict con conf_id, sp_smd_dir (Path o None), success, elapsed (min)
+    """
+    conf_id  : str            = task["conf_id"]
+    sp_dir   : Path           = task["sp_dir"]
+    template : str            = task["template"]
+    nprocs   : int            = task["nprocs"]
+    maxcore  : int            = task["maxcore"]
+    mol_dir  : Path           = task["mol_dir"]
+    log      : logging.Logger = task["log"]
+    cpu_list : Optional[list[int]] = task.get("cpu_list")
+
+    sp_inp = sp_dir / "sp.inp"
+    charge_mult = _parse_charge_mult_from_sp_inp(sp_inp)
+    if charge_mult is None:
+        log.warning(f"[SP_SMD] {conf_id}: no se pudo leer charge/mult de "
+                    f"{sp_inp} — saltando")
+        return {"conf_id": conf_id, "sp_smd_dir": None, "success": False, "elapsed": 0.0}
+    charge, mult = charge_mult
+
+    opt_xyz = sp_dir / "opt_opt.xyz"
+    if not opt_xyz.exists():
+        log.warning(f"[SP_SMD] {conf_id}: no se encontró {opt_xyz} — saltando")
+        return {"conf_id": conf_id, "sp_smd_dir": None, "success": False, "elapsed": 0.0}
+
+    sp_smd_dir = mol_dir / "04c_sp_smd" / conf_id
+    sp_smd_dir.mkdir(parents=True, exist_ok=True)
+
+    out_file = sp_smd_dir / "sp_smd.out"
+    inp_file = sp_smd_dir / "sp_smd.inp"
+
+    if not check_success(out_file):
+        if not safe_copy(opt_xyz, sp_smd_dir / "opt_opt.xyz"):
+            log.warning(f"[SP_SMD] {conf_id}: error copiando opt_opt.xyz — saltando")
+            return {"conf_id": conf_id, "sp_smd_dir": None, "success": False, "elapsed": 0.0}
+        inp_text = template.format(
+            CHARGE=charge, MULT=mult,
+            NPROCS=nprocs, MAXCORE=maxcore,
+        )
+        inp_file.write_text(inp_text)
+
+    t0         = time.time()
+    worker_env = build_omp_env(nprocs, cpu_list=cpu_list)
+    success    = run_orca(inp_file, out_file, log, env=worker_env, cpu_list=cpu_list)
+    elapsed    = (time.time() - t0) / 60
+
+    return {
+        "conf_id":    conf_id,
+        "sp_smd_dir": sp_smd_dir if success else None,
+        "success":    success,
+        "elapsed":    elapsed,
+    }
+
+
 # ── Topología REAL de este ThinkPad T14 (Core Ultra 7), confirmada con
 #    `lscpu -e`. Elevada a nivel de módulo porque tanto assign_cpu_lists()
 #    (pinning por-job, usado por ORCA) como assign_cpu_pool() (pinning de
@@ -4943,7 +5154,7 @@ def print_status():
             if not mol_dir.is_dir():
                 continue
             print(f"\n  📁 {group_dir.name}/{mol_dir.name}")
-            for step_num in ["01_crest", "02_opt", "03_numfreq", "04_sp", "04b_sp_gas", "05_tddft", "06_sp_nroot", "07_adc2"]:
+            for step_num in ["01_crest", "02_opt", "03_numfreq", "04_sp", "04b_sp_gas", "04c_sp_smd", "05_tddft", "06_sp_nroot", "07_adc2"]:
                 step_dir = mol_dir / step_num
                 if not step_dir.exists():
                     print(f"     {step_num:12s}  —  no iniciado")
@@ -5125,6 +5336,22 @@ def _run_one(args, parser):
         stage_spgas_batch(group_dir, log)
         log.info("=" * 60)
         log.info("SP_GAS BATCH FINALIZADO")
+        log.info("=" * 60)
+        return
+
+    # ── Modo batch SP_SMD sobre carpeta de grupo (--spsmd + --mol carpeta) ──
+    # Mismo patrón que el modo batch de --spgas: --mol apunta directo a la
+    # carpeta de grupo (ej. MGLYVAL), y se recorren TODOS los runs/ dentro
+    # de ella calculando el SP_SMD que falte, sin correr ningún otro paso.
+    if args.spsmd and mol_xyz.is_dir():
+        group_dir = mol_xyz
+        log = setup_logging(group_dir)
+        log.info("=" * 60)
+        log.info(f"MODO: SP_SMD batch (--spsmd) sobre carpeta de grupo → {group_dir.name}")
+        log.info("=" * 60)
+        stage_spsmd_batch(group_dir, log)
+        log.info("=" * 60)
+        log.info("SP_SMD BATCH FINALIZADO")
         log.info("=" * 60)
         return
 
@@ -5414,6 +5641,20 @@ def _run_one(args, parser):
     else:
         log.info("[SP_GAS] no incluido en esta ejecución (opcional — usa --spgas)")
 
+    # ── Etapa 4c: SP_SMD (OPCIONAL — requiere --spsmd) ────────────
+    # Idéntico al SP (Etapa 4) pero con SMD(water) en vez de CPCM(water).
+    # No bloquea "PIPELINE FINALIZADO" — es aditivo, igual que --spgas/--adc2.
+    if args.spsmd:
+        log.info(f"[SP_SMD] calculando SP con SMD(water) para "
+                 f"{len(sp_dirs)} confórmeros de 04_sp/")
+        spsmd_dirs = stage_sp_smd(sp_dirs, mol_dir, log)
+        if not spsmd_dirs:
+            log.warning("[SP_SMD] ningún cálculo completado.")
+        else:
+            log.info(f"[SP_SMD] {len(spsmd_dirs)}/{len(sp_dirs)} completados ✓")
+    else:
+        log.info("[SP_SMD] no incluido en esta ejecución (opcional — usa --spsmd)")
+
     # ── Etapa 5: TDDFT ──────────────────────────────────────────
     if start_idx <= STEPS.index("tddft"):
         tddft_dirs = stage_tddft(sp_dirs, mol_dir, args.charge, log)
@@ -5621,6 +5862,20 @@ Ejemplos (modo multi-molécula, --mol repetido):
             "Si --mol apunta a un .xyz: se agrega como paso extra al final de "
             "esa corrida. Si --mol apunta a una carpeta de grupo (ej. MGLYVAL, "
             "sin molecules/): calcula todos los sp_gas faltantes de TODOS los "
+            "runs/ dentro de esa carpeta, sin correr ningún otro paso."
+        ),
+    )
+    parser.add_argument(
+        "--spsmd", action="store_true",
+        help=(
+            "Incluye la etapa SP con SMD(water) (04c_sp_smd/) — OPCIONAL, "
+            "solo se calcula si se pide explícitamente. Idéntico al SP con "
+            "CPCM(water) pero usando SMD(water) en vez de CPCM(water) (misma "
+            "geometría, mismo charge/mult, leídos de 04_sp/<conf_id>/"
+            "opt_opt.xyz y sp.inp). "
+            "Si --mol apunta a un .xyz: se agrega como paso extra al final de "
+            "esa corrida. Si --mol apunta a una carpeta de grupo (ej. MGLYVAL, "
+            "sin molecules/): calcula todos los sp_smd faltantes de TODOS los "
             "runs/ dentro de esa carpeta, sin correr ningún otro paso."
         ),
     )
