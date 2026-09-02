@@ -3812,15 +3812,109 @@ def stage_sp_gas(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
     return successful
 
 
+def _find_screening_out(mol_dir: Path) -> Optional[Path]:
+    """
+    Busca 1_SCREENING.out de CENSO para mol_dir, probando las mismas rutas
+    candidatas que usa stage_censo_prescreen() (base, CENSO/, prescreening/).
+    Devuelve la primera candidata parseable, o None si ninguna lo es.
+    """
+    censo_dir = mol_dir / "01b_censo_prescreen"
+    candidates = [
+        censo_dir / "1_SCREENING.out",
+        censo_dir / "CENSO" / "1_SCREENING.out",
+        censo_dir / "prescreening" / "1_SCREENING.out",
+    ]
+    for p in candidates:
+        if parse_boltzmann_weights(p):
+            return p
+    return None
+
+
+def _filter_dirs_by_boltzmann(
+    conf_dirs: list[Path],
+    mol_dir:   Path,
+    log:       logging.Logger,
+    threshold: float,
+    stage_tag: str,
+) -> list[Path]:
+    """
+    Filtra conf_dirs (p.ej. 04_sp/conf_*) dejando solo los CONF# cuyo peso
+    Boltzmann (de 1_SCREENING.out de CENSO, ver _find_screening_out) sea
+    ESTRICTAMENTE MAYOR que threshold%. Es un filtro adicional por-estado:
+    cada mol_dir/run (cada estado del ensemble, p.ej. cada especie de
+    protonación) se filtra de forma independiente, ya que conf_dirs y
+    mol_dir siempre corresponden a un único run/estado.
+
+    Fail-open: si no hay 1_SCREENING.out parseable (p.ej. run sin CENSO
+    screening) o si el filtro no deja ningún confórmero, se cae de vuelta
+    a conf_dirs sin filtrar, con un warning — para no bloquear runs
+    antiguos o corridos sin este dato.
+    """
+    screening_out = _find_screening_out(mol_dir)
+    if screening_out is None:
+        log.warning(
+            f"[{stage_tag}] no se encontró 1_SCREENING.out parseable en "
+            f"{mol_dir.name}/01b_censo_prescreen/ — no se puede filtrar por "
+            f"Boltzmann (>{threshold}%), se usan los {len(conf_dirs)} "
+            f"confórmero(s) disponibles sin filtrar"
+        )
+        return conf_dirs
+
+    weights = parse_boltzmann_weights(screening_out)
+    kept, dropped, no_wt = [], [], []
+    for d in conf_dirs:
+        w = weights.get(d.name)
+        if w is None:
+            no_wt.append(d.name)
+        elif w > threshold:
+            kept.append(d)
+        else:
+            dropped.append((d.name, w))
+
+    if not kept:
+        log.warning(
+            f"[{stage_tag}] ningún confórmero de {mol_dir.name} supera "
+            f">{threshold}% Boltzmann — cayendo de vuelta a los "
+            f"{len(conf_dirs)} confórmero(s) sin filtrar"
+        )
+        return conf_dirs
+
+    kept_str = ", ".join(f"{d.name}({weights[d.name]:.1f}%)" for d in kept)
+    log.info(
+        f"[{stage_tag}] filtro Boltzmann >{threshold}% ({mol_dir.name}): "
+        f"{len(kept)}/{len(conf_dirs)} seleccionados: {kept_str}"
+    )
+    if dropped:
+        log.info(
+            f"[{stage_tag}] {len(dropped)} conf(s) descartados por debajo "
+            f"del umbral: {[f'{cid}({w:.1f}%)' for cid, w in dropped]}"
+        )
+    if no_wt:
+        log.warning(
+            f"[{stage_tag}] {len(no_wt)} conf(s) sin peso en "
+            f"{screening_out.name}, descartados: {no_wt}"
+        )
+    return kept
+
+
 def stage_sp_smd(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
                   batch_size: int = 0,
                   nprocs_per_job: Optional[int] = None,
-                  maxcore_per_job: Optional[int] = None) -> list[Path]:
+                  maxcore_per_job: Optional[int] = None,
+                  boltzmann_min_pct: float = 20.0) -> list[Path]:
     """
     Etapa 04c_sp_smd (OPCIONAL — requiere --spsmd): single point con
     SMD(water) (idéntico al SP con CPCM(water) pero usando SMD en vez de
     CPCM), sobre los mismos confórmeros y con la misma geometría/charge/mult
     que un 04_sp/<conf_id>/ ya exitoso.
+
+    Antes de correr, filtra sp_dirs quedándose SOLO con los confórmeros
+    cuyo peso Boltzmann (de 1_SCREENING.out de CENSO, propio de este
+    mol_dir/estado) sea > boltzmann_min_pct (default 20%) — es decir, los
+    mejores confórmeros de este estado, no todo el ensemble que llegó a SP.
+    Fail-open: si no hay dato Boltzmann disponible o el filtro no deja
+    ningún confórmero, corre sobre sp_dirs sin filtrar (ver
+    _filter_dirs_by_boltzmann).
 
     Devuelve directorios 04c_sp_smd/<conf_id>/ exitosos.
 
@@ -3828,6 +3922,10 @@ def stage_sp_smd(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
     nprocs_per_job / maxcore_per_job sobreescriben los globals NPROCS / MAXCORE
     para cada worker paralelo; si son None se usan los globals vigentes.
     """
+    sp_dirs = _filter_dirs_by_boltzmann(
+        sp_dirs, mol_dir, log, threshold=boltzmann_min_pct, stage_tag="SP_SMD"
+    )
+
     _batch   = batch_size if batch_size > 0 else SP_BATCH_SIZE
     _nprocs  = nprocs_per_job  if nprocs_per_job  is not None else NPROCS
     _maxcore = maxcore_per_job if maxcore_per_job is not None else MAXCORE
@@ -3900,7 +3998,8 @@ def stage_sp_smd(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
     return successful
 
 
-def stage_spsmd_batch(group_dir: Path, log: logging.Logger) -> None:
+def stage_spsmd_batch(group_dir: Path, log: logging.Logger,
+                       boltzmann_min_pct: float = 20.0) -> None:
     """
     Modo batch de --spsmd: recorre TODAS las corridas dentro de una carpeta
     de grupo (<grupo>/runs/*/04_sp/conf_*) y calcula el SP_SMD que falte
@@ -3908,6 +4007,10 @@ def stage_spsmd_batch(group_dir: Path, log: logging.Logger) -> None:
     NUMFREQ/TDDFT de ninguna. Como stage_sp_smd usa check_success() para
     saltar los ya hechos, correr el mismo comando dos veces es seguro
     (solo procesa los faltantes).
+
+    Cada mol_dir es un run/estado independiente, así que el filtro
+    Boltzmann (> boltzmann_min_pct, ver stage_sp_smd) se aplica por
+    separado dentro de cada uno.
 
     Se invoca cuando --spsmd se pasa con --mol apuntando a una carpeta de
     grupo (ej. MGLYVAL) en vez de a un .xyz específico.
@@ -3930,7 +4033,7 @@ def stage_spsmd_batch(group_dir: Path, log: logging.Logger) -> None:
             continue
 
         log.info(f"[SP_SMD] {mol_dir.name}: {len(sp_dirs)} confórmeros con SP CPCM completo")
-        done = stage_sp_smd(sp_dirs, mol_dir, log)
+        done = stage_sp_smd(sp_dirs, mol_dir, log, boltzmann_min_pct=boltzmann_min_pct)
         total_ok += len(done)
         total_pend += len(sp_dirs) - len(done)
 
@@ -5349,7 +5452,7 @@ def _run_one(args, parser):
         log.info("=" * 60)
         log.info(f"MODO: SP_SMD batch (--spsmd) sobre carpeta de grupo → {group_dir.name}")
         log.info("=" * 60)
-        stage_spsmd_batch(group_dir, log)
+        stage_spsmd_batch(group_dir, log, boltzmann_min_pct=args.spsmd_boltzmann_threshold)
         log.info("=" * 60)
         log.info("SP_SMD BATCH FINALIZADO")
         log.info("=" * 60)
@@ -5646,8 +5749,10 @@ def _run_one(args, parser):
     # No bloquea "PIPELINE FINALIZADO" — es aditivo, igual que --spgas/--adc2.
     if args.spsmd:
         log.info(f"[SP_SMD] calculando SP con SMD(water) para "
-                 f"{len(sp_dirs)} confórmeros de 04_sp/")
-        spsmd_dirs = stage_sp_smd(sp_dirs, mol_dir, log)
+                 f"{len(sp_dirs)} confórmeros de 04_sp/ "
+                 f"(filtro Boltzmann > {args.spsmd_boltzmann_threshold}%)")
+        spsmd_dirs = stage_sp_smd(sp_dirs, mol_dir, log,
+                                   boltzmann_min_pct=args.spsmd_boltzmann_threshold)
         if not spsmd_dirs:
             log.warning("[SP_SMD] ningún cálculo completado.")
         else:
@@ -5981,6 +6086,17 @@ Ejemplos (modo multi-molécula, --mol repetido):
             "(típicamente CONF7=41.7%%, CONF290=34.8%%, CONF81=5.9%% para SB). "
             "Si no se especifica, se usa select_nconf_auto (comportamiento por defecto). "
             "Si el umbral deja < NCONF_MIN confórmeros, se completan automáticamente."
+        ),
+    )
+    parser.add_argument(
+        "--spsmd-boltzmann-threshold", type=float, default=20.0, metavar="PCT",
+        help=(
+            "Umbral de peso Boltzmann (%%) para filtrar qué confórmeros de "
+            "04_sp/ se optimizan con --spsmd (SP_SMD): solo corre sobre los "
+            "confórmeros con peso Boltzmann > PCT en 1_SCREENING.out de CENSO "
+            "(por estado/run). Default: 20.0. Si no hay 1_SCREENING.out "
+            "disponible o el filtro no deja ningún confórmero, se cae de "
+            "vuelta a todos los confórmeros de 04_sp/ (fail-open)."
         ),
     )
 
