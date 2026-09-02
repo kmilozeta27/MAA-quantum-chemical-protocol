@@ -1492,9 +1492,25 @@ def run_orca(inp_file: Path, out_file: Path, log: logging.Logger,
 # ─────────────────────────────────────────────
 
 def stage_crest(mol_xyz: Path, mol_dir: Path, charge: int,
-                log: logging.Logger) -> Optional[Path]:
+                log: logging.Logger, autoprotonate: bool = False,
+                autodeprotonate: bool = False) -> Optional[Path]:
     """
     Etapa 01_crest: corre CREST sobre la molécula de entrada.
+
+    Modo normal: muestreo conformacional estándar.
+    Modo autoprotonate/autodeprotonate: usa el modo --protonate/--deprotonate
+    de CREST para generar y rankear sitios candidatos de (des)protonación,
+    en vez del muestreo conformacional normal. Se mantienen --T/--chrg/
+    --uhf/--alpb water igual que en modo normal — solo cambia el flag de
+    modo. El resultado se normaliza a 01_crest/crest_conformers.xyz para
+    que el resto del pipeline lo use sin cambios.
+
+    ATENCIÓN: las estructuras resultantes de estos dos modos tienen carga
+    real = charge ± 1 (CREST lo maneja internamente sumando/restando el
+    protón sobre el --chrg de partida), pero esta función NO ajusta
+    `charge` para el resto del pipeline — eso queda a criterio del caller
+    (ver --autoprotonate/--autodeprotonate en el CLI).
+
     Devuelve la ruta al crest_conformers.xyz, o None si falla.
     """
     crest_dir = mol_dir / "01_crest"
@@ -1510,11 +1526,22 @@ def stage_crest(mol_xyz: Path, mol_dir: Path, charge: int,
 
     safe_copy(mol_xyz, input_xyz)
 
+    if autoprotonate:
+        modo_str = "  [--autoprotonate → crest --protonate]"
+    elif autodeprotonate:
+        modo_str = "  [--autodeprotonate → crest --deprotonate]"
+    else:
+        modo_str = ""
+
     log.info(f"[CREST] lanzando sobre {mol_xyz.name}  (carga={charge})"
+             + modo_str
              + ("  [nohup]" if USE_NOHUP else ""))
-    cmd = [
-        str(CREST_BIN),
-        str(input_xyz.name),
+    cmd = [str(CREST_BIN), str(input_xyz.name)]
+    if autoprotonate:
+        cmd.append("--protonate")
+    elif autodeprotonate:
+        cmd.append("--deprotonate")
+    cmd += [
         "--T", str(NPROCS_CREST),
         "--chrg", str(charge),
         "--uhf", "0",
@@ -1547,8 +1574,18 @@ def stage_crest(mol_xyz: Path, mol_dir: Path, charge: int,
 
     elapsed = (time.time() - t0) / 60
 
-    # CREST puede escribir el archivo con distintos nombres
-    for candidate in ["crest_conformers.xyz", "crest_best.xyz"]:
+    # CREST puede escribir el archivo con distintos nombres. En modo
+    # --protonate/--deprotonate el ensemble final se llama protonated.xyz /
+    # deprotonated.xyz en vez de crest_conformers.xyz — se prioriza ese
+    # nombre pero se mantienen los candidatos normales como fallback.
+    if autoprotonate:
+        output_candidates = ["protonated.xyz", "crest_conformers.xyz", "crest_best.xyz"]
+    elif autodeprotonate:
+        output_candidates = ["deprotonated.xyz", "crest_conformers.xyz", "crest_best.xyz"]
+    else:
+        output_candidates = ["crest_conformers.xyz", "crest_best.xyz"]
+
+    for candidate in output_candidates:
         src = crest_dir / candidate
         if src.exists() and src.stat().st_size > 0:
             if not safe_copy(src, conformers_xyz):
@@ -1561,7 +1598,21 @@ def stage_crest(mol_xyz: Path, mol_dir: Path, charge: int,
             n = len(read(str(conformers_xyz), index=":"))
         except Exception:
             n = "?"
-        log.info(f"[CREST] {n} confórmeros generados en {elapsed:.1f} min")
+        etiqueta = ("sitios de protonación candidatos" if autoprotonate else
+                    "sitios de desprotonación candidatos" if autodeprotonate else
+                    "confórmeros")
+        log.info(f"[CREST] {n} {etiqueta} generados en {elapsed:.1f} min")
+        if autoprotonate or autodeprotonate:
+            carga_real = charge + 1 if autoprotonate else charge - 1
+            signo = "+ 1" if autoprotonate else "- 1"
+            log.warning(
+                f"[CREST] las estructuras de {conformers_xyz.name} tienen "
+                f"carga REAL = {carga_real}  (--charge={charge} {signo}). "
+                f"Las etapas siguientes de ESTE run seguirán usando "
+                f"--charge={charge} sin ajustar — si vas a continuar el "
+                f"pipeline sobre la estructura elegida, arranca un run "
+                f"nuevo con --charge {carga_real}."
+            )
         return conformers_xyz
     else:
         log.error(f"[CREST] no se encontró conformers.xyz "
@@ -5578,7 +5629,11 @@ def _run_one(args, parser):
     conformers_xyz = mol_dir / "01_crest" / "crest_conformers.xyz"
 
     if start_idx == 0:
-        conformers_xyz = stage_crest(mol_xyz, mol_dir, args.charge, log)
+        conformers_xyz = stage_crest(
+            mol_xyz, mol_dir, args.charge, log,
+            autoprotonate=args.autoprotonate,
+            autodeprotonate=args.autodeprotonate,
+        )
         if conformers_xyz is None:
             log.error("CREST falló. Abortando pipeline.")
             sys.exit(1)
@@ -5589,6 +5644,12 @@ def _run_one(args, parser):
                 f"{conformers_xyz}\n"
                 f"       Corre primero desde el inicio (sin --start) para "
                 f"generar el ensemble CREST+CENSO."
+            )
+        if args.autoprotonate or args.autodeprotonate:
+            log.warning(
+                "[CREST] --autoprotonate/--autodeprotonate no tienen efecto "
+                "aquí: CREST no corre en esta invocación "
+                f"(--start {args.start} indica etapa posterior)."
             )
         log.info("[CREST] saltado (--start indica etapa posterior)")
 
@@ -5897,6 +5958,35 @@ Ejemplos (modo multi-molécula, --mol repetido):
     parser.add_argument("--mol",    type=Path, help="ruta al .xyz de entrada")
     parser.add_argument("--charge", type=int, default=0,
                         help="carga formal de la molécula (default: 0)")
+    _protonation_group = parser.add_mutually_exclusive_group()
+    _protonation_group.add_argument(
+        "--autoprotonate", action="store_true",
+        help=(
+            "Solo afecta la etapa CREST inicial (01_crest/, requiere "
+            "--start crest, el default): en vez de muestreo conformacional "
+            "normal, corre CREST en modo --protonate para generar y "
+            "rankear sitios de protonación candidatos. Se mantienen "
+            "--T/--chrg/--uhf 0/--alpb water igual que el CREST normal — "
+            "solo cambia el flag de modo. El resultado (protonated.xyz) se "
+            "copia a 01_crest/crest_conformers.xyz. ATENCIÓN: las "
+            "estructuras resultantes tienen carga REAL = --charge + 1; "
+            "este flag NO propaga ese cambio a las etapas posteriores "
+            "(OPT/SP/...), que siguen usando --charge tal cual — arranca "
+            "un run nuevo con el --charge correcto sobre la estructura "
+            "elegida para continuar el pipeline."
+        ),
+    )
+    _protonation_group.add_argument(
+        "--autodeprotonate", action="store_true",
+        help=(
+            "Análogo a --autoprotonate pero con el modo --deprotonate de "
+            "CREST (sitios de desprotonación candidatos), misma mecánica "
+            "(--T/--chrg/--uhf 0/--alpb water sin cambios, salida "
+            "normalizada a 01_crest/crest_conformers.xyz). ATENCIÓN: carga "
+            "REAL resultante = --charge - 1; tampoco se propaga a las "
+            "etapas posteriores de este run."
+        ),
+    )
     parser.add_argument("--start",  choices=STEPS, default="crest",
                         help="etapa desde la que iniciar (default: crest). "
                              "SP (fase gas) es obligatorio: el pipeline no se "
