@@ -196,6 +196,7 @@ G_HPLUS_AQ = G_HPLUS_AQ_DIRECT
 SUBDIR_SP      = "04_sp"
 SUBDIR_FREQ    = "03_numfreq"
 SUBDIR_SP_GAS  = "04b_sp_gas"  # SPs sin CPCM para el ciclo de pKa
+SUBDIR_SP_SMD  = "04c_sp_smd"  # SPs con SMD(water) en vez de CPCM(water) [--spsmd]
 
 # ─────────────────────────────────────────────
 #  GOODVIBES  (corrección cuasi-armónica opcional)
@@ -1170,12 +1171,17 @@ def get_thermochem(
 # ─────────────────────────────────────────────
 
 def collect_mol_data(mol_name: str, verbose: bool = False,
-                      gcorr_source: str = "harmonic") -> dict:
+                      gcorr_source: str = "harmonic",
+                      use_smd: bool = False) -> dict:
     """
     Recolecta los datos termodinámicos de todos los confórmeros de una molécula.
 
     Para cada confórmero con SP acuoso:
-      - E_sp_aq   : energía SP con CPCM (Hartree)
+      - E_sp_aq   : energía SP "acuosa" (Hartree). Por default, CPCM(water)
+                    de 04_sp/conf_NNN/sp.out. Si use_smd=True, en su lugar se
+                    usa SMD(water) de 04c_sp_smd/conf_NNN/sp_smd.out (falta
+                    silenciosamente a NaN si ese confórmero no tiene SP_SMD
+                    calculado — igual que E_sp_gas con SP_GAS).
       - E_sp_gas  : energía SP sin CPCM (Hartree, de 04b_sp_gas — opcional)
       - G_corr(T) : corrección de Gibbs de NumFreq, re-evaluada a cada T (Hartree)
       - G_total(T): E_sp_aq + G_corr(T)    ciclo compuesto Ho & Coote
@@ -1188,6 +1194,7 @@ def collect_mol_data(mol_name: str, verbose: bool = False,
         G_boltz(T)      : dict {label: G_boltzmann en Hartree} — ensemble efectivo
         ok              : bool
         warnings        : list[str]
+        aq_source       : str — "CPCM" o "SMD", según use_smd
     """
     mol_dir = WORK_ROOT / mol_name
     warns: list[str] = []
@@ -1205,14 +1212,26 @@ def collect_mol_data(mol_name: str, verbose: bool = False,
                 "warnings": [f"No SP conformers in {mol_dir / SUBDIR_SP}"],
                 "conformers": [], "df": pd.DataFrame()}
 
+    aq_source = "SMD" if use_smd else "CPCM"
     rows: list[dict] = []
+    n_missing_smd = 0
 
     for sp_dir in sp_dirs:
         conf_id = sp_dir.name
 
-        # SP acuoso (CPCM)
-        sp_aq_file  = sp_dir / "sp.out"
-        e_sp_aq     = parse_sp_energy(sp_aq_file)
+        # SP acuoso — CPCM (default) o SMD (si use_smd=True). El nombre de
+        # columna sigue siendo E_sp_aq en ambos casos: el resto del pipeline
+        # (compute_pka, _state_G_total_direct, compute_tautomer_equilibrium)
+        # no necesita saber cuál de los dos modelos de solvente se usó, solo
+        # que "E_sp_aq" es la energía acuosa vigente para esta corrida.
+        if use_smd:
+            sp_aq_file = mol_dir / SUBDIR_SP_SMD / conf_id / "sp_smd.out"
+            e_sp_aq    = parse_sp_energy(sp_aq_file)
+            if e_sp_aq is None:
+                n_missing_smd += 1
+        else:
+            sp_aq_file  = sp_dir / "sp.out"
+            e_sp_aq     = parse_sp_energy(sp_aq_file)
 
         # SP fase gas (sin CPCM) — para el ciclo de pKa
         sp_gas_file = mol_dir / SUBDIR_SP_GAS / conf_id / "sp_gas.out"
@@ -1232,8 +1251,9 @@ def collect_mol_data(mol_name: str, verbose: bool = False,
 
         # Carga/multiplicidad/N° átomos — para validación cruzada entre
         # estados (ver _validate_state_charges). Se intenta primero desde el
-        # SP acuoso y, si falla, desde el freq.out del mismo confórmero.
-        cmn = parse_charge_mult_natoms(sp_aq_file)
+        # SP acuoso (CPCM, siempre disponible como referencia estructural) y,
+        # si falla, desde el freq.out del mismo confórmero.
+        cmn = parse_charge_mult_natoms(sp_dir / "sp.out")
         if cmn["charge"] is None and cmn["n_atoms"] is None:
             cmn = parse_charge_mult_natoms(freq_file)
 
@@ -1264,7 +1284,7 @@ def collect_mol_data(mol_name: str, verbose: bool = False,
         if verbose:
             gas_str = f"{e_sp_gas:.8f}" if e_sp_gas is not None else "—"
             aq_str  = f"{e_sp_aq:.8f}"  if e_sp_aq is not None  else "—"
-            print(f"    {conf_id}: E_aq={aq_str}  E_gas={gas_str}  "
+            print(f"    {conf_id}: E_aq[{aq_source}]={aq_str}  E_gas={gas_str}  "
                   f"thermo={'✓' if tc['ok'] else '✗'}  n_imag={tc['n_imag']}")
 
     df = pd.DataFrame(rows)
@@ -1321,6 +1341,19 @@ def collect_mol_data(mol_name: str, verbose: bool = False,
             f"The pKa cycle requires the gas-phase SP of the representative conformer."
         )
 
+    # Warning if SMD SP is missing (only relevant when use_smd=True — in
+    # that case E_sp_aq itself comes from SUBDIR_SP_SMD, so a missing file
+    # here means the conformer has NO aqueous energy at all, not just a
+    # secondary/optional one like E_sp_gas).
+    if use_smd and n_missing_smd > 0:
+        warns.append(
+            f"[{mol_name}] {n_missing_smd}/{len(df)} conformers without SMD SP "
+            f"(expected at runs/{mol_name}/{SUBDIR_SP_SMD}/conf_NNN/sp_smd.out). "
+            f"Run the pipeline with --spsmd for this molecule before using "
+            f"--spsmd here. Those conformers will have E_sp_aq=NaN and be "
+            f"excluded from the Boltzmann ensemble and from best_conf."
+        )
+
     # ── Carga / multiplicidad / N° átomos a nivel de estado ────────────────
     # Todos los confórmeros de un mismo estado deben compartir carga, mult.
     # y N° de átomos (son el mismo sistema químico, solo geometrías
@@ -1369,6 +1402,8 @@ def collect_mol_data(mol_name: str, verbose: bool = False,
         "ok":           len(rows) > 0,
         "warnings":     warns,
         "gcorr_source": gcorr_source,
+        "aq_source":    aq_source,    # "CPCM" o "SMD" — de dónde vino E_sp_aq
+        "use_smd":      use_smd,
     }
 
 
@@ -1418,8 +1453,12 @@ def _state_G_total_direct(data: dict, T: float = T_STD,
     if conf is None:
         return {"ok": False, "warn": f"No representative conformer for {mol}."}
 
-    freq_file   = WORK_ROOT / mol / SUBDIR_FREQ / conf / "freq.out"
-    theory_sp   = parse_theory_level(WORK_ROOT / mol / SUBDIR_SP / conf / "sp.out")
+    use_smd = data.get("use_smd", False)
+    freq_file = WORK_ROOT / mol / SUBDIR_FREQ / conf / "freq.out"
+    if use_smd:
+        theory_sp = parse_theory_level(WORK_ROOT / mol / SUBDIR_SP_SMD / conf / "sp_smd.out")
+    else:
+        theory_sp = parse_theory_level(WORK_ROOT / mol / SUBDIR_SP / conf / "sp.out")
     theory_freq = parse_theory_level(freq_file)
 
     warn_fallback = None
@@ -1535,6 +1574,14 @@ def compute_tautomer_equilibrium(
         )
         return result
 
+    if data_R.get("use_smd", False) != data_D.get("use_smd", False):
+        _warn(
+            f"INCONSISTENT SOLVATION MODEL between tautomers: "
+            f"{mol_R} uses aqueous SP from {data_R.get('aq_source', 'CPCM')}, "
+            f"{mol_D} uses {data_D.get('aq_source', 'CPCM')}. Both tautomers "
+            f"must use the same solvent model (both --spsmd or neither)."
+        )
+
     gR = _state_G_total_direct(data_R, T=T, gcorr_source=gcorr_source)
     gD = _state_G_total_direct(data_D, T=T, gcorr_source=gcorr_source)
 
@@ -1553,7 +1600,7 @@ def compute_tautomer_equilibrium(
         _warn(
             f"INCONSISTENT THEORY LEVEL in the aqueous SP between "
             f"{mol_R} ('{gR['theory_sp']}') and {mol_D} ('{gD['theory_sp']}'). "
-            f"The tautomer comparison is not valid if basis set/functional/CPCM differ."
+            f"The tautomer comparison is not valid if basis set/functional/solvent model differ."
         )
 
     G_R = gR["G_total_Eh"]
@@ -1577,6 +1624,7 @@ def compute_tautomer_equilibrium(
     result.update({
         "dG_taut_kcal": dG_taut_kcal, "K_taut": K_taut,
         "f_R": f_R, "f_D": f_D, "G_macro_Eh": G_macro, "ok": True,
+        "aq_source": data_R.get("aq_source", "CPCM"),
     })
 
     if verbose:
@@ -1597,8 +1645,9 @@ def _print_tautomer_cycle(r: dict):
     print(f"  SP level (R) : {r['theory_R'] or '—'}")
     print(f"  SP level (D) : {r['theory_D'] or '—'}")
     print()
-    print(f"  {'G_total_CPCM(R)  [Eh]':<40} {r['G_R_Eh']:>14.8f}")
-    print(f"  {'G_total_CPCM(D)  [Eh]':<40} {r['G_D_Eh']:>14.8f}")
+    aq_src_taut = r.get("aq_source", "CPCM")
+    print(f"  {'G_total_' + aq_src_taut + '(R)  [Eh]':<40} {r['G_R_Eh']:>14.8f}")
+    print(f"  {'G_total_' + aq_src_taut + '(D)  [Eh]':<40} {r['G_D_Eh']:>14.8f}")
     print(f"  {'─'*40}  {'─'*14}")
     print(f"  {'ΔG_taut = G(D) − G(R)  [kcal/mol]':<40} {r['dG_taut_kcal']:>+14.3f}")
     print(f"  {'K_taut = [D]/[R]':<40} {r['K_taut']:>14.4g}")
@@ -1749,6 +1798,18 @@ def compute_pka(
         # el best_conf — ver nota #3 del review. Para el lado que SÍ es
         # macroestado, _state_G_total_direct ignora use_ensemble (ya entra
         # por la rama is_macrostate de arriba).
+        use_smd_acid = data_acid.get("use_smd", False)
+        use_smd_base = data_base.get("use_smd", False)
+        if use_smd_acid != use_smd_base:
+            _warn(
+                f"INCONSISTENT SOLVATION MODEL between states: "
+                f"{mol_acid} uses aqueous SP from "
+                f"{data_acid.get('aq_source', 'CPCM')}, {mol_base} uses "
+                f"{data_base.get('aq_source', 'CPCM')}. Both --spsmd or "
+                f"neither — the energy difference is not physically "
+                f"meaningful otherwise."
+            )
+
         g_acid = _state_G_total_direct(data_acid, T=T, gcorr_source=gcorr_source,
                                        use_ensemble=True)
         g_base = _state_G_total_direct(data_base, T=T, gcorr_source=gcorr_source,
@@ -1758,6 +1819,8 @@ def compute_pka(
         result["conf_base"] = g_base.get("conf")
         result["theory_sp_acid"] = g_acid.get("theory_sp")
         result["theory_sp_base"] = g_base.get("theory_sp")
+        result["aq_source_acid"] = data_acid.get("aq_source", "CPCM")
+        result["aq_source_base"] = data_base.get("aq_source", "CPCM")
 
         if not g_acid.get("ok"):
             _warn(g_acid.get("warn") or f"Could not obtain G_total for {mol_acid}.")
@@ -1864,13 +1927,37 @@ def compute_pka(
     row_acid = df_acid[df_acid["conformer"] == conf_acid].iloc[0]
     row_base = df_base[df_base["conformer"] == conf_base].iloc[0]
 
+    # ── ¿Alguno de los dos estados usa SMD en vez de CPCM? ─────────────────
+    use_smd_acid = data_acid.get("use_smd", False)
+    use_smd_base = data_base.get("use_smd", False)
+    aq_source_acid = data_acid.get("aq_source", "CPCM")
+    aq_source_base = data_base.get("aq_source", "CPCM")
+
+    if use_smd_acid != use_smd_base:
+        _warn(
+            f"INCONSISTENT SOLVATION MODEL between states: "
+            f"{mol_acid} uses aqueous SP from {aq_source_acid}, "
+            f"{mol_base} uses {aq_source_base}. Both states of a pKa pair "
+            f"must use the same solvent model (both --spsmd or neither) — "
+            f"the energy difference is not physically meaningful otherwise."
+        )
+
     # ── Verificación de consistencia de nivel de teoría ────────────────────
     # Compara las líneas de keywords ORCA del SP acuoso y del freq.out entre
-    # acid y base. Un desajuste aquí (distinta base, funcional, o grid) invalida
-    # la resta de energías de ~1000+ Eh para sacar una diferencia de ~0.4 Eh,
-    # independientemente de qué convención de G(H⁺) se use después.
-    sp_acid_file  = WORK_ROOT / mol_acid / SUBDIR_SP / conf_acid / "sp.out"
-    sp_base_file  = WORK_ROOT / mol_base / SUBDIR_SP / conf_base / "sp.out"
+    # acid y base. Un desajuste aquí (distinta base, funcional, o modelo de
+    # solvente/grid) invalida la resta de energías de ~1000+ Eh para sacar
+    # una diferencia de ~0.4 Eh, independientemente de qué convención de
+    # G(H⁺) se use después.
+    sp_acid_file = (
+        WORK_ROOT / mol_acid / SUBDIR_SP_SMD / conf_acid / "sp_smd.out"
+        if use_smd_acid else
+        WORK_ROOT / mol_acid / SUBDIR_SP / conf_acid / "sp.out"
+    )
+    sp_base_file = (
+        WORK_ROOT / mol_base / SUBDIR_SP_SMD / conf_base / "sp_smd.out"
+        if use_smd_base else
+        WORK_ROOT / mol_base / SUBDIR_SP / conf_base / "sp.out"
+    )
     freq_acid_lvl = parse_theory_level(WORK_ROOT / mol_acid / SUBDIR_FREQ / conf_acid / "freq.out")
     freq_base_lvl = parse_theory_level(WORK_ROOT / mol_base / SUBDIR_FREQ / conf_base / "freq.out")
     sp_acid_lvl   = parse_theory_level(sp_acid_file)
@@ -1880,13 +1967,15 @@ def compute_pka(
     result["theory_sp_base"]   = sp_base_lvl
     result["theory_freq_acid"] = freq_acid_lvl
     result["theory_freq_base"] = freq_base_lvl
+    result["aq_source_acid"]   = aq_source_acid
+    result["aq_source_base"]   = aq_source_base
 
     if sp_acid_lvl and sp_base_lvl and sp_acid_lvl != sp_base_lvl:
         _warn(
             f"INCONSISTENT THEORY LEVEL in the aqueous SP between "
             f"{mol_acid} ('{sp_acid_lvl}') and {mol_base} ('{sp_base_lvl}'). "
-            f"The pKa cycle is NOT valid if the basis set/functional/CPCM "
-            f"differ between states — check before reporting."
+            f"The pKa cycle is NOT valid if the basis set/functional/solvent "
+            f"model differ between states — check before reporting."
         )
     if freq_acid_lvl and freq_base_lvl and freq_acid_lvl != freq_base_lvl:
         _warn(
@@ -1894,17 +1983,17 @@ def compute_pka(
             f"{mol_acid} ('{freq_acid_lvl}') and {mol_base} ('{freq_base_lvl}')."
         )
 
-    # ── Energías SP acuosas (CPCM) ────────────────────────────────────────
+    # ── Energías SP acuosas (CPCM o SMD, según use_smd) ────────────────────
     E_aq_acid = row_acid["E_sp_aq"]
     E_aq_base = row_base["E_sp_aq"]
     result["E_sp_aq_acid_Eh"] = E_aq_acid
     result["E_sp_aq_base_Eh"] = E_aq_base
 
     if E_aq_acid is None or pd.isna(E_aq_acid):
-        _warn(f"No aqueous SP for {mol_acid}/{conf_acid}.")
+        _warn(f"No aqueous SP ({aq_source_acid}) for {mol_acid}/{conf_acid}.")
         return result
     if E_aq_base is None or pd.isna(E_aq_base):
-        _warn(f"No aqueous SP for {mol_base}/{conf_base}.")
+        _warn(f"No aqueous SP ({aq_source_base}) for {mol_base}/{conf_base}.")
         return result
 
     # ── Energías SP fase gas (pueden faltar) ───────────────────────────────
@@ -1930,11 +2019,23 @@ def compute_pka(
 
     use_born = have_gas and method in ("auto", "born")
 
+    if use_born and (use_smd_acid or use_smd_base):
+        _warn(
+            f"method='born' with --spsmd: the Born-cycle constants "
+            f"(G_HPLUS_GAS, DG_SOLV_HPLUS, DG_CONC_CORR) were calibrated "
+            f"against CPCM(water) aqueous energies, not SMD(water). "
+            f"ΔG_solv(X) = E_SP(SMD) − E_SP(gas) + δG_conc mixes solvent "
+            f"models against a cycle closed for CPCM — treat this pKa as "
+            f"uncalibrated/exploratory. Consider method='direct' with "
+            f"--spsmd instead, which only compares SMD energies to each "
+            f"other and does not depend on the Born-cycle gas-phase constants."
+        )
+
     if method == "auto" and not have_gas:
         _warn(
             f"No gas-phase SP for {mol_acid}/{conf_acid} and/or {mol_base}/{conf_base}. "
-            f"Using the direct method (CPCM only) instead: "
-            f"ΔG_aq = G_total_CPCM(base) − G_total_CPCM(acid) + G(H⁺,aq). "
+            f"Using the direct method ({aq_source_acid} only) instead: "
+            f"ΔG_aq = G_total_{aq_source_base}(base) − G_total_{aq_source_acid}(acid) + G(H⁺,aq). "
             f"For the full Born cycle, create the gas-phase SPs in "
             f"{SUBDIR_SP_GAS}/conf_NNN/sp_gas.out."
         )
@@ -1985,7 +2086,10 @@ def compute_pka(
         result["dG_gas_kcal"] = dG_gas_kcal
 
         # ── ΔG_solv por especie ───────────────────────────────────────────
-        # ΔG_solv(X) = E_SP(CPCM) − E_SP(gas) + δG_conc
+        # ΔG_solv(X) = E_SP(aq_source) − E_SP(gas) + δG_conc
+        # aq_source es CPCM salvo que use_smd=True para ese estado (ver
+        # warning arriba: mezclar SMD con las constantes de Born calibradas
+        # para CPCM deja el resultado como uncalibrado/exploratorio).
         dG_solv_acid = (E_aq_acid - E_gas_acid) * HARTREE_TO_KCAL + DG_CONC_CORR
         dG_solv_base = (E_aq_base - E_gas_base) * HARTREE_TO_KCAL + DG_CONC_CORR
         result["dG_solv_acid_kcal"] = dG_solv_acid
@@ -2003,15 +2107,15 @@ def compute_pka(
         result["method"] = "born"
 
     else:
-        # ── Método directo: solo energías CPCM ───────────────────────────
-        # G_total_CPCM(X) = E_SP(CPCM) + G_corr(X)
+        # ── Método directo: solo energías acuosas (CPCM o SMD) ────────────
+        # G_total(X) = E_SP(aq_source) + G_corr(X)
         G_total_acid = E_aq_acid + (G_corr_acid if G_corr_acid is not None else 0.0)
         G_total_base = E_aq_base + (G_corr_base if G_corr_base is not None else 0.0)
         result["G_total_acid_Eh"] = G_total_acid
         result["G_total_base_Eh"] = G_total_base
         result["G_hplus_aq_kcal"] = G_HPLUS_AQ_DIRECT
 
-        # ΔG_aq = G_total_CPCM(A⁻) − G_total_CPCM(AH) + G(H⁺, aq)
+        # ΔG_aq = G_total(A⁻) − G_total(AH) + G(H⁺, aq)   [aq_source: CPCM o SMD]
         dG_aq_kcal = (G_total_base - G_total_acid) * HARTREE_TO_KCAL + G_HPLUS_AQ_DIRECT
         result["dG_aq_kcal"] = dG_aq_kcal
         result["method"] = "direct"
@@ -2250,6 +2354,9 @@ def compute_pka_montecarlo(
 
 def _print_born_cycle(r: dict):
     """Imprime las contribuciones detalladas del ciclo de Born."""
+    aq_acid_bc = r.get("aq_source_acid", "CPCM")
+    aq_base_bc = r.get("aq_source_base", "CPCM")
+    aq_label_bc = aq_acid_bc if aq_acid_bc == aq_base_bc else f"{aq_acid_bc}/{aq_base_bc}"
     sep = "─" * 66
     print(f"\n  {sep}")
     print(f"  BORN CYCLE — {r['mol_acid']} → {r['mol_base']} + H⁺")
@@ -2259,6 +2366,9 @@ def _print_born_cycle(r: dict):
     print(f"  Conf. A⁻  : {r['conf_base']}")
     print(f"  SP level (AH)  : {r['theory_sp_acid'] or '—'}")
     print(f"  SP level (A⁻)  : {r['theory_sp_base'] or '—'}")
+    if aq_label_bc != "CPCM":
+        print(f"  Aqueous SP source: {aq_label_bc}  (Born-cycle constants "
+              f"calibrated for CPCM — see warnings below)")
     print()
     print(f"  {'Term':<40} {'Value':>12}")
     print(f"  {'─'*40}  {'─'*12}")
@@ -2279,7 +2389,7 @@ def _print_born_cycle(r: dict):
     print()
     pka_str = f"{r['pKa']:.2f}" if r['pKa'] is not None else "N/A"
     print(f"  pKa = ΔG_aq / (RT·ln10)  =  {pka_str}")
-    print(f"  (typical uncertainty ±1–2 units; Born/CPCM/TZVPD)")
+    print(f"  (typical uncertainty ±1–2 units; Born/{aq_label_bc}/TZVPD)")
     if r["warnings"]:
         print(f"\n  Warnings:")
         for w in r["warnings"]:
@@ -2288,10 +2398,13 @@ def _print_born_cycle(r: dict):
 
 
 def _print_direct_cycle(r: dict):
-    """Imprime las contribuciones del método directo (solo CPCM, sin fase gas)."""
+    """Imprime las contribuciones del método directo (solo energía acuosa, sin fase gas)."""
+    aq_acid = r.get("aq_source_acid", "CPCM")
+    aq_base = r.get("aq_source_base", "CPCM")
+    aq_label = aq_acid if aq_acid == aq_base else f"{aq_acid}/{aq_base}"
     sep = "─" * 66
     print(f"\n  {sep}")
-    print(f"  DIRECT METHOD (CPCM only) — {r['mol_acid']} → {r['mol_base']} + H⁺")
+    print(f"  DIRECT METHOD ({aq_label} only) — {r['mol_acid']} → {r['mol_base']} + H⁺")
     print(f"  T = {r['T']:.2f} K")
     print(f"  {sep}")
     print(f"  Conf. AH  : {r['conf_acid']}")
@@ -2299,8 +2412,8 @@ def _print_direct_cycle(r: dict):
     print(f"  SP level (AH)  : {r['theory_sp_acid'] or '—'}")
     print(f"  SP level (A⁻)  : {r['theory_sp_base'] or '—'}")
     print()
-    print(f"  {'G_total_CPCM(AH)  [Eh]':<40} {r['G_total_acid_Eh']:>12.8f}")
-    print(f"  {'G_total_CPCM(A⁻)  [Eh]':<40} {r['G_total_base_Eh']:>12.8f}")
+    print(f"  {f'G_total_{aq_acid}(AH)  [Eh]':<40} {r['G_total_acid_Eh']:>12.8f}")
+    print(f"  {f'G_total_{aq_base}(A⁻)  [Eh]':<40} {r['G_total_base_Eh']:>12.8f}")
     print(f"  {'G(H⁺, aq)  [kcal/mol]':<40} {r['G_hplus_aq_kcal']:>12.3f}"
           f"   [Pliego & Riveros 2002, JPCA 106, 7434]")
     print(f"  {'─'*40}  {'─'*12}")
@@ -2328,6 +2441,9 @@ def _print_born_cycle_macrostate(r: dict):
     de eso, se muestra explícitamente la reducción algebraica a la resta de
     energías CPCM con la constante G_HPLUS_AQ_BORN.
     """
+    aq_acid_ms = r.get("aq_source_acid", "CPCM")
+    aq_base_ms = r.get("aq_source_base", "CPCM")
+    aq_label_ms = aq_acid_ms if aq_acid_ms == aq_base_ms else f"{aq_acid_ms}/{aq_base_ms}"
     sep = "─" * 66
     print(f"\n  {sep}")
     print(f"  BORN CYCLE (macrostate, algebraic reduction) — "
@@ -2340,13 +2456,13 @@ def _print_born_cycle_macrostate(r: dict):
     print(f"  SP level (A⁻)  : {r['theory_sp_base'] or '—'}")
     print()
     print(f"  No explicit gas-phase SP is used for the mixture — the Born")
-    print(f"  cycle reduces algebraically to the CPCM-only energy difference")
+    print(f"  cycle reduces algebraically to the {aq_label_ms}-only energy difference")
     print(f"  (same E_gas-cancellation already present for a single species")
     print(f"  in this script; see the derivation note above")
     print(f"  compute_pka_montecarlo()).")
     print()
-    print(f"  {'G_total_CPCM(AH)  [Eh]':<40} {r['G_total_acid_Eh']:>12.8f}")
-    print(f"  {'G_total_CPCM(A⁻)  [Eh]':<40} {r['G_total_base_Eh']:>12.8f}")
+    print(f"  {'G_total_' + aq_acid_ms + '(AH)  [Eh]':<40} {r['G_total_acid_Eh']:>12.8f}")
+    print(f"  {'G_total_' + aq_base_ms + '(A⁻)  [Eh]':<40} {r['G_total_base_Eh']:>12.8f}")
     print(f"  {'G(H⁺, aq)  [kcal/mol]':<40} {r['G_hplus_aq_kcal']:>12.3f}"
           f"   [Tissandier 1998 + Kelly 2006]")
     print(f"  {'─'*40}  {'─'*12}")
@@ -2356,7 +2472,7 @@ def _print_born_cycle_macrostate(r: dict):
     print()
     pka_str = f"{r['pKa']:.2f}" if r['pKa'] is not None else "N/A"
     print(f"  pKa = ΔG_aq / (RT·ln10)  =  {pka_str}")
-    print(f"  (typical uncertainty ±1–2 units; Born/CPCM/TZVPD)")
+    print(f"  (typical uncertainty ±1–2 units; Born/{aq_label_ms}/TZVPD)")
     if r["warnings"]:
         print(f"\n  Warnings:")
         for w in r["warnings"]:
@@ -2827,7 +2943,7 @@ def print_mol_summary(data: dict, verbose: bool = False):
     cols_b    = [c for c in df.columns if c.startswith("boltz_")]
     cols_dg   = [c for c in df.columns if c.startswith("dG_")]
 
-    print(f"\n  Confórmeros SP (acuoso, CPCM):")
+    print(f"\n  Confórmeros SP (acuoso, {data.get('aq_source', 'CPCM')}):")
     disp = df[cols_base + cols_g[:2] + cols_b[:2] + cols_dg[:2]].copy()
     print(disp.to_string(index=False, float_format=lambda x: f"{x:.5f}"))
 
@@ -3114,6 +3230,8 @@ def _extended_temperature_scan(
             "theory_label":      taut_T["theory_R"] or taut_T["theory_D"],
             "charge":            data_R.get("charge"),
             "n_atoms":           data_R.get("n_atoms"),
+            "use_smd":           data_R.get("use_smd", False),
+            "aq_source":         data_R.get("aq_source", "CPCM"),
         }
 
         if data_A is not None:
@@ -3647,6 +3765,8 @@ def export_results(
             "mol_acid":          pka_r.get("mol_acid"),
             "mol_base":          pka_r.get("mol_base"),
             "method":            pka_r.get("method"),
+            "aq_source_acid":    pka_r.get("aq_source_acid", "CPCM"),
+            "aq_source_base":    pka_r.get("aq_source_base", "CPCM"),
             "conf_acid":         pka_r.get("conf_acid"),
             "conf_base":         pka_r.get("conf_base"),
             "T_K":               pka_r.get("T"),
@@ -3678,6 +3798,7 @@ def export_results(
         df_taut = pd.DataFrame([{
             "mol_R":         taut_result.get("mol_R"),
             "mol_D":         taut_result.get("mol_D"),
+            "aq_source":     taut_result.get("aq_source", "CPCM"),
             "conf_R":        taut_result.get("conf_R"),
             "conf_D":        taut_result.get("conf_D"),
             "T_K":           taut_result.get("T"),
@@ -3695,7 +3816,7 @@ def export_results(
     for d in data_list:
         df_c = d["df"]
         for _, row in df_c.iterrows():
-            r = {"mol": d["mol_name"]}
+            r = {"mol": d["mol_name"], "aq_source": d.get("aq_source", "CPCM")}
             r.update(row.to_dict())
             conf_rows.append(r)
     df_confs = pd.DataFrame(conf_rows)
@@ -3821,11 +3942,25 @@ Ejemplos:
                         help="Paso del eje de pH (default: 0.1)")
     parser.add_argument("--method",   choices=["auto", "born", "direct"], default="auto",
                         help="Método para ΔG_aq: 'born' (ciclo completo, requiere "
-                             "SP fase gas), 'direct' (solo CPCM, sin SP fase gas), "
-                             "'auto' usa born si hay SP gas y si no cae a direct "
-                             "(default: auto). Los pasos que involucran el "
+                             "SP fase gas), 'direct' (solo energía acuosa, sin SP "
+                             "fase gas), 'auto' usa born si hay SP gas y si no cae "
+                             "a direct (default: auto). Los pasos que involucran el "
                              "macroestado neutro/zwitterión (con --protonated/"
                              "--zwitterion) siempre usan 'direct'.")
+    parser.add_argument("--spsmd", action="store_true",
+                        help="Usa las energías SP con SMD(water) "
+                             "(04c_sp_smd/conf_NNN/sp_smd.out, calculadas con "
+                             "pipeline.py --spsmd) como energía SP acuosa en vez de "
+                             "las CPCM(water) normales (04_sp/conf_NNN/sp.out) para "
+                             "TODOS los estados de esta corrida (neutro, anión, "
+                             "dianión, catión, zwitterión). No mezcla — si un "
+                             "confórmero no tiene SP_SMD calculado queda con "
+                             "E_sp_aq=NaN y se excluye del ensemble/best_conf "
+                             "(mismo comportamiento que un SP fase gas faltante). "
+                             "Con method='born' se emite una advertencia: las "
+                             "constantes del ciclo de Born fueron calibradas contra "
+                             "CPCM, no SMD; se recomienda combinar con "
+                             "--method direct.")
     parser.add_argument("--temp",     type=float, default=T_STD, choices=TEMPS_K,
                         help=f"Temperatura T (K) para el pKa reportado (default: "
                              f"{T_STD} K, estándar). Restringido a {TEMPS_K} porque "
@@ -4007,19 +4142,19 @@ def _run_classic(args, gcorr_source: str = "harmonic"):
     if args.neutral:
         print(f"\n▸ Cargando estado neutro: {args.neutral}")
         data_neutral = collect_mol_data(args.neutral, verbose=args.verbose,
-                                        gcorr_source=gcorr_source)
+                                        gcorr_source=gcorr_source, use_smd=args.spsmd)
         print_mol_summary(data_neutral, verbose=args.verbose)
 
     if args.anion:
         print(f"\n▸ Cargando anión: {args.anion}")
         data_anion = collect_mol_data(args.anion, verbose=args.verbose,
-                                      gcorr_source=gcorr_source)
+                                      gcorr_source=gcorr_source, use_smd=args.spsmd)
         print_mol_summary(data_anion, verbose=args.verbose)
 
     if args.dianion:
         print(f"\n▸ Cargando dianión: {args.dianion}")
         data_dianion = collect_mol_data(args.dianion, verbose=args.verbose,
-                                        gcorr_source=gcorr_source)
+                                        gcorr_source=gcorr_source, use_smd=args.spsmd)
         print_mol_summary(data_dianion, verbose=args.verbose)
 
     pka1_result = pka2_result = None
@@ -4189,7 +4324,7 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
     if args.protonated:
         print(f"\n▸ Cargando catión protonado: {args.protonated}")
         data_A = collect_mol_data(args.protonated, verbose=args.verbose,
-                                  gcorr_source=gcorr_source)
+                                  gcorr_source=gcorr_source, use_smd=args.spsmd)
         print_mol_summary(data_A, verbose=args.verbose)
     else:
         print("\n▸ Catión protonado A⁺ no proporcionado (--protonated omitido): "
@@ -4197,25 +4332,25 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
 
     print(f"\n▸ Cargando estado neutro: {args.neutral}")
     data_R = collect_mol_data(args.neutral, verbose=args.verbose,
-                              gcorr_source=gcorr_source)
+                              gcorr_source=gcorr_source, use_smd=args.spsmd)
     print_mol_summary(data_R, verbose=args.verbose)
 
     print(f"\n▸ Cargando zwitterión (tautómero de {args.neutral}): {args.zwitterion}")
     data_D = collect_mol_data(args.zwitterion, verbose=args.verbose,
-                              gcorr_source=gcorr_source)
+                              gcorr_source=gcorr_source, use_smd=args.spsmd)
     print_mol_summary(data_D, verbose=args.verbose)
 
     data_B = data_C = None
     if args.anion:
         print(f"\n▸ Cargando anión: {args.anion}")
         data_B = collect_mol_data(args.anion, verbose=args.verbose,
-                                  gcorr_source=gcorr_source)
+                                  gcorr_source=gcorr_source, use_smd=args.spsmd)
         print_mol_summary(data_B, verbose=args.verbose)
 
     if args.dianion:
         print(f"\n▸ Cargando dianión: {args.dianion}")
         data_C = collect_mol_data(args.dianion, verbose=args.verbose,
-                                  gcorr_source=gcorr_source)
+                                  gcorr_source=gcorr_source, use_smd=args.spsmd)
         print_mol_summary(data_C, verbose=args.verbose)
 
     # ── Equilibrio de tautómeros R ⇌ D (sin H⁺) ────────────────────────────
@@ -4280,6 +4415,8 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
         # compute_pka() frente al catión (A) y al anión (B).
         "charge":            data_R.get("charge"),
         "n_atoms":           data_R.get("n_atoms"),
+        "use_smd":           data_R.get("use_smd", False),
+        "aq_source":         data_R.get("aq_source", "CPCM"),
     }
 
     # ── Cadena de pKa: A→[R/D], [R/D]→B, B→C ───────────────────────────────
