@@ -13,8 +13,17 @@ y NO corre por defecto — debe pedirse explícitamente con --adc2 (para
 incluirla al final del pipeline normal) o de forma standalone con
 --start adc2 (ver nota más abajo).
 
+Carga automática por nombre de archivo:
+    --charge ahora es OPCIONAL. Si se omite, se infiere del sufijo del
+    nombre del .xyz según la convención de estados de protonación:
+        ...A → +1   ...B → -1   ...C → -2   ...D → 0   ...R → 0
+    (p.ej. "SB.xyz" -> carga -1, "P334R.xyz" -> carga 0). Si el nombre
+    no sigue esa convención, se avisa y se usa 0 por defecto — pasa
+    --charge explícito para forzar otro valor o silenciar el aviso.
+
 Uso (modo normal):
-    python pipeline.py --mol molecules/mol_A.xyz --charge -1
+    python pipeline.py --mol molecules/mol_A.xyz              # carga +1 inferida por sufijo "A"
+    python pipeline.py --mol molecules/mol_A.xyz --charge 1   # equivalente, forma explícita
     python pipeline.py --mol molecules/mol_A.xyz --charge 0 --start opt
     python pipeline.py --mol molecules/mol_A.xyz --charge -1 --start sp
     python pipeline.py --mol molecules/mol_A.xyz --charge -1 --skipnumfreq   # OPT → SP → TDDFT directo
@@ -66,6 +75,117 @@ Nota (--start adc2): caso especial, NO retoma la cadena normal. Solo requiere
       disco externo y borra los archivos pesados del computador antes de
       correrlo, dejando únicamente 04_sp/ disponible.
     python pipeline.py --mol molecules/mol_A.xyz --charge -1 --start adc2
+
+────────────────────────────────────────────────────────────────────────
+CHANGELOG — historial de bugs y parches relevantes
+────────────────────────────────────────────────────────────────────────
+Bitácora de problemas ya resueltos que motivaron partes no obvias del
+código. Se mantiene aquí, consolidada, para no interrumpir la lectura
+de la lógica activa; cada función afectada deja solo una referencia
+corta a la entrada correspondiente.
+
+[MPI-1] pe-list compartido entre sub-jobs paralelos de CENSO (jul 2026)
+    Con bind-to hwthread ya corregido (ver MPI-2), CENSO seguía saturando
+    solo 2 cores físicos (4/12 hilos) al correr sus SP internos en
+    paralelo, con throttling térmico medido (102°C). Causa: CENSO congela
+    ENVIRON una sola vez al lanzar el proceso `censo` padre, y cada
+    `mpirun` interno que CENSO invoca hereda ESE MISMO entorno — los N
+    sub-jobs paralelos que CENSO lanza colapsaban sobre el mismo
+    MAAQC_PE_LIST fijo, todos pidiendo los mismos primeros cores.
+    Mitigación aplicada: build_omp_env(set_pe_list=False) para los
+    llamados desde el camino de CENSO — taskset sigue confinando el
+    árbol completo al pool asignado, pero MAAQC_PE_LIST no se fija, así
+    que el kernel reparte libremente dentro del pool (no es pinning
+    óptimo, pero es estrictamente mejor que la colisión forzada previa).
+    Solución completa instalada además: MAAQC_CENSO_SLOTS + un parche
+    local en CENSO (processing/orca_processor.py del paquete instalado,
+    fuera de este repo — se pierde en cualquier reinstalación/update de
+    CENSO) que particiona el pool en N slots y deriva el slot de cada
+    confórmero con un hash estable de su nombre. Si los SP de CENSO
+    vuelven a mostrar colisión parcial, lo primero a revisar es si ese
+    parche sigue presente.
+
+[MPI-2] namespace viejo vs PRTE, y pe-list como índice de CORE no de PU
+    (jul 2026)
+    Las variables OMPI_MCA_hwloc_base_binding_policy /
+    rmaps_base_mapping_policy son el namespace viejo (pre-5.0, runtime
+    ORTE); Open MPI ≥5.0 migró a PRTE y las renombró bajo el prefijo
+    PRTE_MCA_ — pero fijar la política de mapping como "default" del DVM
+    tampoco sirve (PRTE la rechaza con "unsupported-default-policy"). La
+    única vía que PRTE acepta para un pe-list explícito es --map-by en
+    la línea de comandos de mpirun/prterun, que ORCA invoca internamente
+    sin exponer flags. Solución: un wrapper de `mpirun` (symlink en PATH
+    antes que el real, ver scripts/mpirun-wrapper.sh) que lee
+    MAAQC_PE_LIST y le inyecta `--map-by pe-list=<lista>:ORDERED:hwtcpus
+    --bind-to hwthread`.
+    Un segundo bug independiente: ORCA seguía usando solo 6/12 cores en
+    batches que deberían repartirse en 12. Diagnóstico con `mpirun
+    --display-map --do-not-launch` + `lstopo`: PRTE interpreta CUALQUIER
+    lista numérica pasada a pe-list/rankfile como ÍNDICE DE CORE, nunca
+    como PU/hilo de hardware (confirmado: `Cpu Type: CORE` en el mapa) —
+    independiente del flag --bind-to. taskset -c, en cambio, sí usa PU
+    directa (confirmado vía /proc/<pid>/status). Como MAAQC_PE_LIST se
+    armaba con la misma lista de PUs que taskset, cada PU terminaba
+    resolviendo a un core físico distinto de lo esperado (offset +2
+    constante en la zona E-core; agrupamiento inesperado en la zona
+    P-core con SMT). Fix: MAAQC_PE_LIST se arma traduciendo cada PU a su
+    índice de Core vía la tabla PU_TO_CORE (derivada de `lstopo`);
+    taskset sigue recibiendo la lista de PUs cruda — esa ruta nunca tuvo
+    el bug.
+
+[CENSO-BUDGET] OMP_NUM_THREADS al tamaño del pool completo, no del
+    sub-job (ago 2026)
+    Todos los call-sites de CENSO armaban su env con
+    OMP_NUM_THREADS = NPROCS_CREST (el pool completo, ej. 12), pero
+    CENSO decide internamente cuántos sub-jobs correr en paralelo según
+    maxcores // omp_min (con --omp-min default 4 y --maxcores 12, decide
+    3 sub-jobs a la vez). Con OMP_NUM_THREADS=12 en vez de ~4 por
+    sub-job, los 3 sub-jobs concurrentes pedían 12 hilos CADA UNO → 36
+    hilos compitiendo por 12 cores confinados por taskset (3x
+    sobre-suscripción real). Fix: fijar --omp-min explícitamente y usar
+    ESE mismo valor — nunca maxcores — como OMP_NUM_THREADS
+    (censo_threads_per_job()).
+    Bug relacionado, hallado al revisar por qué la sobre-suscripción
+    persistía con 2+ instancias del pipeline corriendo a la vez:
+    _acquire_cpu_pool() puede devolver un pool MÁS CORTO que lo pedido
+    (incluso vacío) si otra instancia ya reservó PUs, pero los
+    call-sites de CENSO seguían usando el valor NOMINAL pedido (no
+    len(cpu_pool) real) tanto para --maxcores como para
+    censo_threads_per_job(). Fix: _reconcile_censo_budget() ajusta
+    (maxcores, omp_min) al tamaño real de cpu_pool después de
+    reservarlo; si el pool queda vacío, aborta el lanzamiento de CENSO
+    en vez de correrlo sin confinar.
+
+[CENSO-LOCK] relanzamientos duplicados sobre el mismo censo_dir
+    (10 jul 2026, run A/MGLYVAL)
+    stage_censo_prescreen() decidía si "recuperar" un run mirando solo
+    el contenido de censo_dir (carpetas CONF* con .out parseables), pero
+    eso no indica si CENSO sigue corriendo — las carpetas CONF*
+    sobreviven después de que CENSO termina un part y avanza al
+    siguiente. Con el proceso original todavía vivo y ya en screening,
+    una segunda invocación del pipeline vio "192 CONF dirs completas" y
+    disparó un --reload que relanzó un SEGUNDO proceso CENSO desde
+    CONF1, descartando el progreso de screening del primero — y lo mismo
+    volvió a pasar con un tercero: 3 CENSOs sucesivos rehaciendo
+    prescreening desde cero sin que ninguno llegara a terminar
+    screening. Fix: un lockfile propio del pipeline
+    (.censo_pipeline.lock, no confundir con censo.log) que contiene el
+    PID real del proceso CENSO mientras corre; stage_censo_prescreen()
+    se niega a tocar censo_dir si ya hay un CENSO vivo ahí, sin importar
+    el contenido de las carpetas CONF*.
+
+[BIN-RESOLVE] CENSO_BIN/CREST_BIN dependían del PATH del proceso lanzador
+    Antes, CENSO_BIN/CREST_BIN eran solo el nombre del comando, así que
+    su existencia dependía 100% de que el shell/cron/nohup que lanzó
+    pipeline.py ya tuviera 'conda activate sciencebitch' hecho — si no,
+    el fallo solo se descubría al llamar subprocess.run(), a veces
+    horas después (p.ej. tras 70 min de CREST). Fix: _resolve_bin()
+    busca primero en el PATH actual (shutil.which) y si no lo encuentra
+    cae a <prefix del env conda>/bin/<nombre> vía `conda env list
+    --json`, sin necesitar que el env esté activado. check_required_bins()
+    además verifica ambos binarios ANTES de lanzar CREST, para no
+    descubrir un "censo: command not found" después de gastar cómputo.
+────────────────────────────────────────────────────────────────────────
 """
 
 import argparse
@@ -159,49 +279,141 @@ def check_required_bins(log: logging.Logger) -> None:
         )
 
 
-ORCA_BIN   = Path("/home/kmilozeta/orca_6_1_1_avx2/orca")
+ORCA_BIN   = Path(os.environ.get("PIPELINE_ORCA_BIN",
+                                  "/home/kmilozeta/orca_6_1_1_avx2/orca"))
 CREST_BIN  = _resolve_bin("crest")  # resuelto vía PATH o conda env sciencebitch
 CENSO_BIN  = _resolve_bin("censo")  # resuelto vía PATH o conda env sciencebitch
 
-# Carpeta madre del proyecto (solo usada por --status para recorrer todos
-# los grupos moleculares). La ubicación real de cada run NO depende de
-# PAPER_ROOT sino de dónde vive el .xyz de entrada: se sigue la convención
-# <grupo>/molecules/<mol_name>.xyz  →  <grupo>/runs/<mol_name>/
-# (p.ej. PAPER1/MGLYVAL/molecules/D.xyz → PAPER1/MGLYVAL/runs/D/), ver _run_one().
-PAPER_ROOT = Path("/home/kmilozeta/PAPER1")   # carpeta madre del proyecto
+
+def _find_paper_root(start: Optional[Path] = None) -> Path:
+    """
+    Resuelve la carpeta raíz del proyecto (equivalente a lo que antes era
+    PAPER_ROOT hardcodeado a /home/kmilozeta/PAPER1) sin asumir ninguna
+    ruta fija. Orden de resolución:
+
+      1. Variable de entorno PIPELINE_ROOT, si está seteada.
+      2. Subir desde `start` (o desde el cwd si no se pasa nada) buscando
+         un marcador de raíz de proyecto: un directorio que contenga
+         alguno de README.md, LICENSE, tasks.json o una carpeta scripts/.
+      3. Si no se encuentra ningún marcador, se usa el cwd tal cual
+         (fallback razonable: correr el pipeline desde la raíz del
+         proyecto sigue funcionando sin configurar nada).
+
+    Esto reemplaza la ruta fija PAPER_ROOT = Path("/home/kmilozeta/PAPER1"):
+    ahora el proyecto puede vivir en cualquier máquina/ruta sin editar el
+    script, y --status recorre la raíz real detectada.
+    """
+    env_root = os.environ.get("PIPELINE_ROOT")
+    if env_root:
+        return Path(env_root).expanduser().resolve()
+
+    here = (start or Path.cwd()).resolve()
+    markers = {"README.md", "LICENSE", "tasks.json", "scripts"}
+    for candidate in [here, *here.parents]:
+        if any((candidate / m).exists() for m in markers):
+            return candidate
+    return here
+
+
+PAPER_ROOT = _find_paper_root()   # carpeta madre del proyecto (auto-detectada)
 WORK_ROOT  = PAPER_ROOT                        # alias, usado solo por print_status()
 TMPL_DIR   = Path("templates")
 MULT       = 1                      # multiplicidad siempre 1
 CREST_TIMEOUT_HOURS = 24.0          # timeout CREST (horas)
 CENSO_TIMEOUT_HOURS = 24.0          # timeout CENSO pre-screening (horas)
 
-# ── Bug nuevo (ago 2026): OMP_NUM_THREADS puesto al tamaño del POOL
-#    completo, no al de CADA sub-job paralelo de CENSO ─────────────────────
-# Hasta ahora, todos los call-sites de CENSO armaban su env con
-# build_omp_env(NPROCS_CREST, ...) -> OMP_NUM_THREADS = str(NPROCS_CREST)
-# (ej. "12"). Pero CENSO congela ENVIRON una sola vez al arrancar (ver
-# comentario extenso junto a build_omp_env() más abajo: "no existe ningún
-# gancho de env-por-tarea expuesto") y pasa ESE MISMO entorno, sin tocar
-# OMP_NUM_THREADS, a CADA sub-job xtb/orca que lanza en paralelo — no
-# reparte el valor entre sub-jobs concurrentes.
+# ── Convención de carga por sufijo de estado de protonación ────────────
+# En todos los proyectos de la serie MAA, el nombre del archivo .xyz
+# (su stem, sin importar el prefijo de la molécula: A, SA, PA, mol_A...)
+# termina en una letra que codifica el estado de protonación:
 #
-# Con --maxcores 12 y el --omp-min por defecto de CENSO (4), CENSO decide
-# internamente correr n_parallel = maxcores // omp_min = 3 sub-jobs a la
-# vez. Si OMP_NUM_THREADS=12 (el pool completo) en vez de ~4 (lo que le
-# tocaría a CADA uno de esos 3 sub-jobs), los 3 sub-jobs concurrentes piden
-# 12 hilos OpenMP CADA UNO -> 36 hilos compitiendo por los 12 cores
-# confinados por taskset. Eso es sobre-suscripción real (3x), no solo mal
-# reparto del kernel: explica el patrón reportado (12 procesos orca
-# lanzados, pero solo ~6 cores con trabajo útil real, throttling térmico
-# por contención, y sub-jobs pisándose entre sí) incluso con taskset +
-# set_pe_list=False ya aplicados correctamente.
+#   ...A  → catión      (+1)
+#   ...B  → anión simple (-1)
+#   ...C  → dianión      (-2)
+#   ...D  → neutro       ( 0)
+#   ...R  → neutro       ( 0)   (forma de referencia)
 #
-# Fix: fijar --omp-min explícitamente (en vez de confiar en el default de
-# CENSO) y usar ESE MISMO valor -- no maxcores -- como OMP_NUM_THREADS del
-# env que se le pasa a CENSO. Así el número de hilos que cada sub-job
-# concurrente realmente pide (heredado del ENVIRON congelado) coincide con
-# lo que CENSO asume que le tocó a cada uno, en vez de que cada uno crea
-# que tiene el pool completo para sí solo.
+# Esto permite inferir --charge automáticamente a partir del nombre del
+# archivo, sin tener que pasarlo a mano en cada corrida. --charge sigue
+# aceptándose como override explícito si se quiere forzar otra cosa.
+STATE_CHARGE_MAP: dict[str, int] = {
+    "A": 1,
+    "B": -1,
+    "C": -2,
+    "D": 0,
+    "R": 0,
+}
+
+
+def infer_charge_from_name(mol_name: str) -> Optional[int]:
+    """
+    Infiere la carga formal a partir del nombre de la molécula (stem del
+    .xyz), usando STATE_CHARGE_MAP sobre la última letra del nombre.
+
+    Reglas:
+      - Se mira solo la ÚLTIMA letra alfabética del stem (p.ej. "SB" → 'B',
+        "mol_A" → 'A', "P334R" → 'R', "MR" → 'R'). No importa el prefijo.
+      - Si el nombre no termina en una letra reconocida en
+        STATE_CHARGE_MAP (p.ej. termina en dígito, o es algo como
+        "MGLYVAL" sin sufijo de estado), devuelve None: no se puede
+        inferir con confianza y el caller debe pedir --charge explícito.
+      - No es case-sensitive: "b" y "B" son equivalentes.
+
+    Devuelve la carga inferida (int) o None si no se pudo inferir.
+    """
+    if not mol_name:
+        return None
+    last_char = mol_name[-1].upper()
+    if not last_char.isalpha():
+        return None
+    return STATE_CHARGE_MAP.get(last_char)
+
+
+def resolve_charge(mol_name: str, explicit_charge: Optional[int],
+                    log: Optional[logging.Logger] = None) -> int:
+    """
+    Resuelve la carga a usar para `mol_name`, combinando lo que el usuario
+    pasó explícitamente por --charge (si lo pasó) con la inferencia
+    automática por sufijo (infer_charge_from_name).
+
+    Prioridad:
+      1. Si el usuario pasó --charge explícitamente (explicit_charge no es
+         None), se usa ese valor tal cual — es un override manual y
+         siempre gana. Si además hay una carga inferida y NO coincide,
+         se loggea un warning (probable error de tipeo) pero se respeta
+         igual lo que pidió el usuario.
+      2. Si no se pasó --charge, se usa la carga inferida por sufijo.
+      3. Si no se pasó --charge y no se pudo inferir nada, se cae al
+         default histórico (0) y se avisa por log — igual que el
+         comportamiento previo del script (default=0 en argparse).
+    """
+    inferred = infer_charge_from_name(mol_name)
+
+    if explicit_charge is not None:
+        if inferred is not None and inferred != explicit_charge:
+            msg = (f"--charge {explicit_charge} fue especificado manualmente, pero "
+                   f"el nombre '{mol_name}' sugiere carga {inferred:+d} por su "
+                   f"sufijo de estado de protonación. Se respeta --charge "
+                   f"{explicit_charge} (override manual) — verifica que sea "
+                   f"intencional.")
+            log.warning(msg) if log else print(f"AVISO: {msg}", file=sys.stderr)
+        return explicit_charge
+
+    if inferred is not None:
+        msg = f"Carga inferida automáticamente para '{mol_name}': {inferred:+d} (sufijo '{mol_name[-1].upper()}')"
+        log.info(msg) if log else print(msg)
+        return inferred
+
+    msg = (f"No se pudo inferir la carga de '{mol_name}' por su nombre "
+           f"(no termina en A/B/C/D/R). Usando default 0 — pasa --charge "
+           f"explícitamente si no es correcto.")
+    log.warning(msg) if log else print(f"AVISO: {msg}", file=sys.stderr)
+    return 0
+
+# Ver [CENSO-BUDGET] en el CHANGELOG: OMP_NUM_THREADS debe reflejar los
+# hilos que le tocan a CADA sub-job paralelo de CENSO, no el pool
+# completo — CENSO congela ENVIRON una sola vez y lo hereda tal cual en
+# cada sub-job concurrente que lanza.
 CENSO_OMP_MIN = 4    # mismo valor que se pasa a --omp-min en el CLI de CENSO
 
 
@@ -231,28 +443,10 @@ def censo_n_parallel_jobs(maxcores: int, omp_min: int = CENSO_OMP_MIN) -> int:
     return max(1, maxcores // max(omp_min, 1))
 
 
-# ── Bug nuevo (ago 2026, hallado al revisar por qué CENSO seguía
-#    sobre-suscribiendo cores pese a censo_threads_per_job()) ─────────────
-# _acquire_cpu_pool(n_cores, ...) puede devolver una lista MÁS CORTA que
-# n_cores (incluso vacía) cuando otra instancia de pipeline.py ya tiene
-# PUs reservados (ver _cpu_lock_busy_cpus() / assign_cpu_pool()). Pero
-# los tres call-sites que lanzan CENSO seguían usando el valor NOMINAL
-# (NPROCS_CREST / maxcores pedido) tanto para "--maxcores" como para
-# censo_threads_per_job(), nunca len(cpu_pool) (el valor REAL reservado).
-#
-# Con 2+ instancias corriendo a la vez, la segunda podía recibir p.ej.
-# solo 4 PUs (8 ya tomados por la primera) pero seguir lanzando CENSO con
-# --maxcores 12 y OMP_NUM_THREADS=censo_threads_per_job(12,4)=4 — CENSO
-# entonces decide correr 3 sub-jobs concurrentes de 4 hilos c/u (12
-# hilos) sobre un taskset confinado a solo 4 PUs reales: 3x
-# sobre-suscripción real. Peor aún si cpu_pool queda vacío: _run_censo_locked
-# ni siquiera aplica taskset (`if cpu_list:` es falso con lista vacía), así
-# que esa instancia corre sin confinar, pisando lo que sea que la otra use.
-#
-# Fix: reconciliar (--maxcores, --omp-min) contra len(cpu_pool) real
-# DESPUÉS de reservarlo, en vez de asumir que siempre coincide con lo
-# pedido. Si el pool queda vacío, abortar el lanzamiento en vez de correr
-# CENSO sin taskset.
+# Ver [CENSO-BUDGET] en el CHANGELOG (segunda mitad): reconcilia
+# (--maxcores, --omp-min) contra el tamaño REAL del cpu_pool reservado —
+# que puede ser más chico que lo pedido, incluso vacío, si otra instancia
+# de pipeline.py ya tomó PUs — en vez de asumir que siempre coincide.
 def _reconcile_censo_budget(requested_cores: int, omp_min: int,
                              cpu_pool: list[int], log: logging.Logger,
                              tag: str) -> tuple[int, int]:
@@ -311,135 +505,67 @@ OPT_BATCH_SIZE  = 3
 SP_BATCH_SIZE   = 3
 TDDFT_BATCH_SIZE = 2
 
+# ── Topología REAL de este ThinkPad T14 (Core Ultra 7), confirmada con
+#    `lscpu -e`. Elevada a nivel de módulo porque tanto assign_cpu_lists()
+#    (pinning por-job, usado por ORCA) como assign_cpu_pool() (pinning de
+#    un único proceso con paralelismo interno propio, usado por CENSO)
+#    necesitan partir de la misma tabla CPU lógica → core físico. Es
+#    también la tabla que build_omp_env() usa para traducir PU→Core al
+#    armar MAAQC_PE_LIST (ver [MPI-2] en el CHANGELOG).
+#
+#    CPU lógica  →  CORE físico   →  tipo
+#    0, 1        →  CORE 0        →  P-core (2 hilos SMT, mismo L2)
+#    2, 3        →  CORE 1        →  P-core (2 hilos SMT, mismo L2)
+#    4           →  CORE 2        →  E-core
+#    5           →  CORE 3        →  E-core
+#    6           →  CORE 4        →  E-core
+#    7           →  CORE 5        →  E-core
+#    8           →  CORE 6        →  E-core
+#    9           →  CORE 7        →  E-core
+#    10          →  CORE 8        →  E-core
+#    11          →  CORE 9        →  E-core
+#    12          →  CORE 10       →  LP E-core (max 400 MHz — evitar)
+#    13          →  CORE 11       →  LP E-core (max ~1.3 GHz — evitar)
+P_CORE_BLOCKS   = [[0, 1], [2, 3]]                 # CORE 0, CORE 1 (SMT)
+E_CORE_SINGLES  = [4, 5, 6, 7, 8, 9, 10, 11]        # CORE 2-9
+LP_CORE_SINGLES = [12, 13]                          # CORE 10-11 (lentos)
+
+# ── Traducción PU (CPU lógica OS) → índice de Core, para PRTE ─────────────
+# Ver [MPI-2] en el CHANGELOG: PRTE interpreta los números de
+# `pe-list=`/`rankfile` como ÍNDICE DE CORE, nunca como PU/hilo de
+# hardware — taskset -c, en cambio, sí usa PU directa, por eso solo lo
+# que se manda a MAAQC_PE_LIST necesita esta traducción.
+#
+# Como los 2 P-cores tienen 2 PUs c/u (SMT) y el resto de los cores tiene
+# 1 PU c/u, la tabla no es un offset constante. IMPORTANTE: esta
+# traducción NO deduplica — si cpu_list trae los 2 hilos SMT de un mismo
+# P-core (ej. [0, 1]), ambos deben traducir al MISMO índice de Core, para
+# que `--bind-to hwthread` + `:ORDERED` reparta un hilo SMT distinto a
+# cada rank dentro del mismo core. Deduplicar acá rompería esa asignación.
+CORE_TO_PUS: dict[int, list[int]] = {
+    0: [0, 1], 1: [2, 3],                        # P-cores, SMT
+    2: [4], 3: [5], 4: [6], 5: [7],
+    6: [8], 7: [9], 8: [10], 9: [11],            # E-cores
+    10: [12], 11: [13],                          # LP E-cores
+}
+PU_TO_CORE: dict[int, int] = {
+    pu: core for core, pus in CORE_TO_PUS.items() for pu in pus
+}
+
 # OMP_ENV se construye bajo demanda en build_omp_env() para que siempre
 # refleje el valor actualizado de NPROCS (nunca queda obsoleto si el
-# usuario pasa --nprocs desde CLI).
-#
-# ── Historial del fix de binding MPI (OpenMPI 5.0.10 / PRTE) ──────────────
-# Las variables OMPI_MCA_hwloc_base_binding_policy / rmaps_base_mapping_policy
-# usadas hasta ahora son el namespace VIEJO (pre-5.0, runtime ORTE). Desde
-# que Open MPI ≥5.0 migró el runtime a PRTE, esas variables se renombraron
-# y viven bajo el prefijo PRTE_MCA_ — pero además, fijar la política de
-# mapping vía PRTE_MCA_rmaps_default_mapping_policy=pe-list=... como
-# "default" del DVM tampoco sirve: PRTE lo rechaza explícitamente con el
-# error "unsupported-default-policy" (confirmado empíricamente en este
-# equipo). La única vía que PRTE acepta para un pe-list explícito es
-# --map-by en la línea de comandos de mpirun/prterun — que es justamente
-# lo que ORCA invoca internamente sin exponer flags.
-#
-# Solución: un wrapper de `mpirun` (ver scripts/mpirun-wrapper.sh, symlink
-# en PATH antes que el mpirun real) que lee la variable MAAQC_PE_LIST y le
-# inyecta `--map-by pe-list=<lista>:ORDERED:hwtcpus --bind-to hwthread` al
-# mpirun real. build_omp_env() solo necesita setear esa variable — el
-# ORDERED es imprescindible (sin él, pe-list solo restringe el CONJUNTO de
-# CPUs disponibles para el grupo de ranks, no asigna 1 CPU por rank, que
-# es el bug original que motivó todo este historial).
-#
-# ── Bug #2 del mismo mecanismo (julio 2026) ────────────────────────────
-# Con el wrapper instalado, ORCA seguía usando solo 6/12 cores en batches
-# que deberían repartirse en 12. Diagnóstico con `mpirun --display-map
-# --do-not-launch`, `lstopo` y pruebas directas de `pe-list`/`rankfile`
-# contra /proc/<pid>/status: PRTE interpreta CUALQUIER lista numérica que
-# le pases (pe-list=, rankfile con PU:N, rankfile con slots=N) como
-# ÍNDICE DE CORE, nunca como PU/hilo de hardware — confirmado en
-# `mpirun --display map`: `Cpu Type: CORE`. Esto es independiente del
-# flag de --bind-to; ese flag solo controla la granularidad DEL BINDING
-# una vez que el core ya fue resuelto, no qué tabla usa el mapper para
-# leer los números de la lista.
-#
-# taskset -c, en cambio, sí usa números de CPU lógica (PU) directos —
-# confirmado siempre correcto vía /proc/<pid>/status en todos los tests.
-# Como MAAQC_PE_LIST se construía con la MISMA lista que taskset (números
-# de PU), y PRTE la leía como índices de Core, cada PU pedida terminaba
-# resolviendo a un core físico distinto — en la zona E-core (1 PU por
-# core) esto se manifestaba como un offset de +2 constante; en la zona
-# P-core (2 PUs por core, SMT) como un agrupamiento inesperado.
-#
-# Fix: MAAQC_PE_LIST se arma traduciendo cada PU de cpu_list a su índice
-# de Core vía PU_TO_CORE (tabla derivada de `lstopo`, ver junto a
-# P_CORE_BLOCKS/E_CORE_SINGLES/LP_CORE_SINGLES). taskset sigue recibiendo
-# cpu_list crudo — esa ruta nunca tuvo el bug.
-#
-# ── Bug #1 del mismo mecanismo (julio 2026) — pe-list compartido entre
-#    subjobs paralelos de CENSO ───────────────────────────────────────────
-# Con bind-to hwthread ya corregido en el wrapper, CENSO seguía saturando
-# solo 2 cores físicos (4/12 hilos) al correr sus SP internos en paralelo,
-# con throttling térmico medido (102°C). Diagnóstico vía `ps --forest` +
-# /proc/<pid>/environ: CENSO lanzaba 3 sub-jobs de SP en paralelo, cada
-# uno con su propio `mpirun -np 4`, y los TRES heredaban el MISMO
-# MAAQC_PE_LIST (idéntico string, ej. "0,0,1,1,2,3,4,5,6,7,8,9"). Con
-# :ORDERED, cada invocación de prterun con -np 4 solo consume los
-# primeros 4 elementos de la lista — los tres subjobs colapsaban sobre
-# el mismo Core 0/Core 1, mientras el resto del pool (Cores 2-9) quedaba
-# ocioso.
-#
-# Causa: MAAQC_PE_LIST se fija UNA sola vez, al lanzar el proceso `censo`
-# padre (ver _run_censo_locked() / stage_censo_prescreen()), vía el `env`
-# que se le pasa a subprocess.Popen. CENSO es quien decide internamente
-# (Dask + xtb --parallel) cuántos SP correr en paralelo y cuándo — esas
-# decisiones son opacas a pipeline.py, y cada `mpirun` que CENSO invoca
-# internamente hereda el entorno del proceso padre tal cual (fork/exec
-# copia el environ salvo que algo lo sobreescriba explícitamente, y nada
-# en el árbol de CENSO lo hace). Como MAAQC_PE_LIST es una única lista
-# fija pensada para 1 sola invocación de mpirun, no para N invocaciones
-# concurrentes que no coordinan entre sí qué porción del pool les toca,
-# el resultado es que las N invocaciones compiten por el mismo subconjunto
-# en vez de repartirse el pool completo.
-#
-# Fix (mitigación, no solución completa — ver nota en assign_cpu_pool()):
-# build_omp_env() ahora acepta set_pe_list=False para los llamados desde
-# el camino de CENSO (_run_censo_locked() vía stage_censo_prescreen()).
-# Con set_pe_list=False, taskset -c sigue aplicándose igual (ese es el
-# límite duro real, confina TODO el árbol de CENSO al pool asignado por
-# assign_cpu_pool()) pero MAAQC_PE_LIST no se setea — el wrapper de
-# mpirun hace no-op si la variable no está presente, así que cada
-# invocación interna de mpirun que CENSO lance queda libre de repartirse
-# dentro del pool completo (vía el scheduler del kernel + hwloc, sin
-# --map-by forzado), en vez de forzar los 4 primeros elementos de una
-# lista fija idéntica en las N invocaciones simultáneas.
-#
-# Esto NO es pinning óptimo (no hay garantía de que el kernel reparta
-# igual de bien que un --map-by explícito por-invocación), pero es
-# estrictamente mejor que el estado con el bug: antes, N invocaciones
-# garantizadamente colisionaban en el mismo subconjunto pequeño; con
-# set_pe_list=False, quedan libres de usar cualquier CPU del pool
-# confinado por taskset, sin colisión forzada.
-#
-# ── Solución completa (julio 2026): MAAQC_CENSO_SLOTS + parche en
-#    CENSO ──────────────────────────────────────────────────────────────
-# set_pe_list=False deja el reparto librado al kernel, que en la práctica
-# seguía mostrando colisión parcial entre 2 SP paralelos (ambos arrancando
-# su propio binding independiente desde Core 0). La solución completa
-# requiere coordinar los N sub-jobs de CENSO explícitamente, pero como
-# CENSO congela ENVIRON una sola vez (ver params.py: ENVIRON =
-# os.environ.copy()) y todas las llamadas paralelas a ORCA heredan ese
-# mismo diccionario, no hay forma de diferenciar el entorno por sub-job
-# sin modificar CENSO — no existe ningún gancho de env-por-tarea expuesto
-# (confirmado leyendo censo/parallel.py, processing/processor.py y
-# processing/orca_processor.py: LocalCluster corre con n_workers=1 y un
-# solo pool de hilos; cada llamada a _make_call() cae a env=ENVIRON salvo
-# que _sp()/opt() en orca_processor.py pasen un env explícito, que en el
-# código stock NO hacen).
-#
-# Por eso además de este env global (para CREST, ORCA vía run_orca(), y
-# el taskset del proceso censo padre), se instaló un parche local en
-# CENSO (ver /home/kmilozeta/CENSO/... processing/orca_processor.py,
-# backup en orca_processor.py.bak-pre-slots-patch, README en
-# censo_patch/ del repo) que intercepta _sp()/opt() para construir un env
-# por-conformero, leyendo la variable MAAQC_CENSO_SLOTS que se fija aquí.
-#
-# MAAQC_CENSO_SLOTS particiona el pool total en N grupos de PUs,
-# separados por '|', ej. "0,1,4,5|2,3,6,7" para 2 slots de 4 PUs. El
-# parche de CENSO deriva el slot de cada conformero con un hash estable
-# de su nombre módulo N — determinístico, sin necesitar coordinación en
-# tiempo real entre los hilos internos de Dask.
-#
-# IMPORTANTE: el parche de CENSO vive fuera de este repo, en el paquete
-# instalado de sciencebitch — se pierde en cualquier reinstalación/update
-# de CENSO. Si algún día los SP de CENSO vuelven a mostrar el patrón de
-# colisión parcial (ver Cpus_allowed_list de orca_leanscf_mp con rangos
-# solapados entre 2 invocaciones de mpirun), lo primero a verificar es si
-# el parche sigue presente en orca_processor.py.
+# usuario pasa --nprocs desde CLI). Ver [MPI-1] y [MPI-2] en el CHANGELOG
+# del módulo para el porqué de MAAQC_PE_LIST, set_pe_list y
+# MAAQC_CENSO_SLOTS — el resumen operativo es:
+#   - taskset -c (aplicado por el caller) siempre recibe PUs crudas.
+#   - MAAQC_PE_LIST (leído por el wrapper de mpirun) necesita índices de
+#     CORE, no de PU, así que se traduce vía PU_TO_CORE.
+#   - set_pe_list=False (usado por el camino de CENSO) omite
+#     MAAQC_PE_LIST para no forzar la misma lista fija sobre N sub-jobs
+#     paralelos que CENSO lanza con el mismo ENVIRON heredado.
+#   - MAAQC_CENSO_SLOTS es leído por un parche instalado aparte en CENSO
+#     (fuera de este repo) para repartir esos sub-jobs por hash de
+#     confórmero.
 def build_omp_env(nprocs: int, cpu_list: Optional[list[int]] = None,
                    set_pe_list: bool = True,
                    censo_slot_groups: Optional[list[list[int]]] = None) -> dict:
@@ -1832,25 +1958,11 @@ def _censo_prescreen_recover(
 #  LOCK de CENSO — evita relanzamientos duplicados sobre el mismo censo_dir
 # ─────────────────────────────────────────────
 #
-# Bug real observado (10 jul 2026, run A/MGLYVAL): stage_censo_prescreen()
-# decidía si "recuperar" un run mirando unicamente el contenido de
-# censo_dir (carpetas CONF* con .out parseables). Ese contenido NO indica
-# si CENSO sigue corriendo -- las carpetas CONF* sobreviven despues de que
-# CENSO termina un part y sigue de largo al siguiente. Resultado real:
-#   1. El proceso CENSO original (worker278785) termino prescreening solo,
-#      y avanzo organicamente a screening (13/192 gsolv ya calculados).
-#   2. Una segunda invocacion del pipeline, sobre el MISMO censo_dir, vio
-#      "192 CONF dirs completas" y disparo un --reload que relanzo un
-#      SEGUNDO proceso CENSO (worker349459) desde CONF1 -- descartando el
-#      progreso de screening del proceso 1, que seguia vivo.
-#   3. Lo mismo volvio a pasar con un TERCER proceso (worker409581).
-# Es decir: se lanzaron 3 CENSOs sucesivos rehaciendo prescreening desde
-# cero, sin que ninguno llegara nunca a terminar screening.
-#
-# La fija es un lockfile propio del pipeline (no confundir con censo.log,
-# que CENSO tambien escribe dentro de censo_dir): contiene el PID real del
-# proceso CENSO mientras corre, y se usa para NEGARSE a tocar censo_dir si
-# ya hay un CENSO vivo ahi, sin importar que haya en las carpetas CONF*.
+# Ver [CENSO-LOCK] en el CHANGELOG: el contenido de censo_dir (carpetas
+# CONF*) no indica si CENSO sigue vivo, así que "recuperar" un run
+# mirando solo eso podía relanzar un CENSO duplicado sobre uno que ya
+# estaba en curso. El lockfile de abajo (con el PID real del proceso) es
+# la única fuente de verdad sobre si CENSO sigue corriendo.
 def _censo_lock_file(censo_dir: Path) -> Path:
     return censo_dir / ".censo_pipeline.lock"
 
@@ -2946,9 +3058,11 @@ def _run_censo_standalone_cli(args) -> None:
     log = setup_logging(out_dir)
     check_required_bins(log)
 
+    charge = resolve_charge(input_xyz.stem, args.charge, log)
+
     maxcores = args.cores if args.cores else NPROCS_CREST
     ok = run_censo_standalone(
-        input_xyz=input_xyz, charge=args.charge, out_dir=out_dir,
+        input_xyz=input_xyz, charge=charge, out_dir=out_dir,
         temperature=args.temperature, maxcores=maxcores, log=log,
         omp_min=args.omp_min,
     )
@@ -4796,64 +4910,6 @@ def _sp_smd_worker(task: dict) -> dict:
     }
 
 
-# ── Topología REAL de este ThinkPad T14 (Core Ultra 7), confirmada con
-#    `lscpu -e`. Elevada a nivel de módulo porque tanto assign_cpu_lists()
-#    (pinning por-job, usado por ORCA) como assign_cpu_pool() (pinning de
-#    un único proceso con paralelismo interno propio, usado por CENSO)
-#    necesitan partir de la misma tabla CPU lógica → core físico.
-#
-#    CPU lógica  →  CORE físico   →  tipo
-#    0, 1        →  CORE 0        →  P-core (2 hilos SMT, mismo L2)
-#    2, 3        →  CORE 1        →  P-core (2 hilos SMT, mismo L2)
-#    4           →  CORE 2        →  E-core
-#    5           →  CORE 3        →  E-core
-#    6           →  CORE 4        →  E-core
-#    7           →  CORE 5        →  E-core
-#    8           →  CORE 6        →  E-core
-#    9           →  CORE 7        →  E-core
-#    10          →  CORE 8        →  E-core
-#    11          →  CORE 9        →  E-core
-#    12          →  CORE 10       →  LP E-core (max 400 MHz — evitar)
-#    13          →  CORE 11       →  LP E-core (max ~1.3 GHz — evitar)
-P_CORE_BLOCKS   = [[0, 1], [2, 3]]                 # CORE 0, CORE 1 (SMT)
-E_CORE_SINGLES  = [4, 5, 6, 7, 8, 9, 10, 11]        # CORE 2-9
-LP_CORE_SINGLES = [12, 13]                          # CORE 10-11 (lentos)
-
-# ── Traducción PU (CPU lógica OS) → índice de Core, para PRTE ─────────────
-# Confirmado empíricamente (julio 2026, ver historial junto a
-# build_omp_env): PRTE interpreta los números de `pe-list=`/`rankfile`
-# como ÍNDICE DE CORE (Cpu Type: CORE en `mpirun --display map`), NUNCA
-# como PU/hilo de hardware — sin importar la sintaxis (pe-list, PU:N en
-# rankfile, slots=N) ni los flags (--bind-to hwthread, --use-hwthread-cpus).
-# taskset -c, en cambio, sí usa PU/CPU lógica OS directamente (confirmado
-# vía /proc/<pid>/status) — por eso taskset sigue recibiendo `cpu_list`
-# crudo, y solo lo que se manda a MAAQC_PE_LIST necesita esta traducción.
-#
-# Como los 2 P-cores tienen 2 PUs c/u (SMT) y el resto de los cores tiene
-# 1 PU c/u, la tabla no es un offset constante — hay que traducir PU a PU
-# contra la topología real (misma tabla que ya usa assign_cpu_lists,
-# invertida). Ejemplo: pedir PU 4 (taskset) requiere pedirle a PRTE
-# Core 4, no PU 4 — Core L#4 (P#6) en la tabla de `lstopo`.
-#
-# IMPORTANTE: esta traducción NO deduplica. Si cpu_list trae los 2 hilos
-# SMT de un mismo P-core (ej. [0, 1], el caso de P_CORE_BLOCKS), ambos
-# traducen al MISMO índice de Core (Core 0), y eso es intencional: con
-# `--bind-to hwthread` + `:ORDERED`, dos ranks pidiendo el mismo índice
-# de Core terminan cada uno en un hilo SMT distinto de ese core — es la
-# forma correcta de repartir 2 ranks MPI dentro de 1 P-core con SMT.
-# Deduplicar acá rompería esa asignación (le pasarías a PRTE 1 solo
-# índice para 2 ranks, no 2).
-CORE_TO_PUS: dict[int, list[int]] = {
-    0: [0, 1], 1: [2, 3],                        # P-cores, SMT
-    2: [4], 3: [5], 4: [6], 5: [7],
-    6: [8], 7: [9], 8: [10], 9: [11],            # E-cores
-    10: [12], 11: [13],                          # LP E-cores
-}
-PU_TO_CORE: dict[int, int] = {
-    pu: core for core, pus in CORE_TO_PUS.items() for pu in pus
-}
-
-
 # ── Coordinación de CPUs ENTRE PROCESOS (2026-07-12) ──────────────────────
 #
 # assign_cpu_lists()/assign_cpu_pool() reparten cores correctamente DENTRO
@@ -5287,13 +5343,20 @@ def _check_cpu_budget(batch_size: int, nprocs_per_job: int, log: logging.Logger)
 # ─────────────────────────────────────────────
 
 def print_status():
-    """Imprime estado de todos los cálculos en PAPER_ROOT/<grupo>/runs/<mol_name>/."""
+    """Imprime estado de todos los cálculos en PAPER_ROOT/<grupo>/runs/<mol_name>/.
+
+    PAPER_ROOT se auto-detecta (ver _find_paper_root): usa
+    $PIPELINE_ROOT si está seteada, o sube desde el cwd buscando
+    README.md/LICENSE/tasks.json/scripts/. Si el resultado no es el
+    esperado, corre desde la raíz del proyecto o exporta PIPELINE_ROOT.
+    """
     if not WORK_ROOT.exists():
         print(f"No se encontró el directorio '{WORK_ROOT}/'. Aún no hay cálculos.")
         return
 
     print(f"\n{'─'*60}")
     print(f"  Estado de runs en: {WORK_ROOT.resolve()}")
+    print(f"  (raíz auto-detectada — usa $PIPELINE_ROOT para forzar otra)")
     print(f"{'─'*60}")
 
     # Estructura: PAPER_ROOT/<grupo>/runs/<mol_name>/<etapas>
@@ -5340,15 +5403,21 @@ def print_status():
 #  PUNTO DE ENTRADA
 # ─────────────────────────────────────────────
 
-def _run_one(args, parser):
+def _setup_run_resources(args):
     """
-    Corre el pipeline completo (CREST -> CENSO -> OPT -> NumFreq -> SP -> TDDFT -> ADC2)
-    para UNA molecula/carga/configuracion ya resuelta en `args`.
+    Valida --multitemp/--trange/--skipnumfreq, detecta/resuelve los
+    recursos de cómputo (cores/RAM por etapa, vía ResourceProfile) y
+    actualiza los globales usados por las funciones stage_*.
 
-    Se separo de main() para poder encadenar varias moleculas en un solo
-    comando (--mol repetido, ver _split_argv_by_mol), corriendo el pipeline
-    consecutivamente para cada una en el orden en que se escribieron en
-    la terminal.
+    Se separó de _run_one() para poder compartirlo entre una corrida
+    normal (una molécula) y el modo ciclo de protonación automático
+    (--autoprotonate + --autodeprotonate juntos, ver
+    _run_protonation_cycle), que corre tres pipelines completos (R/A/B)
+    con los MISMOS recursos de cómputo detectados una sola vez.
+
+    Devuelve (censo_temperatures, resources) donde resources es un dict
+    con los valores ya resueltos (nprocs_crest, nprocs, maxcore, ...)
+    para poder loggearlos en el resumen de cada corrida.
     """
     global NPROCS_CREST, NPROCS, MAXCORE, NPROCS_NUMFREQ, MAXCORE_NUMFREQ, \
            NPROCS_TDDFT, MAXCORE_TDDFT, NPROCS_ADC2, MAXCORE_ADC2, \
@@ -5466,6 +5535,39 @@ def _run_one(args, parser):
     TDDFT_BATCH_SIZE = tddft_batch
     OMP_ENV          = build_omp_env(NPROCS)
 
+    resources = dict(
+        nprocs_crest=nprocs_crest, nprocs=nprocs, maxcore=maxcore,
+        nprocs_numfreq=nprocs_numfreq, maxcore_nf=maxcore_nf,
+        nprocs_tddft=nprocs_tddft, maxcore_tddft=maxcore_tddft,
+        nprocs_adc2=nprocs_adc2, maxcore_adc2=maxcore_adc2,
+        opt_batch_size=opt_batch_size, sp_batch_size=sp_batch_size,
+        tddft_batch=tddft_batch,
+    )
+    return censo_temperatures, resources
+
+
+def _run_one(args, parser):
+    """
+    Corre el pipeline completo (CREST -> CENSO -> OPT -> NumFreq -> SP -> TDDFT -> ADC2)
+    para UNA molecula/carga/configuracion ya resuelta en `args`.
+
+    Se separo de main() para poder encadenar varias moleculas en un solo
+    comando (--mol repetido, ver _split_argv_by_mol), corriendo el pipeline
+    consecutivamente para cada una en el orden en que se escribieron en
+    la terminal.
+    """
+    censo_temperatures, _res = _setup_run_resources(args)
+    nprocs_crest   = _res["nprocs_crest"]
+    nprocs         = _res["nprocs"]
+    maxcore        = _res["maxcore"]
+    nprocs_numfreq = _res["nprocs_numfreq"]
+    maxcore_nf     = _res["maxcore_nf"]
+    nprocs_tddft   = _res["nprocs_tddft"]
+    maxcore_tddft  = _res["maxcore_tddft"]
+    opt_batch_size = _res["opt_batch_size"]
+    sp_batch_size  = _res["sp_batch_size"]
+    tddft_batch    = _res["tddft_batch"]
+
     if args.status:
         print_status()
         return
@@ -5533,6 +5635,14 @@ def _run_one(args, parser):
     mol_dir.mkdir(parents=True, exist_ok=True)
 
     log = setup_logging(mol_dir)
+
+    # ── Resolución de carga (auto por sufijo, o --charge explícito) ──────
+    # args.charge llega en None si el usuario no pasó --charge: se infiere
+    # aquí y se sobrescribe args.charge con el valor resuelto, de modo que
+    # TODO el resto de _run_one()/_run_downstream_from_crest() (que ya
+    # asumían args.charge como int) siga funcionando sin más cambios.
+    args.charge = resolve_charge(mol_name, args.charge, log)
+
     log.info("=" * 60)
     log.info(f"PIPELINE ORCA  —  molécula: {mol_name}")
     log.info(f"Carga: {args.charge}   Mult: {MULT}")
@@ -5653,6 +5763,34 @@ def _run_one(args, parser):
             )
         log.info("[CREST] saltado (--start indica etapa posterior)")
 
+    _run_downstream_from_crest(
+        args, conformers_xyz, mol_dir, args.charge, mol_xyz, mol_name,
+        log, censo_temperatures, start_idx,
+    )
+
+
+def _run_downstream_from_crest(args, conformers_xyz, mol_dir, charge,
+                                natoms_ref_xyz, mol_name, log,
+                                censo_temperatures, start_idx):
+    """
+    Corre CENSO (prescreen) → OPT → NumFreq → SP → [SP_GAS] → [SP_SMD] →
+    TDDFT → [ADC2] sobre un ensemble CREST ya generado (conformers_xyz).
+
+    Se separó del cuerpo de _run_one() para poder reutilizarlo tanto en
+    una corrida normal (una molécula/carga) como en el modo ciclo de
+    protonación automático (--autoprotonate + --autodeprotonate juntos,
+    ver _run_protonation_cycle), que llama a esta función tres veces —
+    una por estado de protonación (R/A/B) — con su propio mol_dir/charge/
+    natoms_ref_xyz, pero compartiendo el resto de opciones de `args`
+    (--skipnumfreq, --adc2, --spgas, --spsmd, --multitemp,
+    --boltzmann-threshold, --temperature, etc.) tal cual.
+
+    natoms_ref_xyz es la molécula base usada SOLO para derivar
+    expected_natoms (sanity check de que conformers_xyz corresponde a
+    ESTE estado/carga) — en una corrida normal es el mismo mol_xyz de
+    entrada; en modo ciclo, para los estados A/B es la estructura
+    representativa (des)protonada, no la molécula neutra original.
+    """
     # ── Etapa 1b: CENSO pre-screening (siempre obligatorio) ──────
     # Corre entre CREST y OPT. Fail-open: si CENSO no está disponible
     # o falla, el pipeline continúa con el ensemble CREST sin filtrar.
@@ -5669,7 +5807,7 @@ def _run_one(args, parser):
             multitemp_results = stage_censo_multitemp(
                 conformers_xyz=conformers_xyz,
                 mol_dir=mol_dir,
-                charge=args.charge,
+                charge=charge,
                 log=log,
                 temperatures=censo_temperatures,
             )
@@ -5686,7 +5824,7 @@ def _run_one(args, parser):
             )
         else:
             conformers_xyz = stage_censo_prescreen(
-                conformers_xyz, mol_dir, args.charge, log,
+                conformers_xyz, mol_dir, charge, log,
                 temperature=censo_temperatures[0],
             )
 
@@ -5726,23 +5864,25 @@ def _run_one(args, parser):
         else:
             nconf = select_nconf_auto(conformers_xyz, log)
 
-        # expected_natoms se deriva directamente de mol_xyz: es la molécula
-        # base de ESTE estado de protonación (A/B/C/D/R), la misma que
-        # arrancó CREST para este mol_dir/charge. Si conformers_xyz apunta
-        # al ensemble de otro estado, este número no va a coincidir, y
-        # stage_opt() lo detecta antes de escribir ningún opt.inp.
+        # expected_natoms se deriva de natoms_ref_xyz: es la molécula base
+        # de ESTE estado de protonación (A/B/C/D/R), la misma que arrancó
+        # CREST para este mol_dir/charge (o, en modo ciclo automático, la
+        # estructura representativa (des)protonada de ese estado). Si
+        # conformers_xyz apunta al ensemble de otro estado, este número no
+        # va a coincidir, y stage_opt() lo detecta antes de escribir
+        # ningún opt.inp.
         try:
-            _mol_atoms = read(str(mol_xyz))
+            _mol_atoms = read(str(natoms_ref_xyz))
             _expected_natoms = len(_mol_atoms)
         except Exception as e:
             log.warning(
-                f"[OPT] no se pudo leer {mol_xyz} para derivar expected_natoms "
-                f"({e}); se omite la validación estado/charge."
+                f"[OPT] no se pudo leer {natoms_ref_xyz} para derivar "
+                f"expected_natoms ({e}); se omite la validación estado/carga."
             )
             _expected_natoms = None
 
         opt_dirs = stage_opt(
-            conformers_xyz, mol_dir, args.charge, nconf, log,
+            conformers_xyz, mol_dir, charge, nconf, log,
             conf_ids=boltz_conf_ids if boltz_conf_ids else None,
             expected_natoms=_expected_natoms,
         )
@@ -5763,7 +5903,7 @@ def _run_one(args, parser):
         )
         freq_dirs = opt_dirs
     elif start_idx <= STEPS.index("numfreq"):
-        freq_dirs = stage_numfreq(opt_dirs, mol_dir, args.charge, log)
+        freq_dirs = stage_numfreq(opt_dirs, mol_dir, charge, log)
         if not freq_dirs:
             log.error("Ningún cálculo de frecuencias completado. Abortando.")
             sys.exit(1)
@@ -5777,7 +5917,7 @@ def _run_one(args, parser):
     # Si no se completa ningún confórmero, se aborta antes de llegar a
     # "PIPELINE FINALIZADO" (ver sys.exit(1) abajo).
     if start_idx <= STEPS.index("sp"):
-        sp_dirs = stage_sp(freq_dirs, mol_dir, args.charge, log)
+        sp_dirs = stage_sp(freq_dirs, mol_dir, charge, log)
         if not sp_dirs:
             log.error("Ningún SP completado. Abortando "
                       "(SP fase gas es obligatorio para finalizar el pipeline).")
@@ -5823,7 +5963,7 @@ def _run_one(args, parser):
 
     # ── Etapa 5: TDDFT ──────────────────────────────────────────
     if start_idx <= STEPS.index("tddft"):
-        tddft_dirs = stage_tddft(sp_dirs, mol_dir, args.charge, log)
+        tddft_dirs = stage_tddft(sp_dirs, mol_dir, charge, log)
         if not tddft_dirs:
             log.warning("Ningún TDDFT completado.")
         else:
@@ -5837,7 +5977,7 @@ def _run_one(args, parser):
     # manejado en su propio bloque más arriba). El pipeline se considera
     # FINALIZADO con solo SP (obligatorio) completado; ADC2 es un extra.
     if args.adc2 and start_idx <= STEPS.index("adc2"):
-        adc2_dir = stage_adc2(mol_dir, args.charge, log, mol_name=mol_name)
+        adc2_dir = stage_adc2(mol_dir, charge, log, mol_name=mol_name)
         if adc2_dir is None:
             log.warning("[ADC2] No se pudo completar la validación ADC2.")
         else:
@@ -5956,8 +6096,16 @@ Ejemplos (modo multi-molécula, --mol repetido):
         """,
     )
     parser.add_argument("--mol",    type=Path, help="ruta al .xyz de entrada")
-    parser.add_argument("--charge", type=int, default=0,
-                        help="carga formal de la molécula (default: 0)")
+    parser.add_argument(
+        "--charge", type=int, default=None,
+        help=(
+            "carga formal de la molécula. OPCIONAL: si se omite, se "
+            "infiere automáticamente del nombre del archivo según el "
+            "sufijo de estado de protonación (…A=+1, …B=-1, …C=-2, "
+            "…D=0, …R=0). Pasa --charge explícito para forzar otro "
+            "valor o si el nombre no sigue esa convención."
+        ),
+    )
     _protonation_group = parser.add_mutually_exclusive_group()
     _protonation_group.add_argument(
         "--autoprotonate", action="store_true",
@@ -6252,8 +6400,9 @@ Ejemplos (modo multi-molécula, --mol repetido):
             continue
 
         etiqueta = args.mol.name if args.mol else f"run_{i}"
+        carga_str = args.charge if args.charge is not None else "auto"
         print(f"\n{'#'*60}")
-        print(f"[{i}/{n}] {etiqueta}  (carga={args.charge}, start={args.start})")
+        print(f"[{i}/{n}] {etiqueta}  (carga={carga_str}, start={args.start})")
         print(f"{'#'*60}\n")
 
         try:
