@@ -3196,7 +3196,8 @@ def parse_boltzmann_weights(screening_out: Path) -> dict[str, float]:
 
 # ─────────────────────────────────────────────
 #  BOLTZMANN DESDE ENERGÍAS SP PRE-EXISTENTES
-#  (post-selección CENSO — nivel DFT del propio SP, no xTB/CENSO)
+#  (nivel DFT del propio SP, no xTB/DFT de prescreening de CENSO — usado
+#  como criterio principal de selección para --spsmd, ver stage_sp_smd)
 # ─────────────────────────────────────────────
 
 def compute_boltzmann_from_energies(
@@ -3241,16 +3242,16 @@ def extract_sp_boltzmann_weights(
     stage_tag:   str   = "SP_SMD",
 ) -> dict[str, float]:
     """
-    Extrae los pesos de Boltzmann de un conjunto de confórmeros (p.ej. los
-    que sobrevivieron el filtro Boltzmann de CENSO, ver
-    _filter_dirs_by_boltzmann) usando las energías de SP PRE-EXISTENTES
-    (FINAL SINGLE POINT ENERGY de <conf_dir>/sp.out) en vez del peso
-    Boltzmann de 1_SCREENING.out de CENSO.
+    Extrae los pesos de Boltzmann de un conjunto de confórmeros (p.ej. todos
+    los que llegaron a 04_sp/ con SP exitoso) usando sus energías de SP
+    PRE-EXISTENTES (FINAL SINGLE POINT ENERGY de <conf_dir>/sp.out) en vez
+    del peso Boltzmann de 1_SCREENING.out de CENSO.
 
     Esto da el peso Boltzmann al nivel DFT real del SP (el mismo con el
-    que luego se pesan espectros/observables), coherente con la selección
-    de confórmeros ya hecha vía CENSO pero sin depender de su nivel de
-    teoría (xTB/DFT de prescreening) para el peso final.
+    que luego se pesan espectros/observables) y sirve como criterio de
+    selección más fiable que el de CENSO, cuyo nivel de teoría (xTB/DFT de
+    prescreening) puede subestimar la brecha energética entre confórmeros
+    y dejar pasar de más.
 
     Fail-open por confórmero: si sp.out falta, no terminó bien, o no tiene
     energía parseable, ese confórmero se excluye del cálculo (con warning)
@@ -3275,15 +3276,15 @@ def extract_sp_boltzmann_weights(
 
     if not energies:
         log.warning(f"[{stage_tag}-BOLTZMANN] ningún confórmero con energía "
-                    f"SP válida — no se pudo calcular Boltzmann post-CENSO")
+                    f"SP válida — no se pudo calcular Boltzmann desde SP")
         return {}
 
     weights = compute_boltzmann_from_energies(energies, temperature=temperature)
 
     ranked = sorted(weights.items(), key=lambda x: -x[1])
     ranked_str = ", ".join(f"{cid}({w:.1f}%)" for cid, w in ranked)
-    log.info(f"[{stage_tag}-BOLTZMANN] pesos Boltzmann post-selección CENSO "
-              f"desde energías SP preexistentes (T={temperature:.2f} K), "
+    log.info(f"[{stage_tag}-BOLTZMANN] pesos Boltzmann desde energías SP "
+              f"preexistentes (T={temperature:.2f} K), "
               f"{len(weights)} conf(s): {ranked_str}")
 
     return weights
@@ -4159,6 +4160,55 @@ def _filter_dirs_by_boltzmann(
     return kept
 
 
+def _filter_dirs_by_sp_weights(
+    conf_dirs: list[Path],
+    weights:   dict[str, float],
+    threshold: float,
+    log:       logging.Logger,
+    stage_tag: str,
+) -> list[Path]:
+    """
+    Filtra conf_dirs dejando solo los que superan `threshold`% de peso
+    Boltzmann calculado desde energías de SP PRE-EXISTENTES (ver
+    extract_sp_boltzmann_weights) — a diferencia de _filter_dirs_by_boltzmann,
+    que usa el peso de 1_SCREENING.out de CENSO (nivel xTB/DFT de
+    prescreening, distinto y potencialmente menos fiable que el propio SP).
+
+    Fail-open: si `weights` está vacío o ningún confórmero supera el
+    umbral, devuelve conf_dirs sin filtrar con un warning.
+    """
+    if not weights:
+        log.warning(f"[{stage_tag}] sin pesos Boltzmann de SP disponibles — "
+                    f"no se puede filtrar, se usan los {len(conf_dirs)} sin filtrar")
+        return conf_dirs
+
+    kept, dropped, no_wt = [], [], []
+    for d in conf_dirs:
+        w = weights.get(d.name)
+        if w is None:
+            no_wt.append(d.name)
+        elif w > threshold:
+            kept.append(d)
+        else:
+            dropped.append((d.name, w))
+
+    if not kept:
+        log.warning(f"[{stage_tag}] ningún confórmero supera >{threshold}% "
+                    f"Boltzmann (SP) — cayendo de vuelta a los {len(conf_dirs)} sin filtrar")
+        return conf_dirs
+
+    kept_str = ", ".join(f"{d.name}({weights[d.name]:.1f}%)" for d in kept)
+    log.info(f"[{stage_tag}] filtro Boltzmann (SP, energías preexistentes) "
+              f">{threshold}%: {len(kept)}/{len(conf_dirs)} seleccionados: {kept_str}")
+    if dropped:
+        log.info(f"[{stage_tag}] {len(dropped)} conf(s) descartados por debajo "
+                  f"del umbral: {[f'{cid}({w:.1f}%)' for cid, w in dropped]}")
+    if no_wt:
+        log.warning(f"[{stage_tag}] {len(no_wt)} conf(s) sin peso SP calculado, "
+                    f"descartados: {no_wt}")
+    return kept
+
+
 def stage_sp_smd(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
                   batch_size: int = 0,
                   nprocs_per_job: Optional[int] = None,
@@ -4172,36 +4222,48 @@ def stage_sp_smd(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
     que un 04_sp/<conf_id>/ ya exitoso.
 
     Antes de correr, filtra sp_dirs quedándose SOLO con los confórmeros
-    cuyo peso Boltzmann (de 1_SCREENING.out de CENSO, propio de este
-    mol_dir/estado) sea > boltzmann_min_pct (default 20%) — es decir, los
-    mejores confórmeros de este estado, no todo el ensemble que llegó a SP.
-    Fail-open: si no hay dato Boltzmann disponible o el filtro no deja
-    ningún confórmero, corre sobre sp_dirs sin filtrar (ver
-    _filter_dirs_by_boltzmann).
+    cuyo peso Boltzmann sea > boltzmann_min_pct (default 20%). El peso se
+    calcula PRIMERO desde las energías de SP PRE-EXISTENTES (FINAL SINGLE
+    POINT ENERGY de 04_sp/<conf_id>/sp.out, ver extract_sp_boltzmann_weights
+    y _filter_dirs_by_sp_weights) — al nivel DFT real del propio SP, no al
+    nivel xTB/DFT de prescreening de CENSO, que puede subestimar la brecha
+    energética entre confórmeros y dejar pasar de más (fail-open) cuando
+    ninguno supera el umbral a ese nivel.
 
-    Tras esa selección CENSO, extrae además el peso Boltzmann "real" de los
-    confórmeros sobrevivientes a partir de sus energías de SP PRE-EXISTENTES
-    (FINAL SINGLE POINT ENERGY de 04_sp/<conf_id>/sp.out, ver
-    extract_sp_boltzmann_weights) — al nivel DFT del propio SP, no al nivel
-    xTB/DFT de prescreening de CENSO. Este peso se guarda en
-    04c_sp_smd/sp_boltzmann_weights.json (no cambia qué confórmeros corren,
-    solo documenta su peso relativo real para ponderar observables después).
+    Solo si NINGÚN confórmero tiene energía de SP parseable (caso límite,
+    no debería pasar con sp_dirs ya exitosos) se cae de vuelta al filtro
+    Boltzmann de CENSO (1_SCREENING.out, ver _filter_dirs_by_boltzmann) como
+    respaldo; y si tampoco hay dato ahí, se corre sobre sp_dirs sin filtrar.
+
+    El peso Boltzmann de SP (para todos los confórmeros de entrada, antes
+    del filtro) se guarda en 04c_sp_smd/sp_boltzmann_weights.json junto con
+    la lista de seleccionados, para documentar el peso relativo real usado
+    para ponderar observables después.
 
     Devuelve directorios 04c_sp_smd/<conf_id>/ exitosos.
 
     batch_size=0  → usa SP_BATCH_SIZE global (comparte recursos con SP normal).
     nprocs_per_job / maxcore_per_job sobreescriben los globals NPROCS / MAXCORE
     para cada worker paralelo; si son None se usan los globals vigentes.
-    temperature   : T (K) para el cálculo Boltzmann post-CENSO (default 298.15;
+    temperature   : T (K) para el cálculo Boltzmann de SP (default 298.15;
                     pasar --temperature para runs Antárticos a 274.15 K).
     """
-    sp_dirs = _filter_dirs_by_boltzmann(
-        sp_dirs, mol_dir, log, threshold=boltzmann_min_pct, stage_tag="SP_SMD"
-    )
-
     sp_boltzmann_weights = extract_sp_boltzmann_weights(
         sp_dirs, log, temperature=temperature, stage_tag="SP_SMD"
     )
+
+    if sp_boltzmann_weights:
+        selected_dirs = _filter_dirs_by_sp_weights(
+            sp_dirs, sp_boltzmann_weights, threshold=boltzmann_min_pct,
+            log=log, stage_tag="SP_SMD",
+        )
+    else:
+        log.warning("[SP_SMD] sin energías de SP válidas para Boltzmann — "
+                    "cayendo al filtro Boltzmann de CENSO (1_SCREENING.out)")
+        selected_dirs = _filter_dirs_by_boltzmann(
+            sp_dirs, mol_dir, log, threshold=boltzmann_min_pct, stage_tag="SP_SMD"
+        )
+
     if sp_boltzmann_weights:
         smd_root = mol_dir / "04c_sp_smd"
         smd_root.mkdir(parents=True, exist_ok=True)
@@ -4209,14 +4271,18 @@ def stage_sp_smd(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
         try:
             weights_path.write_text(json.dumps(
                 {
-                    "temperature_K": temperature,
-                    "source":        "04_sp/<conf_id>/sp.out (FINAL SINGLE POINT ENERGY)",
-                    "weights_pct":   sp_boltzmann_weights,
+                    "temperature_K":     temperature,
+                    "source":            "04_sp/<conf_id>/sp.out (FINAL SINGLE POINT ENERGY)",
+                    "threshold_pct":     boltzmann_min_pct,
+                    "weights_pct":       sp_boltzmann_weights,
+                    "selected_conf_ids": [d.name for d in selected_dirs],
                 },
                 indent=2,
             ))
         except OSError as e:
             log.warning(f"[SP_SMD-BOLTZMANN] no se pudo guardar {weights_path.name}: {e}")
+
+    sp_dirs = selected_dirs
 
     _batch   = batch_size if batch_size > 0 else SP_BATCH_SIZE
     _nprocs  = nprocs_per_job  if nprocs_per_job  is not None else NPROCS
