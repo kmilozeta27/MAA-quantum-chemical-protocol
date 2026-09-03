@@ -193,6 +193,7 @@ import datetime
 import fcntl
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -831,6 +832,7 @@ signal.signal(signal.SIGTERM, _sigint_handler)
 # ─────────────────────────────────────────────
 
 HARTREE_TO_KCAL     = 627.5094740631   # factor de conversión
+R_GAS_KCAL          = 1.987204e-3      # cte. de los gases, kcal/(mol·K)
 
 
 # ─────────────────────────────────────────────
@@ -3192,6 +3194,101 @@ def parse_boltzmann_weights(screening_out: Path) -> dict[str, float]:
     return result
 
 
+# ─────────────────────────────────────────────
+#  BOLTZMANN DESDE ENERGÍAS SP PRE-EXISTENTES
+#  (post-selección CENSO — nivel DFT del propio SP, no xTB/CENSO)
+# ─────────────────────────────────────────────
+
+def compute_boltzmann_from_energies(
+    energies:    dict[str, float],
+    temperature: float = 298.15,
+) -> dict[str, float]:
+    """
+    Calcula pesos de Boltzmann (%) a partir de energías electrónicas
+    (Hartree) ya calculadas — típicamente FINAL SINGLE POINT ENERGY de
+    04_sp/conf_*/sp.out — en vez de reusar el peso Boltzmann de CENSO
+    (que viene de xTB/DFT de prescreening, un nivel de teoría distinto).
+
+    w_i = exp(-ΔE_i / R·T) / Σ_j exp(-ΔE_j / R·T),  ΔE_i = (E_i − E_min) en kcal/mol
+
+    Args:
+        energies    : {conf_id → energía electrónica en Hartree}.
+        temperature : temperatura en K (default 298.15; usa la misma que
+                      --temperature para ser consistente con el resto del
+                      pipeline, p.ej. 274.15 K en runs Antárticos).
+
+    Devuelve {conf_id → peso%}, ordenable por valor descendente. Dict
+    vacío si `energies` está vacío.
+    """
+    if not energies:
+        return {}
+
+    e_min = min(energies.values())
+    boltz_factors = {
+        cid: math.exp(-((e - e_min) * HARTREE_TO_KCAL) / (R_GAS_KCAL * temperature))
+        for cid, e in energies.items()
+    }
+    total = sum(boltz_factors.values())
+    if total <= 0:
+        return {cid: 0.0 for cid in energies}
+    return {cid: 100.0 * f / total for cid, f in boltz_factors.items()}
+
+
+def extract_sp_boltzmann_weights(
+    sp_dirs:     list[Path],
+    log:         logging.Logger,
+    temperature: float = 298.15,
+    stage_tag:   str   = "SP_SMD",
+) -> dict[str, float]:
+    """
+    Extrae los pesos de Boltzmann de un conjunto de confórmeros (p.ej. los
+    que sobrevivieron el filtro Boltzmann de CENSO, ver
+    _filter_dirs_by_boltzmann) usando las energías de SP PRE-EXISTENTES
+    (FINAL SINGLE POINT ENERGY de <conf_dir>/sp.out) en vez del peso
+    Boltzmann de 1_SCREENING.out de CENSO.
+
+    Esto da el peso Boltzmann al nivel DFT real del SP (el mismo con el
+    que luego se pesan espectros/observables), coherente con la selección
+    de confórmeros ya hecha vía CENSO pero sin depender de su nivel de
+    teoría (xTB/DFT de prescreening) para el peso final.
+
+    Fail-open por confórmero: si sp.out falta, no terminó bien, o no tiene
+    energía parseable, ese confórmero se excluye del cálculo (con warning)
+    en vez de abortar toda la etapa.
+
+    Devuelve {conf_id → peso%} (vacío si ningún confórmero tiene energía
+    SP válida).
+    """
+    energies: dict[str, float] = {}
+    for d in sp_dirs:
+        out_file = d / "sp.out"
+        if not check_success(out_file):
+            log.warning(f"[{stage_tag}-BOLTZMANN] {d.name}: sp.out ausente o "
+                        f"incompleto — excluido del cálculo Boltzmann")
+            continue
+        e = extract_sp_energy(out_file)
+        if e is None:
+            log.warning(f"[{stage_tag}-BOLTZMANN] {d.name}: sp.out sin "
+                        f"energía parseable — excluido del cálculo Boltzmann")
+            continue
+        energies[d.name] = e
+
+    if not energies:
+        log.warning(f"[{stage_tag}-BOLTZMANN] ningún confórmero con energía "
+                    f"SP válida — no se pudo calcular Boltzmann post-CENSO")
+        return {}
+
+    weights = compute_boltzmann_from_energies(energies, temperature=temperature)
+
+    ranked = sorted(weights.items(), key=lambda x: -x[1])
+    ranked_str = ", ".join(f"{cid}({w:.1f}%)" for cid, w in ranked)
+    log.info(f"[{stage_tag}-BOLTZMANN] pesos Boltzmann post-selección CENSO "
+              f"desde energías SP preexistentes (T={temperature:.2f} K), "
+              f"{len(weights)} conf(s): {ranked_str}")
+
+    return weights
+
+
 def select_nconf_boltzmann(
     conformers_xyz: Path,
     screening_out:  Path,
@@ -4066,7 +4163,8 @@ def stage_sp_smd(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
                   batch_size: int = 0,
                   nprocs_per_job: Optional[int] = None,
                   maxcore_per_job: Optional[int] = None,
-                  boltzmann_min_pct: float = 20.0) -> list[Path]:
+                  boltzmann_min_pct: float = 20.0,
+                  temperature: float = 298.15) -> list[Path]:
     """
     Etapa 04c_sp_smd (OPCIONAL — requiere --spsmd): single point con
     SMD(water) (idéntico al SP con CPCM(water) pero usando SMD en vez de
@@ -4081,15 +4179,44 @@ def stage_sp_smd(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
     ningún confórmero, corre sobre sp_dirs sin filtrar (ver
     _filter_dirs_by_boltzmann).
 
+    Tras esa selección CENSO, extrae además el peso Boltzmann "real" de los
+    confórmeros sobrevivientes a partir de sus energías de SP PRE-EXISTENTES
+    (FINAL SINGLE POINT ENERGY de 04_sp/<conf_id>/sp.out, ver
+    extract_sp_boltzmann_weights) — al nivel DFT del propio SP, no al nivel
+    xTB/DFT de prescreening de CENSO. Este peso se guarda en
+    04c_sp_smd/sp_boltzmann_weights.json (no cambia qué confórmeros corren,
+    solo documenta su peso relativo real para ponderar observables después).
+
     Devuelve directorios 04c_sp_smd/<conf_id>/ exitosos.
 
     batch_size=0  → usa SP_BATCH_SIZE global (comparte recursos con SP normal).
     nprocs_per_job / maxcore_per_job sobreescriben los globals NPROCS / MAXCORE
     para cada worker paralelo; si son None se usan los globals vigentes.
+    temperature   : T (K) para el cálculo Boltzmann post-CENSO (default 298.15;
+                    pasar --temperature para runs Antárticos a 274.15 K).
     """
     sp_dirs = _filter_dirs_by_boltzmann(
         sp_dirs, mol_dir, log, threshold=boltzmann_min_pct, stage_tag="SP_SMD"
     )
+
+    sp_boltzmann_weights = extract_sp_boltzmann_weights(
+        sp_dirs, log, temperature=temperature, stage_tag="SP_SMD"
+    )
+    if sp_boltzmann_weights:
+        smd_root = mol_dir / "04c_sp_smd"
+        smd_root.mkdir(parents=True, exist_ok=True)
+        weights_path = smd_root / "sp_boltzmann_weights.json"
+        try:
+            weights_path.write_text(json.dumps(
+                {
+                    "temperature_K": temperature,
+                    "source":        "04_sp/<conf_id>/sp.out (FINAL SINGLE POINT ENERGY)",
+                    "weights_pct":   sp_boltzmann_weights,
+                },
+                indent=2,
+            ))
+        except OSError as e:
+            log.warning(f"[SP_SMD-BOLTZMANN] no se pudo guardar {weights_path.name}: {e}")
 
     _batch   = batch_size if batch_size > 0 else SP_BATCH_SIZE
     _nprocs  = nprocs_per_job  if nprocs_per_job  is not None else NPROCS
@@ -4164,7 +4291,8 @@ def stage_sp_smd(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
 
 
 def stage_spsmd_batch(group_dir: Path, log: logging.Logger,
-                       boltzmann_min_pct: float = 20.0) -> None:
+                       boltzmann_min_pct: float = 20.0,
+                       temperature: float = 298.15) -> None:
     """
     Modo batch de --spsmd: recorre TODAS las corridas dentro de una carpeta
     de grupo (<grupo>/runs/*/04_sp/conf_*) y calcula el SP_SMD que falte
@@ -4198,7 +4326,9 @@ def stage_spsmd_batch(group_dir: Path, log: logging.Logger,
             continue
 
         log.info(f"[SP_SMD] {mol_dir.name}: {len(sp_dirs)} confórmeros con SP CPCM completo")
-        done = stage_sp_smd(sp_dirs, mol_dir, log, boltzmann_min_pct=boltzmann_min_pct)
+        done = stage_sp_smd(sp_dirs, mol_dir, log,
+                             boltzmann_min_pct=boltzmann_min_pct,
+                             temperature=temperature)
         total_ok += len(done)
         total_pend += len(sp_dirs) - len(done)
 
@@ -5605,7 +5735,9 @@ def _run_one(args, parser):
         log.info("=" * 60)
         log.info(f"MODO: SP_SMD batch (--spsmd) sobre carpeta de grupo → {group_dir.name}")
         log.info("=" * 60)
-        stage_spsmd_batch(group_dir, log, boltzmann_min_pct=args.spsmd_boltzmann_threshold)
+        stage_spsmd_batch(group_dir, log,
+                           boltzmann_min_pct=args.spsmd_boltzmann_threshold,
+                           temperature=args.temperature)
         log.info("=" * 60)
         log.info("SP_SMD BATCH FINALIZADO")
         log.info("=" * 60)
@@ -5953,7 +6085,8 @@ def _run_downstream_from_crest(args, conformers_xyz, mol_dir, charge,
                  f"{len(sp_dirs)} confórmeros de 04_sp/ "
                  f"(filtro Boltzmann > {args.spsmd_boltzmann_threshold}%)")
         spsmd_dirs = stage_sp_smd(sp_dirs, mol_dir, log,
-                                   boltzmann_min_pct=args.spsmd_boltzmann_threshold)
+                                   boltzmann_min_pct=args.spsmd_boltzmann_threshold,
+                                   temperature=args.temperature)
         if not spsmd_dirs:
             log.warning("[SP_SMD] ningún cálculo completado.")
         else:
