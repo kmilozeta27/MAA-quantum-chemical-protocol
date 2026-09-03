@@ -120,22 +120,42 @@ USO
       --mol MGLYVAL --neutral R --anion B --dianion C \\
       --export xlsx --plot
 
-  # Modo detallado (muestra contribuciones del ciclo de Born paso a paso)
+  # El modo detallado (--verbose) es AHORA EL DEFAULT: siempre se muestran
+  # las contribuciones del ciclo de Born paso a paso. Para el modo resumido:
   python protonation_cycle.py \\
       --mol MGLYVAL --neutral R --anion B --dianion C \\
-      --verbose
+      --no-verbose
+
+═══════════════════════════════════════════════════════════════════════════════
+LOG DE CADA CORRIDA
+═══════════════════════════════════════════════════════════════════════════════
+
+  Cada ejecución del script genera su propio archivo .log COMPLETO
+  (independiente de --verbose/--no-verbose: el .log siempre registra todo
+  lo impreso) en:
+
+      <cwd>/<MOL>/logs/run_<timestamp>_pid<PID>.log
+
+  es decir, en la carpeta de la molécula (un nivel arriba de runs/,
+  determinada por --mol o por el padre de --work-root). Como el nombre
+  incluye timestamp con microsegundos + PID, correr el script varias
+  veces con distintos modos/configuraciones (--method, --goodvibes,
+  --montecarlo, distintos estados, etc.) nunca sobreescribe un .log
+  anterior: cada corrida queda archivada aparte.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import warnings
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -3872,6 +3892,81 @@ def export_results(
 #  PUNTO DE ENTRADA
 # ─────────────────────────────────────────────
 
+class _Tee:
+    """
+    Duplica cada escritura hacia un stream original (stdout/stderr de
+    consola) y, además, hacia un archivo .log en disco. Se usa flush()
+    inmediato en cada write() para que el .log quede completo incluso si
+    el proceso muere a medias (ORCA se cae, Ctrl+C, etc.) en vez de
+    perderse en el buffer.
+    """
+
+    def __init__(self, primary, logfile):
+        self._primary = primary
+        self._logfile = logfile
+
+    def write(self, data):
+        self._primary.write(data)
+        self._logfile.write(data)
+        self._logfile.flush()
+        return len(data)
+
+    def flush(self):
+        self._primary.flush()
+        self._logfile.flush()
+
+    def isatty(self):
+        return self._primary.isatty()
+
+
+def _setup_run_logger(work_root: Path, argv: list[str]):
+    """
+    Prepara un .log COMPLETO y EXCLUSIVO para esta corrida.
+
+    Ubicación: <carpeta_de_mol>/logs/, es decir un nivel arriba de runs/
+    (la carpeta de grupo determinada por --mol / --work-root), para que
+    los logs de todas las corridas sobre una misma molécula queden
+    juntos y separados de los de otra molécula.
+
+    Nombre: run_<timestamp con microsegundos>_pid<PID>.log — así, sin
+    importar cuántas veces o en qué modos/configuraciones se corra el
+    script (incluso si se lanzan dos corridas casi al mismo tiempo),
+    cada invocación obtiene su propio archivo y ninguna sobreescribe a
+    otra.
+
+    Redirige sys.stdout y sys.stderr a través de _Tee, de modo que TODO
+    lo que ya se imprime en el script (incluyendo el detalle verbose del
+    ciclo de Born, que ahora es el comportamiento por default) queda
+    también volcado al .log, sin tener que tocar cada print() del
+    código.
+
+    Devuelve (log_path, log_file, orig_stdout, orig_stderr) para que el
+    llamador pueda cerrar/restaurar todo correctamente en un finally.
+    """
+    group_dir = work_root.parent  # carpeta de la molécula (p. ej. <cwd>/MGLYVAL/)
+    log_dir = group_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    log_path = log_dir / f"run_{ts}_pid{os.getpid()}.log"
+
+    log_file = open(log_path, "w", encoding="utf-8")
+    log_file.write("═" * 74 + "\n")
+    log_file.write("  protonation_cycle.py — log completo de corrida\n")
+    log_file.write(f"  fecha    : {datetime.now().isoformat(timespec='seconds')}\n")
+    log_file.write(f"  cwd      : {Path.cwd()}\n")
+    log_file.write(f"  work_root: {work_root}\n")
+    log_file.write(f"  comando  : {' '.join(argv)}\n")
+    log_file.write("═" * 74 + "\n\n")
+    log_file.flush()
+
+    orig_stdout, orig_stderr = sys.stdout, sys.stderr
+    sys.stdout = _Tee(orig_stdout, log_file)
+    sys.stderr = _Tee(orig_stderr, log_file)
+
+    return log_path, log_file, orig_stdout, orig_stderr
+
+
 def main():
     # Debe ir ANTES de cualquier lectura de estas variables en esta función
     # (p. ej. como default= en add_argument más abajo). Python exige que la
@@ -3976,8 +4071,11 @@ Ejemplos:
                         help="Exportar resultados")
     parser.add_argument("--plot",     action="store_true",
                         help="Generar gráficos de distribución y Boltzmann conformacional")
-    parser.add_argument("--verbose",  action="store_true",
-                        help="Mostrar contribuciones detalladas del ciclo de Born")
+    parser.add_argument("--verbose",  action=argparse.BooleanOptionalAction, default=True,
+                        help="Mostrar contribuciones detalladas del ciclo de Born "
+                             "(default: activado). Usa --no-verbose para el modo "
+                             "resumido. El .log de la corrida (ver --mol) siempre "
+                             "guarda TODO lo impreso, independientemente de este flag.")
     parser.add_argument("--goodvibes", action="store_true",
                         help="Corre el ciclo COMPLETO dos veces: una con G_corr "
                              "armónico estándar de NumFreq (RRHO, tal cual lo "
@@ -4111,19 +4209,30 @@ Ejemplos:
             "estados no se usa. Agrega --zwitterion o quita --protonated."
         )
 
-    print("\n" + "═" * 74)
-    print("  PROTONATION CYCLE  —  FAE-MAA / kmilozeta")
-    print("═" * 74)
-    if args.mol:
-        print(f"  molécula : {args.mol}")
-    print(f"  runs/ : {WORK_ROOT}")
+    log_path, log_file, orig_stdout, orig_stderr = _setup_run_logger(WORK_ROOT, sys.argv)
 
-    if args.goodvibes:
-        _run_comparison(args, use_extended)
-    elif use_extended:
-        _run_extended(args)
-    else:
-        _run_classic(args)
+    try:
+        print("\n" + "═" * 74)
+        print("  PROTONATION CYCLE  —  FAE-MAA / kmilozeta")
+        print("═" * 74)
+        if args.mol:
+            print(f"  molécula : {args.mol}")
+        print(f"  runs/ : {WORK_ROOT}")
+        print(f"  log   : {log_path}")
+
+        if args.goodvibes:
+            _run_comparison(args, use_extended)
+        elif use_extended:
+            _run_extended(args)
+        else:
+            _run_classic(args)
+    finally:
+        # Restaurar stdout/stderr originales y cerrar el .log de esta
+        # corrida ANTES de salir, sin importar si terminó bien o con error
+        # (así una excepción o un Ctrl+C también quedan registrados).
+        sys.stdout, sys.stderr = orig_stdout, orig_stderr
+        print(f"\n  (log completo de esta corrida guardado en: {log_path})\n")
+        log_file.close()
 
 
 def _run_classic(args, gcorr_source: str = "harmonic"):

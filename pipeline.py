@@ -4209,44 +4209,32 @@ def _filter_dirs_by_sp_weights(
     return kept
 
 
-def stage_sp_smd(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
-                  batch_size: int = 0,
-                  nprocs_per_job: Optional[int] = None,
-                  maxcore_per_job: Optional[int] = None,
-                  boltzmann_min_pct: float = 20.0,
-                  temperature: float = 298.15) -> list[Path]:
+def _collect_spsmd_selection(
+    sp_dirs:           list[Path],
+    mol_dir:           Path,
+    log:               logging.Logger,
+    boltzmann_min_pct: float = 20.0,
+    temperature:       float = 298.15,
+) -> list[Path]:
     """
-    Etapa 04c_sp_smd (OPCIONAL — requiere --spsmd): single point con
-    SMD(water) (idéntico al SP con CPCM(water) pero usando SMD en vez de
-    CPCM), sobre los mismos confórmeros y con la misma geometría/charge/mult
-    que un 04_sp/<conf_id>/ ya exitoso.
+    Selecciona, para un mol_dir/estado dado, qué confórmeros de sp_dirs
+    (04_sp/conf_*/ ya exitosos) deben pasar a SP_SMD, y persiste el
+    resultado en 04c_sp_smd/sp_boltzmann_weights.json. NO ejecuta nada —
+    solo decide (ver _run_spsmd_execution para la ejecución).
 
-    Antes de correr, filtra sp_dirs quedándose SOLO con los confórmeros
-    cuyo peso Boltzmann sea > boltzmann_min_pct (default 20%). El peso se
-    calcula PRIMERO desde las energías de SP PRE-EXISTENTES (FINAL SINGLE
-    POINT ENERGY de 04_sp/<conf_id>/sp.out, ver extract_sp_boltzmann_weights
-    y _filter_dirs_by_sp_weights) — al nivel DFT real del propio SP, no al
-    nivel xTB/DFT de prescreening de CENSO, que puede subestimar la brecha
-    energética entre confórmeros y dejar pasar de más (fail-open) cuando
-    ninguno supera el umbral a ese nivel.
+    El peso se calcula PRIMERO desde las energías de SP PRE-EXISTENTES
+    (FINAL SINGLE POINT ENERGY de 04_sp/<conf_id>/sp.out, ver
+    extract_sp_boltzmann_weights y _filter_dirs_by_sp_weights) — al nivel
+    DFT real del propio SP, no al nivel xTB/DFT de prescreening de CENSO,
+    que puede subestimar la brecha energética entre confórmeros y dejar
+    pasar de más (fail-open) cuando ninguno supera el umbral a ese nivel.
 
     Solo si NINGÚN confórmero tiene energía de SP parseable (caso límite,
     no debería pasar con sp_dirs ya exitosos) se cae de vuelta al filtro
     Boltzmann de CENSO (1_SCREENING.out, ver _filter_dirs_by_boltzmann) como
     respaldo; y si tampoco hay dato ahí, se corre sobre sp_dirs sin filtrar.
 
-    El peso Boltzmann de SP (para todos los confórmeros de entrada, antes
-    del filtro) se guarda en 04c_sp_smd/sp_boltzmann_weights.json junto con
-    la lista de seleccionados, para documentar el peso relativo real usado
-    para ponderar observables después.
-
-    Devuelve directorios 04c_sp_smd/<conf_id>/ exitosos.
-
-    batch_size=0  → usa SP_BATCH_SIZE global (comparte recursos con SP normal).
-    nprocs_per_job / maxcore_per_job sobreescriben los globals NPROCS / MAXCORE
-    para cada worker paralelo; si son None se usan los globals vigentes.
-    temperature   : T (K) para el cálculo Boltzmann de SP (default 298.15;
-                    pasar --temperature para runs Antárticos a 274.15 K).
+    Devuelve la lista de directorios 04_sp/<conf_id>/ seleccionados.
     """
     sp_boltzmann_weights = extract_sp_boltzmann_weights(
         sp_dirs, log, temperature=temperature, stage_tag="SP_SMD"
@@ -4282,20 +4270,135 @@ def stage_sp_smd(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
         except OSError as e:
             log.warning(f"[SP_SMD-BOLTZMANN] no se pudo guardar {weights_path.name}: {e}")
 
-    sp_dirs = selected_dirs
+    return selected_dirs
 
-    _batch   = batch_size if batch_size > 0 else SP_BATCH_SIZE
+
+def _run_spsmd_execution(
+    tasks_all:       list[dict],
+    log:             logging.Logger,
+    batch_size:      int = 0,
+    nprocs_per_job:  Optional[int] = None,
+    maxcore_per_job: Optional[int] = None,
+) -> list[Path]:
+    """
+    Ejecuta una lista de espera (queue) de tareas SP_SMD ya SELECCIONADAS
+    (ver _collect_spsmd_selection), potencialmente de varios mol_dir /
+    estados de protonación distintos a la vez, en lotes de ≤batch_size
+    jobs en paralelo (batch_size=0 → SP_BATCH_SIZE global, típicamente
+    3 jobs × 4 cores = 12 cores).
+
+    Armar la queue completa ANTES de llamar a esta función (ver
+    stage_spsmd_batch) es lo que evita que un estado con un único
+    confórmero seleccionado dispare un lote de 1 job en solitario
+    (desperdiciando 8 de 12 cores): se junta con lo seleccionado de los
+    demás estados y se lanza todo en el mismo lote de 3.
+
+    Cada dict de tasks_all debe tener: conf_id, sp_dir, template, nprocs,
+    maxcore, mol_dir, log. Se le agrega cpu_list por lote.
+
+    Devuelve la lista de directorios 04c_sp_smd/<conf_id>/ exitosos.
+    """
+    if not tasks_all:
+        log.info("[SP_SMD] cola vacía — nada que ejecutar")
+        return []
+
+    _batch = batch_size if batch_size > 0 else SP_BATCH_SIZE
+
+    n_lotes = -(-len(tasks_all) // _batch)   # ceiling division
+    _nprocs_first = tasks_all[0]["nprocs"]
+    log.info(f"[SP_SMD] {len(tasks_all)} SPs SMD en cola, {n_lotes} lote(s) de "
+             f"≤{_batch} (CPUs activos/lote: {_batch * _nprocs_first})")
+
+    successful: list[Path] = []
+    _check_cpu_budget(_batch, _nprocs_first, log)
+
+    idx      = 0
+    lote_num = 0
+    while idx < len(tasks_all):
+        want      = min(_batch, len(tasks_all) - idx)
+        nprocs_want = tasks_all[idx]["nprocs"]
+        cpu_lists = _acquire_cpu_lists(want, nprocs_want, log, "SP_SMD")
+        if not cpu_lists:
+            log.error("[SP_SMD] no hay suficientes cores físicos independientes "
+                       "para asignar ni un solo job — abortando etapa SP_SMD")
+            break
+        batch    = tasks_all[idx: idx + len(cpu_lists)]
+        lote_num += 1
+        labels   = [f"{t['mol_dir'].name}/{t['conf_id']}" for t in batch]
+
+        for t, cl in zip(batch, cpu_lists):
+            t["cpu_list"] = cl
+
+        log.info(f"[SP_SMD] ── Lote {lote_num}/~{n_lotes}: {labels}  "
+                 f"(cores: {[','.join(map(str, cl)) for cl in cpu_lists]})")
+
+        with ThreadPoolExecutor(max_workers=len(batch)) as pool:
+            futures = {
+                pool.submit(_sp_smd_worker, t): f"{t['mol_dir'].name}/{t['conf_id']}"
+                for t in batch
+            }
+            try:
+                for fut in as_completed(futures):
+                    res   = fut.result()
+                    label = futures[fut]
+                    tag   = "✓" if res["success"] else "✗"
+                    log.info(f"[SP_SMD]   {tag} {label}  ({res['elapsed']:.1f} min)")
+                    if res["success"] and res["sp_smd_dir"] is not None:
+                        successful.append(res["sp_smd_dir"])
+                    else:
+                        log.warning(f"[SP_SMD] {label} falló — excluido")
+            except KeyboardInterrupt:
+                log.warning("[SP_SMD] Ctrl-C — cancelando lote, esperando workers…")
+                pool.shutdown(wait=False, cancel_futures=True)
+                _kill_active_procs()
+                _cpu_lock_release()
+                sys.exit(130)
+
+        _cpu_lock_release()
+        idx += len(cpu_lists)
+
+    log.info(f"[SP_SMD] {len(successful)}/{len(tasks_all)} completados")
+    return successful
+
+
+def stage_sp_smd(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
+                  batch_size: int = 0,
+                  nprocs_per_job: Optional[int] = None,
+                  maxcore_per_job: Optional[int] = None,
+                  boltzmann_min_pct: float = 20.0,
+                  temperature: float = 298.15) -> list[Path]:
+    """
+    Etapa 04c_sp_smd (OPCIONAL — requiere --spsmd): single point con
+    SMD(water) (idéntico al SP con CPCM(water) pero usando SMD en vez de
+    CPCM), sobre los mismos confórmeros y con la misma geometría/charge/mult
+    que un 04_sp/<conf_id>/ ya exitoso, para UN SOLO mol_dir/estado.
+
+    Selecciona primero qué confórmeros corren (ver
+    _collect_spsmd_selection: filtro Boltzmann de SP PRE-EXISTENTE,
+    respaldo en CENSO) y luego los ejecuta en lotes (ver
+    _run_spsmd_execution). Para el modo batch multi-estado que arma UNA
+    sola cola con la selección de TODOS los estados antes de ejecutar
+    (evitando lotes de 1 job), ver stage_spsmd_batch.
+
+    Devuelve directorios 04c_sp_smd/<conf_id>/ exitosos.
+
+    batch_size=0  → usa SP_BATCH_SIZE global (comparte recursos con SP normal).
+    nprocs_per_job / maxcore_per_job sobreescriben los globals NPROCS / MAXCORE
+    para cada worker paralelo; si son None se usan los globals vigentes.
+    temperature   : T (K) para el cálculo Boltzmann de SP (default 298.15;
+                    pasar --temperature para runs Antárticos a 274.15 K).
+    """
+    selected_dirs = _collect_spsmd_selection(
+        sp_dirs, mol_dir, log,
+        boltzmann_min_pct=boltzmann_min_pct, temperature=temperature,
+    )
+
     _nprocs  = nprocs_per_job  if nprocs_per_job  is not None else NPROCS
     _maxcore = maxcore_per_job if maxcore_per_job is not None else MAXCORE
+    template = get_template("sp_smd")
 
-    log.info(f"[SP_SMD] single point SMD(water) para {len(sp_dirs)} confórmeros "
-             f"(batch={_batch}, {_nprocs} cores/job)")
-    template   = get_template("sp_smd")
-    successful = []
-
-    n_lotes = -(-len(sp_dirs) // _batch)   # ceiling division
-    log.info(f"[SP_SMD] {len(sp_dirs)} SPs SMD en {n_lotes} lote(s) de ≤{_batch} "
-             f"(CPUs activos/lote: {_batch * _nprocs})")
+    log.info(f"[SP_SMD] single point SMD(water) para {len(selected_dirs)} "
+             f"confórmero(s) de {mol_dir.name}")
 
     tasks_all = [
         {
@@ -4307,69 +4410,41 @@ def stage_sp_smd(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
             "mol_dir":  mol_dir,
             "log":      log,
         }
-        for d in sp_dirs
+        for d in selected_dirs
     ]
 
-    _check_cpu_budget(_batch, _nprocs, log)
-
-    idx      = 0
-    lote_num = 0
-    while idx < len(tasks_all):
-        want      = min(_batch, len(tasks_all) - idx)
-        cpu_lists = _acquire_cpu_lists(want, _nprocs, log, "SP_SMD")
-        if not cpu_lists:
-            log.error("[SP_SMD] no hay suficientes cores físicos independientes "
-                       "para asignar ni un solo job — abortando etapa SP_SMD")
-            break
-        batch    = tasks_all[idx: idx + len(cpu_lists)]
-        lote_num += 1
-        ids      = [t["conf_id"] for t in batch]
-
-        for t, cl in zip(batch, cpu_lists):
-            t["cpu_list"] = cl
-
-        log.info(f"[SP_SMD] ── Lote {lote_num}/~{n_lotes}: {ids}  "
-                 f"(cores: {[','.join(map(str, cl)) for cl in cpu_lists]})")
-
-        with ThreadPoolExecutor(max_workers=len(batch)) as pool:
-            futures = {pool.submit(_sp_smd_worker, t): t["conf_id"] for t in batch}
-            try:
-                for fut in as_completed(futures):
-                    res = fut.result()
-                    tag = "✓" if res["success"] else "✗"
-                    log.info(f"[SP_SMD]   {tag} {res['conf_id']}  ({res['elapsed']:.1f} min)")
-                    if res["success"] and res["sp_smd_dir"] is not None:
-                        successful.append(res["sp_smd_dir"])
-                    else:
-                        log.warning(f"[SP_SMD] {res['conf_id']} falló — excluido")
-            except KeyboardInterrupt:
-                log.warning("[SP_SMD] Ctrl-C — cancelando lote, esperando workers…")
-                pool.shutdown(wait=False, cancel_futures=True)
-                _kill_active_procs()
-                _cpu_lock_release()
-                sys.exit(130)
-
-        _cpu_lock_release()
-        idx += len(cpu_lists)
-
-    log.info(f"[SP_SMD] {len(successful)}/{len(sp_dirs)} completados")
-    return successful
+    return _run_spsmd_execution(tasks_all, log, batch_size=batch_size,
+                                 nprocs_per_job=_nprocs, maxcore_per_job=_maxcore)
 
 
 def stage_spsmd_batch(group_dir: Path, log: logging.Logger,
                        boltzmann_min_pct: float = 20.0,
-                       temperature: float = 298.15) -> None:
+                       temperature: float = 298.15,
+                       batch_size: int = 0,
+                       nprocs_per_job: Optional[int] = None,
+                       maxcore_per_job: Optional[int] = None) -> None:
     """
-    Modo batch de --spsmd: recorre TODAS las corridas dentro de una carpeta
-    de grupo (<grupo>/runs/*/04_sp/conf_*) y calcula el SP_SMD que falte
-    para cada confórmero con SP CPCM ya exitoso, sin tocar CREST/OPT/
-    NUMFREQ/TDDFT de ninguna. Como stage_sp_smd usa check_success() para
+    Modo batch de --spsmd: recorre TODAS las corridas (estados de
+    protonación) dentro de una carpeta de grupo (<grupo>/runs/*/04_sp/conf_*).
+
+    Funciona en DOS FASES para no desperdiciar capacidad de cómputo:
+
+    1) SELECCIÓN: para cada mol_dir/estado, decide qué confórmeros pasan a
+       SP_SMD (ver _collect_spsmd_selection — filtro Boltzmann de SP
+       PRE-EXISTENTE, respaldo en CENSO) y los junta TODOS en una única
+       lista de espera (queue), sin importar de qué estado vienen.
+    2) EJECUCIÓN: recién con la queue completa arma lotes de ≤batch_size
+       jobs en paralelo (default SP_BATCH_SIZE, típicamente 3 jobs × 4
+       cores = 12 cores) y los lanza (ver _run_spsmd_execution).
+
+    Así, un estado con un único confórmero seleccionado (p.ej. porque solo
+    uno supera el umbral Boltzmann) NO dispara un lote de 1 job en
+    solitario: se sigue con el siguiente estado, se suma su selección a la
+    cola, y todos se lanzan juntos en el mismo lote de 3.
+
+    Como stage_sp_smd/_run_spsmd_execution usan check_success() para
     saltar los ya hechos, correr el mismo comando dos veces es seguro
     (solo procesa los faltantes).
-
-    Cada mol_dir es un run/estado independiente, así que el filtro
-    Boltzmann (> boltzmann_min_pct, ver stage_sp_smd) se aplica por
-    separado dentro de cada uno.
 
     Se invoca cuando --spsmd se pasa con --mol apuntando a una carpeta de
     grupo (ej. MGLYVAL) en vez de a un .xyz específico.
@@ -4379,7 +4454,13 @@ def stage_spsmd_batch(group_dir: Path, log: logging.Logger,
         sys.exit(f"ERROR: no se encontró {runs_dir} — "
                   f"¿'{group_dir.name}' es una carpeta de grupo válida?")
 
-    total_ok, total_pend = 0, 0
+    _nprocs  = nprocs_per_job  if nprocs_per_job  is not None else NPROCS
+    _maxcore = maxcore_per_job if maxcore_per_job is not None else MAXCORE
+    template = get_template("sp_smd")
+
+    # ── Fase 1: selección por estado — arma la cola completa ─────────────
+    tasks_all: list[dict] = []
+    n_estados = 0
     for mol_dir in sorted(runs_dir.iterdir()):
         if not mol_dir.is_dir():
             continue
@@ -4391,12 +4472,34 @@ def stage_spsmd_batch(group_dir: Path, log: logging.Logger,
         if not sp_dirs:
             continue
 
+        n_estados += 1
         log.info(f"[SP_SMD] {mol_dir.name}: {len(sp_dirs)} confórmeros con SP CPCM completo")
-        done = stage_sp_smd(sp_dirs, mol_dir, log,
-                             boltzmann_min_pct=boltzmann_min_pct,
-                             temperature=temperature)
-        total_ok += len(done)
-        total_pend += len(sp_dirs) - len(done)
+        selected_dirs = _collect_spsmd_selection(
+            sp_dirs, mol_dir, log,
+            boltzmann_min_pct=boltzmann_min_pct, temperature=temperature,
+        )
+        tasks_all.extend({
+            "conf_id":  d.name,
+            "sp_dir":   d,
+            "template": template,
+            "nprocs":   _nprocs,
+            "maxcore":  _maxcore,
+            "mol_dir":  mol_dir,
+            "log":      log,
+        } for d in selected_dirs)
+
+    log.info(f"[SP_SMD] selección completa: {len(tasks_all)} confórmero(s) "
+             f"en cola de {n_estados} estado(s) — lanzando en batch")
+
+    # ── Fase 2: ejecuta la cola completa en lotes ─────────────────────────
+    successful = _run_spsmd_execution(
+        tasks_all, log, batch_size=batch_size,
+        nprocs_per_job=_nprocs, maxcore_per_job=_maxcore,
+    )
+
+    total_ok   = len(successful)
+    total_pend = len(tasks_all) - total_ok
+    log.info(f"[SP_SMD] batch finalizado: {total_ok} completados, {total_pend} pendientes/fallidos")
 
     log.info(f"[SP_SMD] batch finalizado: {total_ok} completados, {total_pend} pendientes/fallidos")
 
