@@ -10777,6 +10777,27 @@ def _ols_fit(x: list[float], y: list[float]) -> dict:
             "r2": float(r2), "rmse": rmse, "residuals": resid.tolist()}
 
 
+# Opciones globales de la corrección empírica (las fija el parser de `pka`).
+#   allow_n1    : permite correcciones calibradas con 1 solo punto (por defecto no)
+#   force_class : aplica el tipo aunque la clase de carga (q_ácido→q_base) del
+#                 tramo a corregir no coincida con la del calibrador
+EMPIRICAL_OPTS: dict = {"allow_n1": False, "force_class": False}
+_WARNED_ONCE: set = set()
+
+
+def _dq_of_type(group_type: str) -> Optional[tuple[int, int]]:
+    """'+1→0' / '0→−1' / '−1→−2' (EMPIRICAL_TYPE_META) → (q_ácido, q_base)."""
+    meta = EMPIRICAL_TYPE_META.get(group_type)
+    if not meta:
+        return None
+    txt = meta["dq"].replace("−", "-").replace("+", "")
+    try:
+        a, b = txt.split("→")
+        return int(a), int(b)
+    except ValueError:
+        return None
+
+
 def fit_empirical_correction(group_type: str, gcorr_source: str = "goodvibes",
                              mode: str = "auto") -> dict:
     """
@@ -10812,6 +10833,14 @@ def fit_empirical_correction(group_type: str, gcorr_source: str = "goodvibes",
                           f"gcorr_source='{gcorr_source}' (pendientes: "
                           f"{', '.join(pend)}). Corre `maaqc.py calibrate` y "
                           f"pasa --calibration-file."}
+
+    if n < 2 and not EMPIRICAL_OPTS.get("allow_n1"):
+        return {"ok": False,
+                "reason": f"'{group_type}' tiene solo n={n} punto de calibración "
+                          f"({pts[0][2]}): el desplazamiento no es transferible "
+                          f"(ajuste exacto, sin validación). Añade un calibrador "
+                          f"de la misma clase de carga o usa --allow-n1 bajo tu "
+                          f"responsabilidad."}
 
     x = [p[0] for p in pts]
     y = [p[1] for p in pts]
@@ -10875,7 +10904,8 @@ def fit_empirical_correction(group_type: str, gcorr_source: str = "goodvibes",
 
 def apply_empirical_correction(pka_value: Optional[float], group_type: str,
                                gcorr_source: str = "goodvibes",
-                               mode: str = "auto") -> dict:
+                               mode: str = "auto",
+                               pka_result: Optional[dict] = None) -> dict:
     """
     Aplica fit_empirical_correction() a un valor de pKa crudo (Born/CPCM).
     Retorna dict con pKa_raw, pKa_corrected, delta, y los metadatos del
@@ -10885,6 +10915,23 @@ def apply_empirical_correction(pka_value: Optional[float], group_type: str,
     if pka_value is None:
         return {"ok": False, "reason": "pKa crudo no disponible (None)",
                 "group_type": group_type}
+    # Validación de clase de carga: el error de CPCM depende de la carga del
+    # producto (≈+0.2 para +1→0, ≈+2 para 0→−1, ≈+8 para −1→−2 en Glu), así que
+    # un offset calibrado en una clase NO es transferible a otra.
+    dq_cal = _dq_of_type(group_type)
+    qa = (pka_result or {}).get("q_acid")
+    qb = (pka_result or {}).get("q_base")
+    if dq_cal and qa is not None and qb is not None and (qa, qb) != dq_cal:
+        msg = (f"clase de carga distinta: el tramo a corregir es {qa:+d}→{qb:+d} "
+               f"pero '{group_type}' se calibró para "
+               f"{EMPIRICAL_TYPE_META[group_type]['dq']}. El sesgo de CPCM crece "
+               f"con la carga del anión producto; el offset no es transferible.")
+        if not EMPIRICAL_OPTS.get("force_class"):
+            return {"ok": False, "group_type": group_type,
+                    "reason": msg + " Usa un calibrador de la misma clase "
+                                    "(p. ej. amino_dianion para −1→−2) o "
+                                    "--force-charge-class para forzarlo."}
+        print(f"AVISO: {msg} (forzado con --force-charge-class)", file=sys.stderr)
     fit = fit_empirical_correction(group_type, gcorr_source=gcorr_source, mode=mode)
     if not fit["ok"]:
         return {"ok": False, "reason": fit.get("reason", "ajuste no disponible"),
@@ -12202,6 +12249,7 @@ def compute_pka(
     warns: list[str] = []
     result: dict = {
         "mol_acid": mol_acid, "mol_base": mol_base,
+        "q_acid": data_acid.get("charge"), "q_base": data_base.get("charge"),
         "T": T, "pKa": None, "ok": False, "warnings": warns,
         "method": None,
         # contribuciones (ciclo de Born)
@@ -12223,6 +12271,14 @@ def compute_pka(
 
     def _warn(msg: str):
         warns.append(msg)
+        # Los avisos informativos del macroestado se repiten en cada llamada
+        # (calibración, Monte Carlo, escaneo de T): emitir solo la primera vez.
+        if msg.startswith(("method='born' with a combined",
+                           "method='auto' resolved to 'born'",
+                           "method='direct' explicitly requested for the combined")):
+            if msg[:40] in _WARNED_ONCE:
+                return
+            _WARNED_ONCE.add(msg[:40])
         warnings.warn(f"[pKa {mol_acid}→{mol_base}] {msg}")
 
     if method not in ("auto", "born", "direct"):
@@ -14623,7 +14679,18 @@ help="Aplica la corrección empírica calibrada (ver "
                              "si hay exactamente 2 (recomendado — con 2 "
                              "puntos la pendiente de una regresión no está "
                              "verificada).")
+    parser.add_argument("--allow-n1", action="store_true",
+                        help="Permite --empirical-correction con tipos calibrados "
+                             "con UN solo punto (ajuste exacto, sin validación). "
+                             "Por defecto se exige n≥2.")
+    parser.add_argument("--force-charge-class", action="store_true",
+                        help="Aplica el tipo de --empirical-correction aunque la "
+                             "clase de carga (q_ácido→q_base) del tramo no "
+                             "coincida con la del calibrador (no recomendado: "
+                             "el sesgo de CPCM crece con la carga del anión).")
     args = parser.parse_args()
+    EMPIRICAL_OPTS["allow_n1"] = bool(args.allow_n1)
+    EMPIRICAL_OPTS["force_class"] = bool(args.force_charge_class)
 
     if args.calibration_file:
         _meta = load_calibration_file(Path(args.calibration_file).expanduser())
@@ -14632,6 +14699,12 @@ help="Aplica la corrección empírica calibrada (ver "
             print(f"AVISO: la calibración se hizo con method='{_cm}' y estás "
                   f"corriendo --method {args.method}: usan referencias de "
                   f"G(H⁺,aq) distintas; la corrección no es transferible.",
+                  file=sys.stderr)
+        _csm = _meta.get("solvent_model", "CPCM")
+        _rsm = "SMD" if getattr(args, "spsmd", False) else "CPCM"
+        if _csm != _rsm:
+            print(f"AVISO: la calibración usa {_csm} y estás corriendo con "
+                  f"{_rsm}: el sesgo de solvatación no es transferible.",
                   file=sys.stderr)
         if _ct is not None and abs(float(_ct) - float(args.temp)) > 1e-6:
             print(f"AVISO: la calibración es a T={_ct} K y corres a "
@@ -14758,7 +14831,8 @@ def _run_pair(args, gcorr_source: str = "harmonic"):
         raw = res["pKa"] if (res and res["ok"]) else None
         corr = apply_empirical_correction(raw, ec_spec["pair"],
                                           gcorr_source=gcorr_source,
-                                          mode=getattr(args, "empirical_correction_mode", "auto"))
+                                          mode=getattr(args, "empirical_correction_mode", "auto"),
+                                          pka_result=res)
         _print_empirical_correction(corr, label)
     return {"pka": res}
 
@@ -14831,10 +14905,12 @@ def _run_classic(args, gcorr_source: str = "harmonic"):
     if ec_spec:
         if "pKa1" in ec_spec:
             corr1 = apply_empirical_correction(pKa1_raw, ec_spec["pKa1"],
-                                               gcorr_source=gcorr_source, mode=ec_mode)
+                                               gcorr_source=gcorr_source, mode=ec_mode,
+                                               pka_result=pka1_result)
         if "pKa2" in ec_spec:
             corr2 = apply_empirical_correction(pKa2_raw, ec_spec["pKa2"],
-                                               gcorr_source=gcorr_source, mode=ec_mode)
+                                               gcorr_source=gcorr_source, mode=ec_mode,
+                                               pka_result=pka2_result)
         _print_empirical_correction(corr1, "pKa₁")
         _print_empirical_correction(corr2, "pKa₂")
         if any(c and c.get("ok") for c in (corr1, corr2)):
@@ -15156,13 +15232,16 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
     if ec_spec:
         if "pKa0" in ec_spec:
             corr0 = apply_empirical_correction(pKa0_raw, ec_spec["pKa0"],
-                                               gcorr_source=gcorr_source, mode=ec_mode)
+                                               gcorr_source=gcorr_source, mode=ec_mode,
+                                               pka_result=pka0_result)
         if "pKa1" in ec_spec:
             corr1 = apply_empirical_correction(pKa1_raw, ec_spec["pKa1"],
-                                               gcorr_source=gcorr_source, mode=ec_mode)
+                                               gcorr_source=gcorr_source, mode=ec_mode,
+                                               pka_result=pka1_result)
         if "pKa2" in ec_spec:
             corr2 = apply_empirical_correction(pKa2_raw, ec_spec["pKa2"],
-                                               gcorr_source=gcorr_source, mode=ec_mode)
+                                               gcorr_source=gcorr_source, mode=ec_mode,
+                                               pka_result=pka2_result)
         _print_empirical_correction(corr0, "pKa₀ (A→R/D)")
         _print_empirical_correction(corr1, "pKa₁ (R/D→B)")
         _print_empirical_correction(corr2, "pKa₂ (B→C)")
@@ -16313,7 +16392,8 @@ def _calib_failed(msg: str) -> dict:
 
 
 def _calib_compute_mol(mol: str, spec: dict, base: Path, T: float,
-                       method: str, gcorr_source: str) -> dict[str, dict]:
+                       method: str, gcorr_source: str,
+                       use_smd: bool = False) -> dict[str, dict]:
     """
     pKa crudos de todas las transiciones de UNA molécula. Usa exactamente
     las mismas piezas que `pka` (collect_mol_data, _build_neutral_macrostate,
@@ -16326,7 +16406,7 @@ def _calib_compute_mol(mol: str, spec: dict, base: Path, T: float,
 
     def load(name: str) -> dict:
         return collect_mol_data(name, verbose=False, gcorr_source=gcorr_source,
-                                use_smd=False)
+                                use_smd=use_smd)
 
     if "pair" in spec:
         a, b = spec["pair"]
@@ -16375,6 +16455,18 @@ def _calib_compute_mol(mol: str, spec: dict, base: Path, T: float,
 
 
 def _calib_print_fits(types: list[str]) -> None:
+    _prev_n1 = EMPIRICAL_OPTS.get("allow_n1")
+    EMPIRICAL_OPTS["allow_n1"] = True   # la tabla muestra también n=1 (marcado)
+    try:
+        _calib_print_fits_inner(types)
+    finally:
+        EMPIRICAL_OPTS["allow_n1"] = _prev_n1
+    print("\n  Nota: tipos con n=1 NO se aplican en `pka` salvo --allow-n1; y "
+          "cada tipo solo se aplica a tramos de su misma clase de carga "
+          "(q_ácido→q_base), salvo --force-charge-class.")
+
+
+def _calib_print_fits_inner(types: list[str]) -> None:
     sep = "─" * 100
     print(f"\n{'═' * 100}\n  AJUSTE POR TIPO  (modo auto; offset salvo rango≥1.0 y n≥3)\n{'═' * 100}")
     for gsrc in ("harmonic", "goodvibes"):
@@ -16431,7 +16523,14 @@ Ejemplos:
     ap.add_argument("--temp", type=float, default=T_STD, choices=TEMPS_K,
                     help=f"T de la calibración (default {T_STD}); los pKa exp. son a 25 °C")
     ap.add_argument("--gcorr", choices=["harmonic", "goodvibes", "both"],
-                    default="harmonic", help="fuente de G_corr (default harmonic)")
+                    default="goodvibes",
+                    help="fuente de G_corr (default goodvibes: corrección de "
+                         "quasi-RRHO para modos blandos; harmonic queda como "
+                         "chequeo de sensibilidad, difiere ≤0.1 en pKa)")
+    ap.add_argument("--spsmd", action="store_true",
+                    help="usa los SP SMD (04c_sp_smd) en lugar de CPCM para E_sp_aq. "
+                         "Recomendado junto con --method direct: las constantes "
+                         "de Born están calibradas para CPCM. Se guarda en el JSON.")
     ap.add_argument("--override", nargs="*", default=[], metavar="MOL.rol=CARPETA",
                     help="renombra una carpeta de estado, p. ej. GLYCINE.neutral=glycine")
     ap.add_argument("--out", default="calibration.json", metavar="JSON")
@@ -16457,6 +16556,10 @@ Ejemplos:
         print("\n  Se calcularán solo las transiciones cuyos estados estén completos.")
 
     gsources = ["harmonic", "goodvibes"] if args.gcorr == "both" else [args.gcorr]
+    if args.spsmd and args.method in ("auto", "born"):
+        print("\n  ⚠  --spsmd con method='%s': las constantes de Born "
+              "(G_HPLUS_AQ_BORN) están calibradas para CPCM. Para SMD usa "
+              "--method direct y mantén el mismo método en `pka`." % args.method)
     # resultados[(mol, slot)][gsrc] = resultado compute_pka
     results: dict[tuple[str, str], dict[str, dict]] = {}
     for mol, spec in sets.items():
@@ -16465,7 +16568,8 @@ Ejemplos:
         for gsrc in gsources:
             print(f"\n▸ {mol}  (gcorr_source={gsrc}, method={args.method}, T={args.temp:.2f} K)")
             try:
-                res = _calib_compute_mol(mol, spec, base, args.temp, args.method, gsrc)
+                res = _calib_compute_mol(mol, spec, base, args.temp, args.method, gsrc,
+                                         use_smd=args.spsmd)
             except SystemExit as exc:
                 res = {t["slot"]: _calib_failed(f"abortado (SystemExit {exc.code})")
                        for t in spec["transitions"]}
@@ -16533,6 +16637,7 @@ Ejemplos:
                  "T": args.temp, "method_requested": args.method,
                  "method_resolved": method_resolved, "gcorr": gsources,
                  "base": str(base), "script": "maaqc.py calibrate",
+                 "solvent_model": "SMD" if args.spsmd else "CPCM",
                  "note": "pKa exp. a 25 °C; ver exp_ref por punto"},
         "points": out_rows,
         "EMPIRICAL_CALIBRATION": cal,
