@@ -314,8 +314,9 @@ def infer_charge_from_name(mol_name: str) -> Optional[int]:
     Reglas:
       - Se mira solo la ÚLTIMA letra alfabética del stem (p.ej. "SB" → 'B',
         "mol_A" → 'A', "P334R" → 'R', "MR" → 'R'). No importa el prefijo.
+      - Los dígitos finales se ignoran ("AB2" → 'B', "GB2" → 'B').
       - Si el nombre no termina en una letra reconocida en
-        STATE_CHARGE_MAP (p.ej. termina en dígito, o es algo como
+        STATE_CHARGE_MAP (p.ej. es algo como
         "MGLYVAL" sin sufijo de estado), devuelve None: no se puede
         inferir con confianza y el caller debe pedir --charge explícito.
       - No es case-sensitive: "b" y "B" son equivalentes.
@@ -324,7 +325,13 @@ def infer_charge_from_name(mol_name: str) -> Optional[int]:
     """
     if not mol_name:
         return None
-    last_char = mol_name[-1].upper()
+    # Tautómeros / variantes numeradas (AB2, GB2, ...): se ignoran los dígitos
+    # finales y se mira la última letra. Antes 'AB2' devolvía None y caía al
+    # default 0 (¡carga equivocada para un anión!).
+    stem = mol_name.rstrip("0123456789")
+    if not stem:
+        return None
+    last_char = stem[-1].upper()
     if not last_char.isalpha():
         return None
     return STATE_CHARGE_MAP.get(last_char)
@@ -10615,48 +10622,46 @@ PH_STANDARD    = 7.0
 
 
 # ═════════════════════════════════════════════════════════════════════════
-#  CORRECCIÓN EMPÍRICA  (calibración externa Gly/Val/Asp)
+#  CORRECCIÓN EMPÍRICA  (calibración externa: Gly / Val / Asp / Glu / AP)
 # ═════════════════════════════════════════════════════════════════════════
 #
-# El ciclo de Born/CPCM a ωB97X-D3/def2-TZVPD tiene un error sistemático
-# conocido (Ho & Coote 2010) que NO es uniforme entre tipos de grupo
-# funcional: la desprotonación de un carboxilo (COOH → COO⁻) está bien
-# descrita por un continuo dieléctrico puro, pero la de un amonio
-# (NH₃⁺ → NH₂) está sistemáticamente sobreestimada, porque el continuo no
-# captura la primera capa de solvatación explícita (H-bonds agua↔NH₃⁺) que
-# domina la energía libre de esa especie cargada y localizada.
+# El ciclo de Born/CPCM tiene un error sistemático que NO es uniforme entre
+# tipos de grupo (Ho & Coote 2010). Por eso la corrección se calibra POR TIPO
+# DE TRANSICIÓN, no por posición en la cadena. El "slot" (pKa0/pKa1/pKa2) es
+# solo la posición de la transición dentro de la cadena A→[R/D]→B→C de la
+# molécula que se corre; el mismo tipo químico cae en slots distintos según
+# la molécula (el NH₃⁺ de Gly/Val es el slot pKa1; el de Glu es el pKa2).
 #
-# Esta calibración corre exactamente el mismo protocolo (mismo nivel de
-# teoría, mismo método 'born' con macroestado neutro/zwitterión, T=298.15 K)
-# sobre glicina y valina — los DOS aminoácidos que efectivamente componen
-# M-Gly:Val — más ácido aspártico como tercer punto independiente para el
-# tipo 'carboxyl' (mismo grupo α-COOH, pKa experimental bien tabulado).
-# Los pKa's calculados vienen directo de las corridas de calibración
-# (protonation_cycle.py --goodvibes, método 'born'); los experimentales son
-# valores estándar de bioquímica (Carey & Giuliano, Organic Chemistry, 8th
-# ed., 2011; pKa1(Asp) = 1.88 de la compilación de Master Organic Chemistry,
-# consistente con CRC Handbook).
+#   tipo           transición                       carga    slot natural  calibradores
+#   carboxyl       1er COOH → COO⁻  (A → R/D)       +1 → 0   pKa0          Gly, Val, Asp(α), Glu(α)
+#   carboxyl_2     2º  COOH → COO⁻  (R/D → B)        0 → −1  pKa1          Asp(β), Glu(γ)
+#   amino          NH₃⁺ → NH₂, sin carga vecina      0 → −1  pKa1          Gly, Val
+#   amino_dianion  NH₃⁺ → NH₂ con 2×COO⁻ (B → C)    −1 → −2  pKa2          Glu
+#   pyridinium     N–H⁺ aromático → N (par APA→APR)  +1 → 0  pKa2 / pair   AP (4-aminopiridina)
 #
-# 'carboxyl' = primera desprotonación de la cadena (catión protonado →
-#              macroestado neutro/zwitterión). pKa₀ en la convención A→R/D
-#              de este script.
-# 'amino'    = segunda desprotonación (macroestado neutro/zwitterión →
-#              anión). pKa₁ en la convención R/D→B. Solo Gly y Val: la
-#              corrida de calibración de Asp no pudo cerrar este paso
-#              (fallo de validación de carga/N° átomos para el anión AB,
-#              ver advertencias de esa corrida) así que no aporta un tercer
-#              punto para este tipo.
+# Correcciones respecto de la versión anterior (verificadas contra la química
+# de los .xyz y contra la tabla de McMurry/Carey, no contra este archivo):
+#   · Asp NO calibra 'amino': su paso R/D→B (AD→AB) es el β-COOH, es decir
+#     'carboxyl_2'. (El comentario previo lo trataba como NH₃⁺.)
+#   · 'carboxyl' (+1→0) y 'carboxyl_2' (0→−1) son clases de carga distintas y
+#     no se mezclan: el 2º carboxilo se desprotona con un COO⁻ ya presente.
+#   · pKa exp. de Glu (α-NH₃⁺) = 9.67 (antes 9.60).
+#   · RMSE con n=1 es indefinido (antes se reportaba 0.000).
+#   · modo 'auto': pendiente libre solo si n≥3 Y el rango de pKa calculado
+#     cubre ≥1.0 unidad; si no, desplazamiento puro (ver fit_empirical_correction).
 #
-# IMPORTANTE — alcance de la corrección:
-#   Esta calibración vale para el MISMO tipo de grupo funcional (α-COOH
-#   libre / α-NH₃⁺ libre de un aminoácido) al MISMO nivel de teoría. Antes
-#   de aplicarla a un pKa de M-Gly:Val u otra MAA hay que verificar que la
-#   transición de estados en cuestión efectivamente corresponde a ese tipo
-#   de grupo (p. ej. si en M-Gly:Val el primer pKa corresponde a la amina
-#   secundaria del anillo de ciclohexenona en vez de a un α-NH₃⁺ libre, la
-#   corrección 'amino' calibrada aquí puede no transferir directamente —
-#   repórtalo como una limitación, no lo apliques a ciegas). Ver
-#   --empirical-correction en el CLI para activarla explícitamente por pKa.
+# Los pKa calculados vienen de las corridas de calibración. Para poblar/
+# actualizar esta tabla sin editar el script:
+#     maaqc.py calibrate --base <dir> --out calibration.json
+#     maaqc.py pka ... --calibration-file calibration.json --empirical-correction ...
+# Entradas con calc_*=None están "pendientes de calcular": el ajuste las ignora.
+#
+# IMPORTANTE — alcance: la corrección vale para el MISMO tipo de grupo al
+# MISMO nivel de teoría, método (born/direct) y T. Verifica que la transición
+# del MAA realmente sea de ese tipo antes de aplicarla; si no, repórtalo como
+# limitación. Para pyridinium (AP, +1→0, sin carga vecina) transferido a un
+# B→C (−1→−2) vale lo dicho abajo para 'amino_dianion': el apantallamiento por
+# agua explícita de dos COO⁻ no lo captura un N–H⁺ aislado.
 #
 # 'amino_dianion' — CASO APARTE, NO es una variante de 'amino':
 #   El tipo 'amino' de arriba (Gly/Val, n=2) calibra la desprotonación de un
@@ -10673,8 +10678,7 @@ PH_STANDARD    = 7.0
 #   por 2×COO⁻ → NH₂ + 2×COO⁻, igual que el paso B→C de M-Gly:Val). El
 #   pKa₂ calculado con el método 'born' (17.89 armónico / 17.89 goodvibes,
 #   ambas pasadas dan prácticamente el mismo valor) queda ~8 unidades por
-#   encima del pKa₂ experimental de Glu (~9.60, promedio de rangos de
-#   literatura 9.47-9.70), un error MUY superior al ±1-2 típico del método y
+#   encima del pKa₂ experimental de Glu (9.67, McMurry/Carey), un error MUY superior al ±1-2 típico del método y
 #   a la corrección 'amino' de Gly/Val (que solo cubre ~2.4-2.5 unidades).
 #   Esto descarta que el problema sea específico de M-Gly:Val: es un sesgo
 #   sistemático del ciclo Born/CPCM para transiciones NH₃⁺→NH₂ con doble
@@ -10695,28 +10699,55 @@ PH_STANDARD    = 7.0
 #   ninguna carga vecina) fuera de su dominio de calibración — pero el
 #   resultado corregido debe presentarse con esta salvedad explícita en el
 #   paper, no como un número con la misma confianza que 'carboxyl' (n=3).
+_REF_AA = "McMurry Table 26-1 / Carey & Giuliano (consistente con CRC)"
+_REF_AP = "4-aminopiridina, 9.17 a 25 °C (dato del proyecto)"
+
 EMPIRICAL_CALIBRATION: dict[str, list[dict]] = {
     "carboxyl": [
         {"mol": "Glycine",  "calc_harmonic": 2.50, "calc_goodvibes": 2.45,
-         "exp": 2.34, "exp_ref": "Carey & Giuliano 2011"},
+         "exp": 2.34, "exp_ref": _REF_AA},
         {"mol": "Valine",   "calc_harmonic": 2.38, "calc_goodvibes": 2.37,
-         "exp": 2.32, "exp_ref": "Carey & Giuliano 2011"},
+         "exp": 2.32, "exp_ref": _REF_AA},
         {"mol": "Aspartic", "calc_harmonic": 2.09, "calc_goodvibes": 2.01,
-         "exp": 1.88, "exp_ref": "Master Organic Chemistry / CRC Handbook"},
+         "exp": 1.88, "exp_ref": _REF_AA + " (α-COOH)"},
+        {"mol": "Glutamic", "calc_harmonic": None, "calc_goodvibes": None,
+         "exp": 2.19, "exp_ref": _REF_AA + " (α-COOH)"},
+    ],
+    "carboxyl_2": [
+        {"mol": "Aspartic", "calc_harmonic": None, "calc_goodvibes": None,
+         "exp": 3.65, "exp_ref": _REF_AA + " (β-COOH)"},
+        {"mol": "Glutamic", "calc_harmonic": None, "calc_goodvibes": None,
+         "exp": 4.25, "exp_ref": _REF_AA + " (γ-COOH)"},
     ],
     "amino": [
         {"mol": "Glycine",  "calc_harmonic": 11.95, "calc_goodvibes": 11.91,
-         "exp": 9.60, "exp_ref": "Carey & Giuliano 2011"},
+         "exp": 9.60, "exp_ref": _REF_AA},
         {"mol": "Valine",   "calc_harmonic": 12.18, "calc_goodvibes": 12.19,
-         "exp": 9.62, "exp_ref": "Carey & Giuliano 2011"},
+         "exp": 9.62, "exp_ref": _REF_AA},
     ],
     "amino_dianion": [
         {"mol": "Glutamic", "calc_harmonic": 17.89, "calc_goodvibes": 17.89,
-         "exp": 9.60, "exp_ref": "Carey & Giuliano 2011 (promedio pKa2 Glu, "
-                                  "rango de literatura 9.47-9.70)"},
+         "exp": 9.67, "exp_ref": _REF_AA + " (α-NH₃⁺ de Glu)"},
+    ],
+    "pyridinium": [
+        {"mol": "AP", "calc_harmonic": None, "calc_goodvibes": None,
+         "exp": 9.17, "exp_ref": _REF_AP},
     ],
 }
 
+# Metadatos por tipo: slot(s) donde tiene sentido aplicarlo y clase de carga.
+# Solo se usan para validar/avisar en --empirical-correction; no cambian números.
+EMPIRICAL_TYPE_META: dict[str, dict] = {
+    "carboxyl":      {"slots": ("pKa0",),          "dq": "+1→0",  "grupo": "1er COOH (A→R/D)"},
+    "carboxyl_2":    {"slots": ("pKa1",),          "dq": "0→−1",  "grupo": "2º COOH (R/D→B)"},
+    "amino":         {"slots": ("pKa1",),          "dq": "0→−1",  "grupo": "NH₃⁺ sin carga vecina"},
+    "amino_dianion": {"slots": ("pKa2",),          "dq": "−1→−2", "grupo": "NH₃⁺ con 2×COO⁻"},
+    "pyridinium":    {"slots": ("pKa2", "pair"),   "dq": "+1→0",  "grupo": "N–H⁺ aromático → N"},
+}
+EMPIRICAL_VALID_SLOTS = ("pKa0", "pKa1", "pKa2", "pair")
+
+# Metadatos de la última calibración cargada con --calibration-file (si hay).
+CALIBRATION_META: dict = {}
 
 def _ols_fit(x: list[float], y: list[float]) -> dict:
     """
@@ -10750,19 +10781,19 @@ def fit_empirical_correction(group_type: str, gcorr_source: str = "goodvibes",
                              mode: str = "auto") -> dict:
     """
     Ajusta la corrección empírica pKa_exp ≈ m·pKa_calc + b para un tipo de
-    grupo funcional ('carboxyl' o 'amino'), a partir de EMPIRICAL_CALIBRATION.
+    transición (claves de EMPIRICAL_CALIBRATION), a partir de los puntos con
+    pKa calculado disponible para ese gcorr_source (los None se ignoran).
 
     mode:
-      'auto'   (default) — regresión lineal completa (m, b) si hay ≥3 puntos
-               de calibración disponibles para ese (group_type, gcorr_source);
-               si hay exactamente 2, cae a corrección de desplazamiento puro
-               (m=1, b=sesgo medio), porque una recta por 2 puntos ajusta de
-               forma EXACTA (0 grados de libertad) y no permite verificar la
-               pendiente. Con 1 punto, siempre usa desplazamiento puro.
-      'linear' — fuerza la regresión lineal completa aunque haya solo 2
-               puntos (se documenta la advertencia en el resultado).
-      'offset' — fuerza desplazamiento puro (m=1, b=mean(exp − calc))
-               independientemente de cuántos puntos haya (≥1).
+      'auto'   (default) — regresión lineal libre SOLO si hay ≥3 puntos Y el
+               rango de pKa calculado cubre ≥1.0 unidad (si no, la pendiente
+               no es estimable y extrapolaría mal a otros pKa). En cualquier
+               otro caso, desplazamiento puro (m=1, b=sesgo medio).
+      'linear' — fuerza regresión lineal (≥2 puntos; con 2 el ajuste es exacto).
+      'offset' — fuerza desplazamiento puro con ≥1 punto.
+
+    Con n=1 el RMSE es indefinido (NaN): el ajuste es exacto por construcción.
+    Con n≥2 en modo offset se reporta además loo_rmse (leave-one-out).
     """
     calib = EMPIRICAL_CALIBRATION.get(group_type)
     if not calib:
@@ -10775,48 +10806,70 @@ def fit_empirical_correction(group_type: str, gcorr_source: str = "goodvibes",
            if pt.get(calc_key) is not None and pt.get("exp") is not None]
     n = len(pts)
     if n < 1:
+        pend = [pt["mol"] for pt in calib]
         return {"ok": False,
-                "reason": f"sin puntos de calibración disponibles para "
-                          f"'{group_type}' / gcorr_source='{gcorr_source}'"}
+                "reason": f"'{group_type}' sin pKa calculado para "
+                          f"gcorr_source='{gcorr_source}' (pendientes: "
+                          f"{', '.join(pend)}). Corre `maaqc.py calibrate` y "
+                          f"pasa --calibration-file."}
 
     x = [p[0] for p in pts]
     y = [p[1] for p in pts]
     mols = [p[2] for p in pts]
     warn: list[str] = []
+    x_range = max(x) - min(x)
 
-    use_mode = ("linear" if n >= 3 else "offset") if mode == "auto" else mode
+    if mode == "auto":
+        use_mode = "linear" if (n >= 3 and x_range >= 1.0) else "offset"
+        if n >= 3 and use_mode == "offset":
+            warn.append(f"n={n} pero el rango de pKa calculado es solo "
+                        f"{x_range:.2f} unidades (<1.0): la pendiente no es "
+                        f"estimable; se usa desplazamiento puro.")
+    else:
+        use_mode = mode
 
     if use_mode == "linear" and n < 2:
         warn.append("Se pidió regresión lineal pero solo hay 1 punto de "
                     "calibración disponible; se usa desplazamiento puro.")
         use_mode = "offset"
 
+    loo_rmse = float("nan")
     if use_mode == "linear":
         fit = _ols_fit(x, y)
         slope, intercept, r2, rmse = fit["slope"], fit["intercept"], fit["r2"], fit["rmse"]
         if n == 2:
-            warn.append("Regresión lineal con solo 2 puntos de calibración: "
-                        "el ajuste es EXACTO (0 grados de libertad), R² no "
-                        "es informativo y la pendiente no está verificada "
-                        "estadísticamente. Considera --empirical-correction-"
-                        "mode offset para este tipo.")
+            warn.append("Regresión lineal con solo 2 puntos: el ajuste es EXACTO "
+                        "(0 grados de libertad), R² no informativo y pendiente "
+                        "no verificada. Considera mode='offset'.")
     else:  # 'offset'
         bias = [yi - xi for xi, yi in zip(x, y)]
         intercept = float(np.mean(bias))
         slope = 1.0
-        resid = [yi - (xi + intercept) for xi, yi in zip(x, y)]
-        rmse = float(np.sqrt(np.mean(np.square(resid)))) if n > 0 else float("nan")
         r2 = float("nan")
+        if n >= 2:
+            resid = [yi - (xi + intercept) for xi, yi in zip(x, y)]
+            rmse = float(np.sqrt(np.mean(np.square(resid))))
+            loo = []
+            for k in range(n):
+                b_k = float(np.mean([bias[j] for j in range(n) if j != k]))
+                loo.append(y[k] - (x[k] + b_k))
+            loo_rmse = float(np.sqrt(np.mean(np.square(loo))))
+        else:
+            rmse = float("nan")
 
     if n < 3:
-        warn.append(f"Calibración con solo n={n} punto(s) para "
-                    f"'{group_type}'. La incertidumbre de esta corrección "
-                    f"es grande y se suma (no reemplaza) a la incertidumbre "
-                    f"típica ±1-2 unidades de pKa del método Born/CPCM.")
+        warn.append(f"Calibración con solo n={n} punto(s) para '{group_type}'. "
+                    f"La incertidumbre de esta corrección es grande y se suma "
+                    f"(no reemplaza) a la incertidumbre típica ±1-2 unidades "
+                    f"de pKa del método Born/CPCM.")
+    if n == 1:
+        warn.append("n=1: el ajuste es exacto por construcción; el RMSE de "
+                    "calibración es indefinido y no hay validación cruzada.")
 
     return {"ok": True, "group_type": group_type, "gcorr_source": gcorr_source,
             "mode": use_mode, "n": n, "molecules": mols,
             "slope": slope, "intercept": intercept, "r2": r2, "rmse": rmse,
+            "loo_rmse": loo_rmse,
             "calib_x": x, "calib_y": y, "warnings": warn}
 
 
@@ -10830,24 +10883,32 @@ def apply_empirical_correction(pka_value: Optional[float], group_type: str,
     calibración disponible para ese tipo/gcorr_source).
     """
     if pka_value is None:
-        return {"ok": False, "reason": "pKa crudo no disponible (None)"}
+        return {"ok": False, "reason": "pKa crudo no disponible (None)",
+                "group_type": group_type}
     fit = fit_empirical_correction(group_type, gcorr_source=gcorr_source, mode=mode)
     if not fit["ok"]:
-        return {"ok": False, "reason": fit.get("reason", "ajuste no disponible")}
+        return {"ok": False, "reason": fit.get("reason", "ajuste no disponible"),
+                "group_type": group_type}
     corrected = fit["slope"] * pka_value + fit["intercept"]
     out = {"ok": True, "pKa_raw": pka_value, "pKa_corrected": corrected,
            "delta": corrected - pka_value}
     out.update({k: fit[k] for k in
                 ("group_type", "gcorr_source", "mode", "n", "molecules",
-                 "slope", "intercept", "r2", "rmse", "warnings")})
+                 "slope", "intercept", "r2", "rmse", "loo_rmse", "warnings")})
     return out
 
 
 def _print_empirical_correction(corr: Optional[dict], label: str):
     """Imprime el bloque de corrección empírica para un pKa, si aplica."""
-    if not corr or not corr.get("ok"):
+    if not corr:
         return
     sep = "  " + "─" * 70
+    if not corr.get("ok"):
+        print(f"\n{sep}")
+        print(f"  CORRECCIÓN EMPÍRICA  —  {label}  (tipo: {corr.get('group_type', '?')})")
+        print(f"    ⚠  NO aplicada: {corr.get('reason', 'sin detalle')}")
+        print(sep)
+        return
     print(f"\n{sep}")
     print(f"  CORRECCIÓN EMPÍRICA  —  {label}  (tipo: {corr['group_type']})")
     print(sep)
@@ -10860,7 +10921,12 @@ def _print_empirical_correction(corr: Optional[dict], label: str):
     print(f"  Ajuste: {mode_txt}")
     r2_txt = f"   R² = {corr['r2']:.4f}" if not np.isnan(corr["r2"]) else ""
     print(f"    m = {corr['slope']:.4f}   b = {corr['intercept']:+.4f}{r2_txt}")
-    print(f"    RMSE (residuos de calibración) = {corr['rmse']:.3f} unidades de pKa")
+    if np.isnan(corr["rmse"]):
+        print("    RMSE (residuos de calibración) = n/a  (n=1: ajuste exacto)")
+    else:
+        print(f"    RMSE (residuos de calibración) = {corr['rmse']:.3f} unidades de pKa")
+    if not np.isnan(corr.get("loo_rmse", float("nan"))):
+        print(f"    RMSE leave-one-out             = {corr['loo_rmse']:.3f} unidades de pKa")
     for w in corr["warnings"]:
         print(f"    ⚠  {w}")
     print(f"\n    pKa (Born/CPCM, crudo)         = {corr['pKa_raw']:.2f}")
@@ -10872,8 +10938,11 @@ def _print_empirical_correction(corr: Optional[dict], label: str):
 def _parse_empirical_correction_spec(spec: Optional[str]) -> dict[str, str]:
     """
     Parsea el argumento --empirical-correction, formato
-    'pKa0=carboxyl,pKa1=amino'. Retorna {} si spec es None/vacío. Aborta
-    con SystemExit si el formato o el tipo de grupo no son válidos.
+    'pKa0=carboxyl,pKa1=carboxyl_2,pKa2=pyridinium' (o 'pair=pyridinium' con
+    --pair). Retorna {} si spec es None/vacío. Aborta con SystemExit si el
+    formato, el slot o el tipo de grupo no son válidos. Si el tipo se aplica
+    a un slot distinto de su(s) slot(s) natural(es) (EMPIRICAL_TYPE_META) solo
+    se avisa por stderr: puede ser intencional (p. ej. pyridinium en pKa2).
     """
     if not spec:
         return {}
@@ -10888,12 +10957,43 @@ def _parse_empirical_correction_spec(spec: Optional[str]) -> dict[str, str]:
                 f"(se espera 'pKaN=tipo', p. ej. 'pKa0=carboxyl')")
         key, val = part.split("=", 1)
         key, val = key.strip(), val.strip().lower()
+        if key not in EMPIRICAL_VALID_SLOTS:
+            raise SystemExit(
+                f"--empirical-correction: slot desconocido '{key}' en "
+                f"'{part}'. Slots válidos: {list(EMPIRICAL_VALID_SLOTS)}")
         if val not in EMPIRICAL_CALIBRATION:
             raise SystemExit(
                 f"--empirical-correction: tipo desconocido '{val}' en "
                 f"'{part}'. Tipos válidos: {list(EMPIRICAL_CALIBRATION)}")
+        meta = EMPIRICAL_TYPE_META.get(val)
+        if meta and key not in meta["slots"]:
+            print(f"AVISO: --empirical-correction: el tipo '{val}' "
+                  f"({meta['grupo']}, {meta['dq']}) se calibró para el/los slot(s) "
+                  f"{list(meta['slots'])}, pero lo estás aplicando a '{key}'. "
+                  f"Verifica que la química de esa transición sea la misma.",
+                  file=sys.stderr)
         out[key] = val
     return out
+
+
+def load_calibration_file(path: Path) -> dict:
+    """
+    Carga un calibration.json (generado por `maaqc.py calibrate`) y REEMPLAZA
+    por tipo las entradas de EMPIRICAL_CALIBRATION con las del archivo. Los
+    tipos que el archivo no trae se dejan como están. Devuelve el bloque 'meta'.
+    """
+    import json
+    with open(path, encoding="utf-8") as fh:
+        blob = json.load(fh)
+    cal = blob.get("EMPIRICAL_CALIBRATION")
+    if not isinstance(cal, dict) or not cal:
+        raise SystemExit(f"--calibration-file: '{path}' no contiene la clave "
+                         f"'EMPIRICAL_CALIBRATION'.")
+    for t, pts in cal.items():
+        EMPIRICAL_CALIBRATION[t] = pts
+    CALIBRATION_META.clear()
+    CALIBRATION_META.update(blob.get("meta", {}))
+    return CALIBRATION_META
 
 
 # ─────────────────────────────────────────────
@@ -14489,28 +14589,31 @@ Ejemplos:
     parser.add_argument("--mc-seed", type=int, default=None, metavar="N",
                         help="Semilla para reproducibilidad del Monte Carlo "
                              "(default: sin fijar)")
+    parser.add_argument("--pair", nargs=2, metavar=("ACIDO", "BASE"), default=None,
+                        help="Modo par: calcula UN pKa entre dos carpetas de "
+                             "runs/ (ácido → base + H⁺), sin cadena ni "
+                             "macroestado. Pensado para AP: --pair APA APR. "
+                             "Incompatible con --neutral/--anion/--dianion/"
+                             "--protonated/--zwitterion. La corrección se pide "
+                             "con --empirical-correction pair=pyridinium.")
+    parser.add_argument("--calibration-file", metavar="JSON", default=None,
+                        help="calibration.json generado por `maaqc.py calibrate`: "
+                             "reemplaza, por tipo, la tabla EMPIRICAL_CALIBRATION "
+                             "embebida. Avisa si --method o --temp difieren de los "
+                             "usados al calibrar.")
     parser.add_argument("--empirical-correction", metavar="pKaN=TIPO[,pKaN=TIPO...]",
                         default=None,
-                        help="Aplica la corrección empírica calibrada con "
-                             "Gly/Val/Asp/Glu (ver EMPIRICAL_CALIBRATION) a "
-                             "los pKa's indicados. Formato: "
-                             "'pKa0=carboxyl,pKa1=carboxyl,pKa2=amino_dianion' "
-                             "(tipos válidos: 'carboxyl' [n=3, Gly/Val/Asp], "
-                             "'amino' [n=2, Gly/Val — SOLO para NH₃⁺ sin "
-                             "otra carga formal vecina], 'amino_dianion' "
-                             "[n=1, Glu — para NH₃⁺ flanqueado por 2×COO⁻ "
-                             "ya formados, p. ej. el paso B→C de M-Gly:Val; "
-                             "'amino' subestima la corrección necesaria en "
-                             "~5-6 unidades en ese entorno, ver comentario "
-                             "junto a EMPIRICAL_CALIBRATION]; las claves son "
-                             "'pKa0', 'pKa1', 'pKa2' según la cadena que "
-                             "estés corriendo). El pKa corregido reemplaza "
-                             "al crudo en la distribución de especies, el pI "
-                             "y los gráficos de aquí en adelante; el valor "
-                             "crudo del ciclo Born/CPCM se sigue imprimiendo "
-                             "y exportando para trazabilidad. Sin este flag, "
-                             "el comportamiento es idéntico al original (sin "
-                             "corrección).")
+help="Aplica la corrección empírica calibrada (ver "
+                             "EMPIRICAL_CALIBRATION) a los slots indicados. "
+                             "Formato: 'pKa0=carboxyl,pKa1=carboxyl_2,"
+                             "pKa2=pyridinium' (con --pair: 'pair=pyridinium'). "
+                             "Tipos: 'carboxyl' [1er COOH, +1→0], 'carboxyl_2' "
+                             "[2º COOH, 0→−1], 'amino' [NH₃⁺ sin carga vecina, "
+                             "0→−1], 'amino_dianion' [NH₃⁺ con 2×COO⁻, −1→−2], "
+                             "'pyridinium' [N–H⁺ aromático, +1→0, AP]. El pKa "
+                             "corregido reemplaza al crudo en la distribución, el "
+                             "pI y los gráficos; el crudo se sigue imprimiendo y "
+                             "exportando. Sin este flag no hay corrección.")
     parser.add_argument("--empirical-correction-mode",
                         choices=["auto", "linear", "offset"], default="auto",
                         help="Modo de ajuste de --empirical-correction (ver "
@@ -14521,6 +14624,19 @@ Ejemplos:
                              "puntos la pendiente de una regresión no está "
                              "verificada).")
     args = parser.parse_args()
+
+    if args.calibration_file:
+        _meta = load_calibration_file(Path(args.calibration_file).expanduser())
+        _cm, _ct = _meta.get("method_resolved"), _meta.get("T")
+        if _cm and args.method not in ("auto", _cm):
+            print(f"AVISO: la calibración se hizo con method='{_cm}' y estás "
+                  f"corriendo --method {args.method}: usan referencias de "
+                  f"G(H⁺,aq) distintas; la corrección no es transferible.",
+                  file=sys.stderr)
+        if _ct is not None and abs(float(_ct) - float(args.temp)) > 1e-6:
+            print(f"AVISO: la calibración es a T={_ct} K y corres a "
+                  f"T={args.temp} K; la corrección empírica se ajustó solo a "
+                  f"la T de calibración.", file=sys.stderr)
 
     args.empirical_correction_spec = _parse_empirical_correction_spec(
         args.empirical_correction)
@@ -14547,9 +14663,18 @@ Ejemplos:
             f"o usa --work-root /ruta/a/runs para indicar la correcta."
         )
 
+    # Modo par: excluyente con la cadena
+    if args.pair:
+        _chain_flags = [n for n, v in (("--neutral", args.neutral), ("--anion", args.anion),
+                                       ("--dianion", args.dianion),
+                                       ("--protonated", args.protonated),
+                                       ("--zwitterion", args.zwitterion)) if v is not None]
+        if _chain_flags:
+            parser.error("--pair es incompatible con " + ", ".join(_chain_flags))
+
     # Verificar que se pasó al menos un par de estados
-    if args.neutral is None and args.anion is None:
-        parser.error("Debes proporcionar al menos --neutral y --anion.")
+    if not args.pair and args.neutral is None and args.anion is None:
+        parser.error("Debes proporcionar al menos --neutral y --anion (o usar --pair).")
 
     # El catión protonado A⁺ (--protonated) es OPCIONAL dentro de la cadena
     # extendida: si no se pasa, simplemente se omite pKa₀ y la distribución
@@ -14568,7 +14693,7 @@ Ejemplos:
                 "simplemente no se calcula pKa₀ y la cadena arranca en el "
                 "macroestado neutro/zwitterión."
             )
-    elif args.protonated is not None:
+    elif args.protonated is not None and not args.pair:
         parser.error(
             "--protonated (catión A⁺) solo tiene sentido junto con "
             "--zwitterion (cadena extendida); para la cadena clásica de 3 "
@@ -14586,7 +14711,12 @@ Ejemplos:
         print(f"  runs/ : {PC_WORK_ROOT}")
         print(f"  log   : {log_path}")
 
-        if args.goodvibes:
+        if args.pair:
+            _run_pair(args, "harmonic")
+            if args.goodvibes:
+                print("\n" + "═" * 74 + "\n  SEGUNDA PASADA: gcorr_source=goodvibes\n" + "═" * 74)
+                _run_pair(args, "goodvibes")
+        elif args.goodvibes:
             _run_comparison(args, use_extended)
         elif use_extended:
             _run_extended(args)
@@ -14599,6 +14729,38 @@ Ejemplos:
         sys.stdout, sys.stderr = orig_stdout, orig_stderr
         print(f"\n  (log completo de esta corrida guardado en: {log_path})\n")
         log_file.close()
+
+
+def _run_pair(args, gcorr_source: str = "harmonic"):
+    """
+    Modo par: UN solo pKa HA → A⁻ + H⁺ entre dos carpetas (p. ej. AP:
+    --pair APA APR). No construye cadena ni macroestado. La corrección
+    empírica se pide con --empirical-correction pair=<tipo>.
+    """
+    acid, base = args.pair
+    print(f"\n▸ Cargando ácido: {acid}")
+    data_a = collect_mol_data(acid, verbose=args.verbose,
+                              gcorr_source=gcorr_source, use_smd=args.spsmd)
+    print_mol_summary(data_a, verbose=args.verbose)
+    print(f"\n▸ Cargando base: {base}")
+    data_b = collect_mol_data(base, verbose=args.verbose,
+                              gcorr_source=gcorr_source, use_smd=args.spsmd)
+    print_mol_summary(data_b, verbose=args.verbose)
+
+    print(f"\n▸ Calculando pKa  ({acid} → {base} + H⁺)  @ T={args.temp:.2f} K")
+    res = compute_pka(data_a, data_b, T=args.temp, verbose=args.verbose,
+                      method=args.method, gcorr_source=gcorr_source)
+    label = f"pKa ({acid}→{base})"
+    print_pka_summary([(res, label)])
+
+    ec_spec = getattr(args, "empirical_correction_spec", {}) or {}
+    if "pair" in ec_spec:
+        raw = res["pKa"] if (res and res["ok"]) else None
+        corr = apply_empirical_correction(raw, ec_spec["pair"],
+                                          gcorr_source=gcorr_source,
+                                          mode=getattr(args, "empirical_correction_mode", "auto"))
+        _print_empirical_correction(corr, label)
+    return {"pka": res}
 
 
 def _run_classic(args, gcorr_source: str = "harmonic"):
@@ -14787,6 +14949,85 @@ def _run_classic(args, gcorr_source: str = "harmonic"):
     }
 
 
+def _build_neutral_macrostate(data_R: dict, data_D: dict, neutral: str,
+                              zwitterion: str, T: float, verbose: bool,
+                              gcorr_source: str = "harmonic") -> tuple[dict, dict]:
+    """
+    Construye el macroestado neutro/zwitterión (R ⇌ D, tautómeros) usado como
+    estado intermedio de la cadena A → [R/D] → B → C. Retorna
+    (taut_result, data_neutral_macro). Extraído tal cual de _run_extended()
+    para que `calibrate` use exactamente la misma construcción. Si ni siquiera
+    R tiene G_total, termina con sys.exit(1) como antes.
+    """
+    # ── Equilibrio de tautómeros R ⇌ D (sin H⁺) ────────────────────────────
+    print(f"\n▸ Calculando equilibrio de tautómeros  ({neutral} ⇌ {zwitterion})  @ T={T:.2f} K")
+    taut_result = compute_tautomer_equilibrium(data_R, data_D, T=T, verbose=verbose,
+                                               gcorr_source=gcorr_source)
+
+    if not taut_result["ok"]:
+        # No se pudo cerrar el equilibrio R⇌D (típicamente porque D no tiene
+        # confórmero representativo). Esto NO debe abortar todo el script:
+        # se cae a usar R solo como estado "neutro" (f_R=100%, f_D=0%) y se
+        # sigue con la cadena de pKa para los estados que sí tienen datos.
+        print(f"\n  ⚠  No se pudo calcular el equilibrio de tautómeros "
+              f"({neutral}⇌{zwitterion}). Se continúa usando solo "
+              f"'{neutral}' como estado neutro "
+              f"(f_{neutral}=100%, f_{zwitterion}=0%).")
+        for w in taut_result["warnings"]:
+            print(f"    ⚠  {w}")
+
+        gR_fallback = _state_G_total_direct(data_R, T=T, gcorr_source=gcorr_source)
+        if not gR_fallback.get("ok"):
+            print(f"\n  ⚠  Tampoco se pudo obtener G_total para "
+                  f"'{neutral}'. Abortando.")
+            sys.exit(1)
+
+        taut_result = {
+            "mol_R": neutral, "mol_D": zwitterion, "T": T,
+            "ok": True,
+            "warnings": taut_result["warnings"] + [
+                f"Macroestado neutro construido solo con '{neutral}' "
+                f"(sin datos válidos para '{zwitterion}')."
+            ],
+            "conf_R": gR_fallback["conf"], "conf_D": None,
+            "G_R_Eh": gR_fallback["G_total_Eh"], "G_D_Eh": None,
+            "dG_taut_kcal": None, "K_taut": None,
+            "f_R": 1.0, "f_D": 0.0,
+            "G_macro_Eh": gR_fallback["G_total_Eh"],
+            "theory_R": gR_fallback["theory_sp"], "theory_D": None,
+        }
+        print(f"    → G_total({neutral}, confórmero {gR_fallback['conf']}) "
+              f"= {gR_fallback['G_total_Eh']:.8f} Eh  usado como G_macro")
+    elif not verbose:
+        _print_tautomer_cycle(taut_result)
+
+    if taut_result["conf_D"] is not None:
+        conf_label = (f"{neutral}:{taut_result['conf_R']} + "
+                      f"{zwitterion}:{taut_result['conf_D']} (Boltzmann)")
+        mol_label  = f"{neutral}/{zwitterion}"
+    else:
+        conf_label = f"{neutral}:{taut_result['conf_R']} (sin {zwitterion})"
+        mol_label  = neutral
+
+    data_neutral_macro = {
+        "mol_name":          mol_label,
+        "is_macrostate":     True,
+        "G_total_direct_Eh": taut_result["G_macro_Eh"],
+        "conf_label":        conf_label,
+        "theory_label":      taut_result["theory_R"] or taut_result["theory_D"],
+        # R y D son tautómeros (mismo q, mismo N° átomos, ya validado en
+        # compute_tautomer_equilibrium), así que cualquiera de los dos sirve
+        # como representante del macroestado para la validación cruzada de
+        # compute_pka() frente al catión (A) y al anión (B).
+        "charge":            data_R.get("charge"),
+        "n_atoms":           data_R.get("n_atoms"),
+        "use_smd":           data_R.get("use_smd", False),
+        "aq_source":         data_R.get("aq_source", "CPCM"),
+    }
+
+    return taut_result, data_neutral_macro
+
+
 def _run_extended(args, gcorr_source: str = "harmonic"):
     """
     Cadena de 5 estados:
@@ -14828,71 +15069,9 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
                                   gcorr_source=gcorr_source, use_smd=args.spsmd)
         print_mol_summary(data_C, verbose=args.verbose)
 
-    # ── Equilibrio de tautómeros R ⇌ D (sin H⁺) ────────────────────────────
-    print(f"\n▸ Calculando equilibrio de tautómeros  ({args.neutral} ⇌ {args.zwitterion})  @ T={args.temp:.2f} K")
-    taut_result = compute_tautomer_equilibrium(data_R, data_D, T=args.temp, verbose=args.verbose,
-                                               gcorr_source=gcorr_source)
-
-    if not taut_result["ok"]:
-        # No se pudo cerrar el equilibrio R⇌D (típicamente porque D no tiene
-        # confórmero representativo). Esto NO debe abortar todo el script:
-        # se cae a usar R solo como estado "neutro" (f_R=100%, f_D=0%) y se
-        # sigue con la cadena de pKa para los estados que sí tienen datos.
-        print(f"\n  ⚠  No se pudo calcular el equilibrio de tautómeros "
-              f"({args.neutral}⇌{args.zwitterion}). Se continúa usando solo "
-              f"'{args.neutral}' como estado neutro "
-              f"(f_{args.neutral}=100%, f_{args.zwitterion}=0%).")
-        for w in taut_result["warnings"]:
-            print(f"    ⚠  {w}")
-
-        gR_fallback = _state_G_total_direct(data_R, T=args.temp, gcorr_source=gcorr_source)
-        if not gR_fallback.get("ok"):
-            print(f"\n  ⚠  Tampoco se pudo obtener G_total para "
-                  f"'{args.neutral}'. Abortando.")
-            sys.exit(1)
-
-        taut_result = {
-            "mol_R": args.neutral, "mol_D": args.zwitterion, "T": args.temp,
-            "ok": True,
-            "warnings": taut_result["warnings"] + [
-                f"Macroestado neutro construido solo con '{args.neutral}' "
-                f"(sin datos válidos para '{args.zwitterion}')."
-            ],
-            "conf_R": gR_fallback["conf"], "conf_D": None,
-            "G_R_Eh": gR_fallback["G_total_Eh"], "G_D_Eh": None,
-            "dG_taut_kcal": None, "K_taut": None,
-            "f_R": 1.0, "f_D": 0.0,
-            "G_macro_Eh": gR_fallback["G_total_Eh"],
-            "theory_R": gR_fallback["theory_sp"], "theory_D": None,
-        }
-        print(f"    → G_total({args.neutral}, confórmero {gR_fallback['conf']}) "
-              f"= {gR_fallback['G_total_Eh']:.8f} Eh  usado como G_macro")
-    elif not args.verbose:
-        _print_tautomer_cycle(taut_result)
-
-    if taut_result["conf_D"] is not None:
-        conf_label = (f"{args.neutral}:{taut_result['conf_R']} + "
-                      f"{args.zwitterion}:{taut_result['conf_D']} (Boltzmann)")
-        mol_label  = f"{args.neutral}/{args.zwitterion}"
-    else:
-        conf_label = f"{args.neutral}:{taut_result['conf_R']} (sin {args.zwitterion})"
-        mol_label  = args.neutral
-
-    data_neutral_macro = {
-        "mol_name":          mol_label,
-        "is_macrostate":     True,
-        "G_total_direct_Eh": taut_result["G_macro_Eh"],
-        "conf_label":        conf_label,
-        "theory_label":      taut_result["theory_R"] or taut_result["theory_D"],
-        # R y D son tautómeros (mismo q, mismo N° átomos, ya validado en
-        # compute_tautomer_equilibrium), así que cualquiera de los dos sirve
-        # como representante del macroestado para la validación cruzada de
-        # compute_pka() frente al catión (A) y al anión (B).
-        "charge":            data_R.get("charge"),
-        "n_atoms":           data_R.get("n_atoms"),
-        "use_smd":           data_R.get("use_smd", False),
-        "aq_source":         data_R.get("aq_source", "CPCM"),
-    }
+    taut_result, data_neutral_macro = _build_neutral_macrostate(
+        data_R, data_D, args.neutral, args.zwitterion, args.temp,
+        verbose=args.verbose, gcorr_source=gcorr_source)
 
     # ── Cadena de pKa: A→[R/D], [R/D]→B, B→C ───────────────────────────────
     pka0_result = pka1_result = pka2_result = None
@@ -15984,6 +16163,398 @@ def _main_cubes(argv: Optional[list[str]] = None) -> int:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  §  CALIBRACIÓN SISTEMÁTICA DE pKa   (subcomando `calibrate`)
+#     Plan de transiciones + cálculo de pKa crudos + ajuste por tipo
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Estados (inferidos de la conectividad de los .xyz, no de los encabezados):
+#   A  NH₃⁺, todos COOH (+1)      D  NH₃⁺, α-COO⁻, resto COOH (0, zwitterión)
+#   R  NH₂, todos COOH (0)        B  Asp/Glu: NH₃⁺ + todos COO⁻ (−1)
+#                                    Gly/Val: NH₂ + COO⁻ (−1)
+#   C  Glu: NH₂ + 2×COO⁻ (−2)     B2 (AB2, GB2): NH₂, α-COO⁻, resto COOH (−1)
+#                                    — tautómero de B, NO entra en la cadena.
+# Cadena por molécula:  A →[R/D]→ B (→ C)
+#   pKa0 = A→R/D     pKa1 = R/D→B     pKa2 = B→C
+# AP (4-aminopiridina, verificada por conectividad) es un par aislado APA→APR.
+#
+# 'chain' = {rol: carpeta dentro de <base>/<MOL>/runs/}. Si una carpeta se
+# llama distinto (p. ej. glycine en vez de GR) usa --override GLYCINE.neutral=glycine.
+_CALIB_REF_AA = "McMurry Table 26-1 / Carey & Giuliano"
+CALIBRATION_SETS: dict[str, dict] = {
+    "ASPARTIC": {
+        "label": "Aspartic",
+        "chain": {"protonated": "AA", "neutral": "AR", "zwitterion": "AD", "anion": "AB"},
+        "transitions": [
+            {"slot": "pKa0", "type": "carboxyl",   "step": "A→R/D", "group": "α-COOH", "exp": 1.88},
+            {"slot": "pKa1", "type": "carboxyl_2", "step": "R/D→B", "group": "β-COOH", "exp": 3.65},
+        ],
+    },
+    "GLUTAMIC": {
+        "label": "Glutamic",
+        "chain": {"protonated": "GA", "neutral": "GR", "zwitterion": "GD",
+                  "anion": "GB", "dianion": "GC"},
+        "transitions": [
+            {"slot": "pKa0", "type": "carboxyl",      "step": "A→R/D", "group": "α-COOH",  "exp": 2.19},
+            {"slot": "pKa1", "type": "carboxyl_2",    "step": "R/D→B", "group": "γ-COOH",  "exp": 4.25},
+            {"slot": "pKa2", "type": "amino_dianion", "step": "B→C",   "group": "NH₃⁺ (2×COO⁻)", "exp": 9.67},
+        ],
+    },
+    "GLYCINE": {
+        "label": "Glycine",
+        "chain": {"protonated": "GA", "neutral": "GR", "zwitterion": "GD", "anion": "GB"},
+        "transitions": [
+            {"slot": "pKa0", "type": "carboxyl", "step": "A→R/D", "group": "COOH", "exp": 2.34},
+            {"slot": "pKa1", "type": "amino",    "step": "R/D→B", "group": "NH₃⁺",  "exp": 9.60},
+        ],
+    },
+    "VALINE": {
+        "label": "Valine",
+        "chain": {"protonated": "VA", "neutral": "VR", "zwitterion": "VD", "anion": "VB"},
+        "transitions": [
+            {"slot": "pKa0", "type": "carboxyl", "step": "A→R/D", "group": "COOH", "exp": 2.32},
+            {"slot": "pKa1", "type": "amino",    "step": "R/D→B", "group": "NH₃⁺",  "exp": 9.62},
+        ],
+    },
+    "AP": {
+        "label": "AP",
+        "pair": ("APA", "APR"),
+        "transitions": [
+            {"slot": "pair", "type": "pyridinium", "step": "APA→APR",
+             "group": "N–H⁺ (4-aminopiridinio)", "exp": 9.17},
+        ],
+    },
+}
+_CALIB_ROLE_ORDER = ("protonated", "neutral", "zwitterion", "anion", "dianion")
+
+
+def _calib_files(spec: dict, slot: str) -> tuple[str, str]:
+    """Archivos/carpetas (ácido, base) que participan en una transición."""
+    if "pair" in spec:
+        return spec["pair"][0], spec["pair"][1]
+    ch = spec["chain"]
+    macro = f"{ch['neutral']}/{ch['zwitterion']}"
+    if slot == "pKa0":
+        return ch["protonated"], macro
+    if slot == "pKa1":
+        return macro, ch["anion"]
+    if slot == "pKa2":
+        return ch["anion"], ch["dianion"]
+    raise KeyError(slot)
+
+
+def _calib_apply_overrides(sets: dict, overrides: list[str]) -> dict:
+    import copy
+    sets = copy.deepcopy(sets)
+    for item in overrides or []:
+        try:
+            lhs, folder = item.split("=", 1)
+            mol, role = lhs.split(".", 1)
+        except ValueError:
+            raise SystemExit(f"--override: formato inválido '{item}' "
+                             f"(se espera MOL.rol=carpeta, p. ej. GLYCINE.neutral=glycine)")
+        mol, role = mol.upper(), role.lower()
+        if mol not in sets or "chain" not in sets[mol] or role not in sets[mol]["chain"]:
+            raise SystemExit(f"--override: '{mol}.{role}' no existe en CALIBRATION_SETS")
+        sets[mol]["chain"][role] = folder.strip()
+    return sets
+
+
+def _calib_plan_rows(sets: dict, only: Optional[list[str]]) -> list[dict]:
+    rows = []
+    for mol, spec in sets.items():
+        if only and mol not in only:
+            continue
+        for tr in spec["transitions"]:
+            acid, base = _calib_files(spec, tr["slot"])
+            rows.append({**tr, "mol": mol, "label": spec["label"],
+                         "acid": acid, "base": base})
+    return rows
+
+
+def _calib_print_plan(rows: list[dict]) -> None:
+    sep = "═" * 100
+    print(f"\n{sep}\n  PLAN DE CALIBRACIÓN — transiciones, archivos y pKa experimental\n{sep}")
+    hdr = (f"  {'Molécula':<9s} {'slot':<5s} {'tipo':<14s} {'paso':<8s} "
+           f"{'grupo':<22s} {'ácido':<10s} {'base':<10s} {'exp':>5s}")
+    print(hdr)
+    print("  " + "─" * 96)
+    last = None
+    for r in rows:
+        mol = r["mol"] if r["mol"] != last else ""
+        last = r["mol"]
+        print(f"  {mol:<9s} {r['slot']:<5s} {r['type']:<14s} {r['step']:<8s} "
+              f"{r['group']:<22s} {r['acid']:<10s} {r['base']:<10s} {r['exp']:>5.2f}")
+    print(sep)
+
+
+def _calib_check_dirs(base: Path, sets: dict, only: Optional[list[str]]) -> list[str]:
+    """Lista de problemas de disposición de carpetas (vacía = todo presente)."""
+    probs: list[str] = []
+    for mol, spec in sets.items():
+        if only and mol not in only:
+            continue
+        runs = base / mol / "runs"
+        if not runs.is_dir():
+            probs.append(f"{mol}: no existe {runs}")
+            continue
+        names = list(spec["pair"]) if "pair" in spec else \
+            [spec["chain"][r] for r in _CALIB_ROLE_ORDER if r in spec["chain"]]
+        for nm in names:
+            d = runs / nm
+            if not d.is_dir():
+                probs.append(f"{mol}: falta la carpeta de estado '{nm}' ({d})")
+            elif not (d / SUBDIR_SP).is_dir():
+                probs.append(f"{mol}: '{nm}' no tiene {SUBDIR_SP}/ (¿SP sin terminar?)")
+    return probs
+
+
+def _calib_failed(msg: str) -> dict:
+    return {"ok": False, "pKa": None, "method": None, "warnings": [msg]}
+
+
+def _calib_compute_mol(mol: str, spec: dict, base: Path, T: float,
+                       method: str, gcorr_source: str) -> dict[str, dict]:
+    """
+    pKa crudos de todas las transiciones de UNA molécula. Usa exactamente
+    las mismas piezas que `pka` (collect_mol_data, _build_neutral_macrostate,
+    compute_pka), sin imprimir el ciclo. Retorna {slot: resultado_compute_pka}.
+    """
+    global PC_WORK_ROOT
+    PC_WORK_ROOT = (base / mol / "runs").resolve()
+    wanted = [t["slot"] for t in spec["transitions"]]
+    out: dict[str, dict] = {}
+
+    def load(name: str) -> dict:
+        return collect_mol_data(name, verbose=False, gcorr_source=gcorr_source,
+                                use_smd=False)
+
+    if "pair" in spec:
+        a, b = spec["pair"]
+        da, db = load(a), load(b)
+        if not (da.get("ok") and db.get("ok")):
+            out["pair"] = _calib_failed(
+                f"datos incompletos: {a} ok={da.get('ok')}, {b} ok={db.get('ok')}")
+        else:
+            out["pair"] = compute_pka(da, db, T=T, verbose=False, method=method,
+                                      gcorr_source=gcorr_source)
+        return out
+
+    ch = spec["chain"]
+    D = {role: load(name) for role, name in ch.items()}
+    bad = [f"{ch[r]}" for r, d in D.items() if not d.get("ok")]
+
+    macro = None
+    if D["neutral"].get("ok") and D["zwitterion"].get("ok"):
+        try:
+            _taut, macro = _build_neutral_macrostate(
+                D["neutral"], D["zwitterion"], ch["neutral"], ch["zwitterion"],
+                T, verbose=False, gcorr_source=gcorr_source)
+        except SystemExit:
+            macro = None
+
+    def need(*roles) -> Optional[str]:
+        miss = [ch[r] for r in roles if r not in D or not D[r].get("ok")]
+        return f"estados sin datos válidos: {', '.join(miss)}" if miss else None
+
+    if "pKa0" in wanted:
+        e = need("protonated") or (None if macro else "macroestado R/D no construible")
+        out["pKa0"] = _calib_failed(e) if e else compute_pka(
+            D["protonated"], macro, T=T, verbose=False, method=method,
+            gcorr_source=gcorr_source)
+    if "pKa1" in wanted:
+        e = need("anion") or (None if macro else "macroestado R/D no construible")
+        out["pKa1"] = _calib_failed(e) if e else compute_pka(
+            macro, D["anion"], T=T, verbose=False, method=method,
+            gcorr_source=gcorr_source)
+    if "pKa2" in wanted:
+        e = need("anion", "dianion")
+        out["pKa2"] = _calib_failed(e) if e else compute_pka(
+            D["anion"], D["dianion"], T=T, verbose=False, method=method,
+            gcorr_source=gcorr_source)
+    return out
+
+
+def _calib_print_fits(types: list[str]) -> None:
+    sep = "─" * 100
+    print(f"\n{'═' * 100}\n  AJUSTE POR TIPO  (modo auto; offset salvo rango≥1.0 y n≥3)\n{'═' * 100}")
+    for gsrc in ("harmonic", "goodvibes"):
+        shown = False
+        for t in types:
+            fit = fit_empirical_correction(t, gcorr_source=gsrc, mode="auto")
+            if not fit.get("ok"):
+                continue
+            if not shown:
+                print(f"\n  gcorr_source = {gsrc}")
+                print(f"  {'tipo':<14s} {'n':>2s} {'modo':<7s} {'m':>7s} {'b':>8s} "
+                      f"{'RMSE':>7s} {'LOO':>7s}  calibradores")
+                print("  " + sep)
+                shown = True
+            rm = "n/a" if np.isnan(fit["rmse"]) else f"{fit['rmse']:.3f}"
+            lo = "n/a" if np.isnan(fit["loo_rmse"]) else f"{fit['loo_rmse']:.3f}"
+            print(f"  {t:<14s} {fit['n']:>2d} {fit['mode']:<7s} {fit['slope']:>7.3f} "
+                  f"{fit['intercept']:>+8.3f} {rm:>7s} {lo:>7s}  {', '.join(fit['molecules'])}")
+            for w in fit["warnings"]:
+                print(f"      ⚠  {w}")
+
+
+def _main_calibrate():
+    import copy, csv, datetime, json
+
+    ap = argparse.ArgumentParser(
+        prog="maaqc.py calibrate",
+        description="Calibración sistemática del ciclo de pKa: imprime el plan de "
+                    "transiciones (archivos y pKa exp.), calcula los pKa crudos "
+                    "de Asp/Glu/Gly/Val/AP con la misma cadena que `pka`, ajusta "
+                    "una corrección por tipo y escribe calibration.json "
+                    "(consumible con `pka --calibration-file`).",
+        epilog="""
+Disposición esperada:  <base>/<MOL>/runs/<estado>/   (como en `pka --mol`)
+  ASPARTIC/runs/{AA,AR,AD,AB}   GLUTAMIC/runs/{GA,GR,GD,GB,GC}
+  GLYCINE/runs/{GA,GR,GD,GB}    VALINE/runs/{VA,VR,VD,VB}    AP/runs/{APA,APR}
+
+Ejemplos:
+  maaqc.py calibrate --list --base ~/PAPER1/calib
+  maaqc.py calibrate --base ~/PAPER1/calib --method born --gcorr both
+  maaqc.py calibrate --base ~/PAPER1/calib --override GLYCINE.neutral=glycine
+""",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--base", default=".", metavar="DIR",
+                    help="carpeta que contiene ASPARTIC/, GLUTAMIC/, GLYCINE/, "
+                         "VALINE/ y AP/ (default: cwd)")
+    ap.add_argument("--mols", nargs="+", choices=list(CALIBRATION_SETS), default=None,
+                    help="subconjunto de moléculas (default: todas)")
+    ap.add_argument("--list", action="store_true",
+                    help="solo imprime el plan y verifica carpetas; no calcula")
+    ap.add_argument("--method", choices=["auto", "born", "direct"], default="auto",
+                    help="método de compute_pka (default auto). Usa EL MISMO que "
+                         "usarás en M-Gly:Val; se guarda en el JSON.")
+    ap.add_argument("--temp", type=float, default=T_STD, choices=TEMPS_K,
+                    help=f"T de la calibración (default {T_STD}); los pKa exp. son a 25 °C")
+    ap.add_argument("--gcorr", choices=["harmonic", "goodvibes", "both"],
+                    default="harmonic", help="fuente de G_corr (default harmonic)")
+    ap.add_argument("--override", nargs="*", default=[], metavar="MOL.rol=CARPETA",
+                    help="renombra una carpeta de estado, p. ej. GLYCINE.neutral=glycine")
+    ap.add_argument("--out", default="calibration.json", metavar="JSON")
+    ap.add_argument("--csv", default=None, metavar="CSV",
+                    help="además, tabla plana de transiciones en CSV")
+    args = ap.parse_args()
+
+    sets = _calib_apply_overrides(CALIBRATION_SETS, args.override)
+    rows = _calib_plan_rows(sets, args.mols)
+    _calib_print_plan(rows)
+
+    base = Path(args.base).expanduser().resolve()
+    probs = _calib_check_dirs(base, sets, args.mols)
+    if probs:
+        print("\n  ⚠  Problemas en la disposición de carpetas:")
+        for p_ in probs:
+            print(f"     · {p_}")
+    else:
+        print(f"\n  ✔ Todas las carpetas de estado existen bajo {base}")
+    if args.list:
+        return
+    if probs:
+        print("\n  Se calcularán solo las transiciones cuyos estados estén completos.")
+
+    gsources = ["harmonic", "goodvibes"] if args.gcorr == "both" else [args.gcorr]
+    # resultados[(mol, slot)][gsrc] = resultado compute_pka
+    results: dict[tuple[str, str], dict[str, dict]] = {}
+    for mol, spec in sets.items():
+        if args.mols and mol not in args.mols:
+            continue
+        for gsrc in gsources:
+            print(f"\n▸ {mol}  (gcorr_source={gsrc}, method={args.method}, T={args.temp:.2f} K)")
+            try:
+                res = _calib_compute_mol(mol, spec, base, args.temp, args.method, gsrc)
+            except SystemExit as exc:
+                res = {t["slot"]: _calib_failed(f"abortado (SystemExit {exc.code})")
+                       for t in spec["transitions"]}
+            for slot, r in res.items():
+                results.setdefault((mol, slot), {})[gsrc] = r
+
+    # ── tabla de resultados ────────────────────────────────────────────────
+    methods: set[str] = set()
+    out_rows: list[dict] = []
+    sep = "═" * 100
+    print(f"\n{sep}\n  pKa CRUDOS vs EXPERIMENTAL\n{sep}")
+    print(f"  {'Molécula':<9s} {'slot':<5s} {'tipo':<14s} {'paso':<8s} "
+          f"{'gcorr':<10s} {'método':<7s} {'calc':>7s} {'exp':>6s} {'calc−exp':>9s}")
+    print("  " + "─" * 96)
+    for r in rows:
+        for gsrc in gsources:
+            res = results.get((r["mol"], r["slot"]), {}).get(gsrc)
+            ok = bool(res and res.get("ok"))
+            calc = res["pKa"] if ok else None
+            meth = res.get("method") if res else None
+            if ok and meth:
+                methods.add(meth)
+            err = (calc - r["exp"]) if calc is not None else None
+            cs = f"{calc:7.2f}" if calc is not None else "    n/a"
+            es = f"{err:+9.2f}" if err is not None else "      n/a"
+            print(f"  {r['mol']:<9s} {r['slot']:<5s} {r['type']:<14s} {r['step']:<8s} "
+                  f"{gsrc:<10s} {str(meth or '-'):<7s} {cs} {r['exp']:6.2f} {es}")
+            if not ok and res:
+                for w in res.get("warnings", [])[:2]:
+                    print(f"      ⚠  {w}")
+            out_rows.append({
+                "mol": r["mol"], "slot": r["slot"], "type": r["type"], "step": r["step"],
+                "group": r["group"], "acid_files": r["acid"], "base_files": r["base"],
+                "gcorr_source": gsrc, "method": meth, "pKa_calc": calc,
+                "pKa_exp": r["exp"], "error": err, "ok": ok})
+
+    if len(methods) > 1:
+        print(f"\n  ⚠  MÉTODOS MEZCLADOS en la calibración: {sorted(methods)}. "
+              f"G(H⁺,aq) difiere entre 'born' y 'direct': fuerza --method para "
+              f"que todas las transiciones usen el mismo.")
+    method_resolved = (next(iter(methods)) if len(methods) == 1
+                       else ("mixed" if methods else args.method))
+
+    # ── EMPIRICAL_CALIBRATION actualizada ──────────────────────────────────
+    cal = copy.deepcopy(EMPIRICAL_CALIBRATION)
+    for r in rows:
+        pts = cal.setdefault(r["type"], [])
+        pt = next((p_ for p_ in pts if p_["mol"] == r["label"]), None)
+        if pt is None:
+            pt = {"mol": r["label"], "calc_harmonic": None, "calc_goodvibes": None,
+                  "exp": r["exp"], "exp_ref": _CALIB_REF_AA}
+            pts.append(pt)
+        pt["exp"] = r["exp"]
+        for gsrc in gsources:
+            res = results.get((r["mol"], r["slot"]), {}).get(gsrc)
+            if res and res.get("ok"):
+                pt[f"calc_{gsrc}"] = round(float(res["pKa"]), 3)
+    # Instala en memoria para que los ajustes de abajo usen estos valores.
+    EMPIRICAL_CALIBRATION.clear()
+    EMPIRICAL_CALIBRATION.update(cal)
+    _calib_print_fits(list(cal))
+
+    blob = {
+        "meta": {"created": datetime.datetime.now().isoformat(timespec="seconds"),
+                 "T": args.temp, "method_requested": args.method,
+                 "method_resolved": method_resolved, "gcorr": gsources,
+                 "base": str(base), "script": "maaqc.py calibrate",
+                 "note": "pKa exp. a 25 °C; ver exp_ref por punto"},
+        "points": out_rows,
+        "EMPIRICAL_CALIBRATION": cal,
+    }
+    outp = Path(args.out).expanduser()
+    outp.write_text(json.dumps(blob, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"\n  → {outp.resolve()}")
+    if args.csv:
+        with open(args.csv, "w", newline="", encoding="utf-8") as fh:
+            w = csv.DictWriter(fh, fieldnames=list(out_rows[0]))
+            w.writeheader()
+            w.writerows(out_rows)
+        print(f"  → {Path(args.csv).resolve()}")
+    print("\n  Uso en M-Gly:Val:\n"
+          f"    maaqc.py pka --mol MGLYVAL --protonated A --neutral R --zwitterion D \\\n"
+          f"        --anion B --dianion C --method {method_resolved if method_resolved != 'mixed' else '<born|direct>'} \\\n"
+          f"        --calibration-file {outp} \\\n"
+          f"        --empirical-correction pKa0=carboxyl,pKa1=carboxyl_2,pKa2=pyridinium \\\n"
+          f"        --empirical-correction-mode offset\n")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  §  CLI UNIFICADO
 #     Despacha a los main() originales conservando sus flags intactos
 # ══════════════════════════════════════════════════════════════════════════════
@@ -15999,6 +16570,8 @@ _SUBCOMMANDS = {
                 "ex protonation_cycle.py"),
     "cubes":   ("cubos HOMO/LUMO y NTO hole/particle vía orca_plot",
                 "ex extract_tddft_cubes.py"),
+    "calibrate": ("calibración sistemática de pKa (Asp/Glu/Gly/Val/AP) → calibration.json",
+                  "nuevo"),
 }
 
 _USAGE = """\
@@ -16023,6 +16596,12 @@ Cada subcomando conserva exactamente los flags de su script de origen:
   maaqc.py pka --mol MGLYVAL --neutral R --anion B --dianion C \\
                --protonated A --zwitterion D --montecarlo
   maaqc.py cubes --root PAPER1 --grid 80 --dry-run
+  maaqc.py calibrate --list --base PAPER1/calib
+  maaqc.py calibrate --base PAPER1/calib --method born --gcorr both
+  maaqc.py pka --mol AP --pair APA APR --method born
+  maaqc.py pka --mol MGLYVAL --protonated A --neutral R --zwitterion D --anion B \\
+               --dianion C --calibration-file calibration.json \\
+               --empirical-correction pKa0=carboxyl,pKa1=carboxyl_2,pKa2=pyridinium
 
 Ayuda de cada uno:  maaqc.py <subcomando> --help
 """
@@ -16066,6 +16645,10 @@ def main(argv: "list[str] | None" = None) -> int:
         if sub == "cubes":
             sys.argv = ["maaqc.py cubes", *rest]
             return _main_cubes(rest)
+        if sub == "calibrate":
+            sys.argv = ["maaqc.py calibrate", *rest]
+            _main_calibrate()
+            return 0
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
     finally:

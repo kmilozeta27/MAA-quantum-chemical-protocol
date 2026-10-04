@@ -1,0 +1,399 @@
+{
+  "meta": {
+    "created": "2026-10-04T14:44:43",
+    "T": 298.15,
+    "method_requested": "born",
+    "method_resolved": "born",
+    "gcorr": [
+      "harmonic",
+      "goodvibes"
+    ],
+    "base": "/home/kmilozeta/PAPER1",
+    "script": "maaqc.py calibrate",
+    "note": "pKa exp. a 25 °C; ver exp_ref por punto"
+  },
+  "points": [
+    {
+      "mol": "ASPARTIC",
+      "slot": "pKa0",
+      "type": "carboxyl",
+      "step": "A→R/D",
+      "group": "α-COOH",
+      "acid_files": "AA",
+      "base_files": "AR/AD",
+      "gcorr_source": "harmonic",
+      "method": "born",
+      "pKa_calc": 2.086601976276449,
+      "pKa_exp": 1.88,
+      "error": 0.20660197627644905,
+      "ok": true
+    },
+    {
+      "mol": "ASPARTIC",
+      "slot": "pKa0",
+      "type": "carboxyl",
+      "step": "A→R/D",
+      "group": "α-COOH",
+      "acid_files": "AA",
+      "base_files": "AR/AD",
+      "gcorr_source": "goodvibes",
+      "method": "born",
+      "pKa_calc": 2.0137102377353258,
+      "pKa_exp": 1.88,
+      "error": 0.13371023773532587,
+      "ok": true
+    },
+    {
+      "mol": "ASPARTIC",
+      "slot": "pKa1",
+      "type": "carboxyl_2",
+      "step": "R/D→B",
+      "group": "β-COOH",
+      "acid_files": "AR/AD",
+      "base_files": "AB",
+      "gcorr_source": "harmonic",
+      "method": "born",
+      "pKa_calc": 5.718722521704867,
+      "pKa_exp": 3.65,
+      "error": 2.0687225217048675,
+      "ok": true
+    },
+    {
+      "mol": "ASPARTIC",
+      "slot": "pKa1",
+      "type": "carboxyl_2",
+      "step": "R/D→B",
+      "group": "β-COOH",
+      "acid_files": "AR/AD",
+      "base_files": "AB",
+      "gcorr_source": "goodvibes",
+      "method": "born",
+      "pKa_calc": 5.619877558112136,
+      "pKa_exp": 3.65,
+      "error": 1.969877558112136,
+      "ok": true
+    },
+    {
+      "mol": "GLUTAMIC",
+      "slot": "pKa0",
+      "type": "carboxyl",
+      "step": "A→R/D",
+      "group": "α-COOH",
+      "acid_files": "GA",
+      "base_files": "GR/GD",
+      "gcorr_source": "harmonic",
+      "method": "born",
+      "pKa_calc": 2.7055969004709364,
+      "pKa_exp": 2.19,
+      "error": 0.5155969004709364,
+      "ok": true
+    },
+    {
+      "mol": "GLUTAMIC",
+      "slot": "pKa0",
+      "type": "carboxyl",
+      "step": "A→R/D",
+      "group": "α-COOH",
+      "acid_files": "GA",
+      "base_files": "GR/GD",
+      "gcorr_source": "goodvibes",
+      "method": "born",
+      "pKa_calc": 2.7785991231141183,
+      "pKa_exp": 2.19,
+      "error": 0.5885991231141183,
+      "ok": true
+    },
+    {
+      "mol": "GLUTAMIC",
+      "slot": "pKa1",
+      "type": "carboxyl_2",
+      "step": "R/D→B",
+      "group": "γ-COOH",
+      "acid_files": "GR/GD",
+      "base_files": "GB",
+      "gcorr_source": "harmonic",
+      "method": "born",
+      "pKa_calc": 5.544981448434719,
+      "pKa_exp": 4.25,
+      "error": 1.2949814484347186,
+      "ok": true
+    },
+    {
+      "mol": "GLUTAMIC",
+      "slot": "pKa1",
+      "type": "carboxyl_2",
+      "step": "R/D→B",
+      "group": "γ-COOH",
+      "acid_files": "GR/GD",
+      "base_files": "GB",
+      "gcorr_source": "goodvibes",
+      "method": "born",
+      "pKa_calc": 5.420792036726219,
+      "pKa_exp": 4.25,
+      "error": 1.170792036726219,
+      "ok": true
+    },
+    {
+      "mol": "GLUTAMIC",
+      "slot": "pKa2",
+      "type": "amino_dianion",
+      "step": "B→C",
+      "group": "NH₃⁺ (2×COO⁻)",
+      "acid_files": "GB",
+      "base_files": "GC",
+      "gcorr_source": "harmonic",
+      "method": "born",
+      "pKa_calc": 17.890571521390946,
+      "pKa_exp": 9.67,
+      "error": 8.220571521390946,
+      "ok": true
+    },
+    {
+      "mol": "GLUTAMIC",
+      "slot": "pKa2",
+      "type": "amino_dianion",
+      "step": "B→C",
+      "group": "NH₃⁺ (2×COO⁻)",
+      "acid_files": "GB",
+      "base_files": "GC",
+      "gcorr_source": "goodvibes",
+      "method": "born",
+      "pKa_calc": 17.948067480491286,
+      "pKa_exp": 9.67,
+      "error": 8.278067480491286,
+      "ok": true
+    },
+    {
+      "mol": "GLYCINE",
+      "slot": "pKa0",
+      "type": "carboxyl",
+      "step": "A→R/D",
+      "group": "COOH",
+      "acid_files": "GA",
+      "base_files": "GR/GD",
+      "gcorr_source": "harmonic",
+      "method": "born",
+      "pKa_calc": 2.504649296261808,
+      "pKa_exp": 2.34,
+      "error": 0.16464929626180824,
+      "ok": true
+    },
+    {
+      "mol": "GLYCINE",
+      "slot": "pKa0",
+      "type": "carboxyl",
+      "step": "A→R/D",
+      "group": "COOH",
+      "acid_files": "GA",
+      "base_files": "GR/GD",
+      "gcorr_source": "goodvibes",
+      "method": "born",
+      "pKa_calc": 2.4456416946737036,
+      "pKa_exp": 2.34,
+      "error": 0.10564169467370377,
+      "ok": true
+    },
+    {
+      "mol": "GLYCINE",
+      "slot": "pKa1",
+      "type": "amino",
+      "step": "R/D→B",
+      "group": "NH₃⁺",
+      "acid_files": "GR/GD",
+      "base_files": "GB",
+      "gcorr_source": "harmonic",
+      "method": "born",
+      "pKa_calc": 11.950574672236485,
+      "pKa_exp": 9.6,
+      "error": 2.350574672236485,
+      "ok": true
+    },
+    {
+      "mol": "GLYCINE",
+      "slot": "pKa1",
+      "type": "amino",
+      "step": "R/D→B",
+      "group": "NH₃⁺",
+      "acid_files": "GR/GD",
+      "base_files": "GB",
+      "gcorr_source": "goodvibes",
+      "method": "born",
+      "pKa_calc": 11.9091578813004,
+      "pKa_exp": 9.6,
+      "error": 2.3091578813004006,
+      "ok": true
+    },
+    {
+      "mol": "VALINE",
+      "slot": "pKa0",
+      "type": "carboxyl",
+      "step": "A→R/D",
+      "group": "COOH",
+      "acid_files": "VA",
+      "base_files": "VR/VD",
+      "gcorr_source": "harmonic",
+      "method": "born",
+      "pKa_calc": 2.3847451994141076,
+      "pKa_exp": 2.32,
+      "error": 0.06474519941410772,
+      "ok": true
+    },
+    {
+      "mol": "VALINE",
+      "slot": "pKa0",
+      "type": "carboxyl",
+      "step": "A→R/D",
+      "group": "COOH",
+      "acid_files": "VA",
+      "base_files": "VR/VD",
+      "gcorr_source": "goodvibes",
+      "method": "born",
+      "pKa_calc": 2.373546264862734,
+      "pKa_exp": 2.32,
+      "error": 0.05354626486273428,
+      "ok": true
+    },
+    {
+      "mol": "VALINE",
+      "slot": "pKa1",
+      "type": "amino",
+      "step": "R/D→B",
+      "group": "NH₃⁺",
+      "acid_files": "VR/VD",
+      "base_files": "VB",
+      "gcorr_source": "harmonic",
+      "method": "born",
+      "pKa_calc": 12.175098528665961,
+      "pKa_exp": 9.62,
+      "error": 2.5550985286659618,
+      "ok": true
+    },
+    {
+      "mol": "VALINE",
+      "slot": "pKa1",
+      "type": "amino",
+      "step": "R/D→B",
+      "group": "NH₃⁺",
+      "acid_files": "VR/VD",
+      "base_files": "VB",
+      "gcorr_source": "goodvibes",
+      "method": "born",
+      "pKa_calc": 12.193941391315187,
+      "pKa_exp": 9.62,
+      "error": 2.573941391315188,
+      "ok": true
+    },
+    {
+      "mol": "AP",
+      "slot": "pair",
+      "type": "pyridinium",
+      "step": "APA→APR",
+      "group": "N–H⁺ (4-aminopiridinio)",
+      "acid_files": "APA",
+      "base_files": "APR",
+      "gcorr_source": "harmonic",
+      "method": "born",
+      "pKa_calc": 8.884463891476688,
+      "pKa_exp": 9.17,
+      "error": -0.2855361085233117,
+      "ok": true
+    },
+    {
+      "mol": "AP",
+      "slot": "pair",
+      "type": "pyridinium",
+      "step": "APA→APR",
+      "group": "N–H⁺ (4-aminopiridinio)",
+      "acid_files": "APA",
+      "base_files": "APR",
+      "gcorr_source": "goodvibes",
+      "method": "born",
+      "pKa_calc": 8.883083988434642,
+      "pKa_exp": 9.17,
+      "error": -0.2869160115653582,
+      "ok": true
+    }
+  ],
+  "EMPIRICAL_CALIBRATION": {
+    "carboxyl": [
+      {
+        "mol": "Glycine",
+        "calc_harmonic": 2.505,
+        "calc_goodvibes": 2.446,
+        "exp": 2.34,
+        "exp_ref": "McMurry Table 26-1 / Carey & Giuliano (consistente con CRC)"
+      },
+      {
+        "mol": "Valine",
+        "calc_harmonic": 2.385,
+        "calc_goodvibes": 2.374,
+        "exp": 2.32,
+        "exp_ref": "McMurry Table 26-1 / Carey & Giuliano (consistente con CRC)"
+      },
+      {
+        "mol": "Aspartic",
+        "calc_harmonic": 2.087,
+        "calc_goodvibes": 2.014,
+        "exp": 1.88,
+        "exp_ref": "McMurry Table 26-1 / Carey & Giuliano (consistente con CRC) (α-COOH)"
+      },
+      {
+        "mol": "Glutamic",
+        "calc_harmonic": 2.706,
+        "calc_goodvibes": 2.779,
+        "exp": 2.19,
+        "exp_ref": "McMurry Table 26-1 / Carey & Giuliano (consistente con CRC) (α-COOH)"
+      }
+    ],
+    "carboxyl_2": [
+      {
+        "mol": "Aspartic",
+        "calc_harmonic": 5.719,
+        "calc_goodvibes": 5.62,
+        "exp": 3.65,
+        "exp_ref": "McMurry Table 26-1 / Carey & Giuliano (consistente con CRC) (β-COOH)"
+      },
+      {
+        "mol": "Glutamic",
+        "calc_harmonic": 5.545,
+        "calc_goodvibes": 5.421,
+        "exp": 4.25,
+        "exp_ref": "McMurry Table 26-1 / Carey & Giuliano (consistente con CRC) (γ-COOH)"
+      }
+    ],
+    "amino": [
+      {
+        "mol": "Glycine",
+        "calc_harmonic": 11.951,
+        "calc_goodvibes": 11.909,
+        "exp": 9.6,
+        "exp_ref": "McMurry Table 26-1 / Carey & Giuliano (consistente con CRC)"
+      },
+      {
+        "mol": "Valine",
+        "calc_harmonic": 12.175,
+        "calc_goodvibes": 12.194,
+        "exp": 9.62,
+        "exp_ref": "McMurry Table 26-1 / Carey & Giuliano (consistente con CRC)"
+      }
+    ],
+    "amino_dianion": [
+      {
+        "mol": "Glutamic",
+        "calc_harmonic": 17.891,
+        "calc_goodvibes": 17.948,
+        "exp": 9.67,
+        "exp_ref": "McMurry Table 26-1 / Carey & Giuliano (consistente con CRC) (α-NH₃⁺ de Glu)"
+      }
+    ],
+    "pyridinium": [
+      {
+        "mol": "AP",
+        "calc_harmonic": 8.884,
+        "calc_goodvibes": 8.883,
+        "exp": 9.17,
+        "exp_ref": "4-aminopiridina, 9.17 a 25 °C (dato del proyecto)"
+      }
+    ]
+  }
+}
