@@ -3387,6 +3387,12 @@ def select_nconf_boltzmann(
 
 # Límites absolutos (nunca se violan)
 NCONF_MIN = 3
+
+# --spsmd: se conservan confórmeros hasta sumar >= SPSMD_CUMULATIVE_PCT % de
+# peso Boltzmann (SP), además de cualquiera con peso > --spsmd-boltzmann-threshold.
+# Un umbral individual alto (p.ej. 20 %) dejaba estados con 1 solo confórmero
+# SMD y el resto con E_sp_aq=NaN, sesgando G_boltz hasta RT·ln(1/f).
+SPSMD_CUMULATIVE_PCT = 95.0
 NCONF_MAX = 20
 
 # Energías de GFN2-xTB en kcal/mol para definir ventanas conformacionales
@@ -4132,28 +4138,53 @@ def _filter_dirs_by_sp_weights(
     threshold: float,
     log:       logging.Logger,
     stage_tag: str,
+    cumulative_pct: Optional[float] = None,
 ) -> list[Path]:
     """
-    Filtra conf_dirs dejando solo los que superan `threshold`% de peso
-    Boltzmann calculado desde energías de SP PRE-EXISTENTES (ver
-    extract_sp_boltzmann_weights) — a diferencia de _filter_dirs_by_boltzmann,
-    que usa el peso de 1_SCREENING.out de CENSO (nivel xTB/DFT de
-    prescreening, distinto y potencialmente menos fiable que el propio SP).
+    Filtra conf_dirs usando el peso Boltzmann calculado desde energías de SP
+    PRE-EXISTENTES (ver extract_sp_boltzmann_weights) — a diferencia de
+    _filter_dirs_by_boltzmann, que usa el peso de 1_SCREENING.out de CENSO
+    (nivel xTB/DFT de prescreening, distinto y potencialmente menos fiable).
 
-    Fail-open: si `weights` está vacío o ningún confórmero supera el
-    umbral, devuelve conf_dirs sin filtrar con un warning.
+    Criterio (unión de dos condiciones):
+      1. peso individual > `threshold` %  (mínimo por confórmero), y
+      2. si `cumulative_pct` no es None: los confórmeros de mayor peso hasta
+         que el peso ACUMULADO sea >= `cumulative_pct` % (el confórmero que
+         cruza el límite se incluye).
+
+    El criterio acumulado evita el truncamiento del ensemble: con solo un
+    umbral individual, un único confórmero dominante (p.ej. 25 %) dejaba
+    fuera al resto, que luego quedaba con E_sp_aq=NaN y se omitía de
+    G_boltz, sesgando el estado hasta RT·ln(1/f).
+
+    Fail-open: si `weights` está vacío o ningún confórmero cumple, devuelve
+    conf_dirs sin filtrar con un warning.
     """
     if not weights:
         log.warning(f"[{stage_tag}] sin pesos Boltzmann de SP disponibles — "
                     f"no se puede filtrar, se usan los {len(conf_dirs)} sin filtrar")
         return conf_dirs
 
+    # Conjunto acumulado (por orden decreciente de peso, solo conf_dirs con peso)
+    cum_keep: set[str] = set()
+    if cumulative_pct is not None:
+        ranked = sorted(
+            ((d.name, weights[d.name]) for d in conf_dirs if d.name in weights),
+            key=lambda x: -x[1],
+        )
+        acc = 0.0
+        for name, w in ranked:
+            cum_keep.add(name)
+            acc += w
+            if acc >= cumulative_pct:
+                break
+
     kept, dropped, no_wt = [], [], []
     for d in conf_dirs:
         w = weights.get(d.name)
         if w is None:
             no_wt.append(d.name)
-        elif w > threshold:
+        elif w > threshold or d.name in cum_keep:
             kept.append(d)
         else:
             dropped.append((d.name, w))
@@ -4163,12 +4194,16 @@ def _filter_dirs_by_sp_weights(
                     f"Boltzmann (SP) — cayendo de vuelta a los {len(conf_dirs)} sin filtrar")
         return conf_dirs
 
+    kept_w = sum(weights[d.name] for d in kept)
+    crit = (f">{threshold}% individual ∪ acumulado ≥{cumulative_pct:g}%"
+            if cumulative_pct is not None else f">{threshold}% individual")
     kept_str = ", ".join(f"{d.name}({weights[d.name]:.1f}%)" for d in kept)
     log.info(f"[{stage_tag}] filtro Boltzmann (SP, energías preexistentes) "
-              f">{threshold}%: {len(kept)}/{len(conf_dirs)} seleccionados: {kept_str}")
+              f"{crit}: {len(kept)}/{len(conf_dirs)} seleccionados "
+              f"(cubren {kept_w:.1f}% del peso): {kept_str}")
     if dropped:
         log.info(f"[{stage_tag}] {len(dropped)} conf(s) descartados por debajo "
-                  f"del umbral: {[f'{cid}({w:.1f}%)' for cid, w in dropped]}")
+                  f"del criterio: {[f'{cid}({w:.1f}%)' for cid, w in dropped]}")
     if no_wt:
         log.warning(f"[{stage_tag}] {len(no_wt)} conf(s) sin peso SP calculado, "
                     f"descartados: {no_wt}")
@@ -4179,8 +4214,9 @@ def _collect_spsmd_selection(
     sp_dirs:           list[Path],
     mol_dir:           Path,
     log:               logging.Logger,
-    boltzmann_min_pct: float = 20.0,
+    boltzmann_min_pct: float = 5.0,
     temperature:       float = 298.15,
+    cumulative_pct:    Optional[float] = SPSMD_CUMULATIVE_PCT,
 ) -> list[Path]:
     """
     Selecciona, para un mol_dir/estado dado, qué confórmeros de sp_dirs
@@ -4209,7 +4245,7 @@ def _collect_spsmd_selection(
     if sp_boltzmann_weights:
         selected_dirs = _filter_dirs_by_sp_weights(
             sp_dirs, sp_boltzmann_weights, threshold=boltzmann_min_pct,
-            log=log, stage_tag="SP_SMD",
+            log=log, stage_tag="SP_SMD", cumulative_pct=cumulative_pct,
         )
     else:
         log.warning("[SP_SMD] sin energías de SP válidas para Boltzmann — "
@@ -4228,6 +4264,7 @@ def _collect_spsmd_selection(
                     "temperature_K":     temperature,
                     "source":            "04_sp/<conf_id>/sp.out (FINAL SINGLE POINT ENERGY)",
                     "threshold_pct":     boltzmann_min_pct,
+                    "cumulative_pct":    cumulative_pct,
                     "weights_pct":       sp_boltzmann_weights,
                     "selected_conf_ids": [d.name for d in selected_dirs],
                 },
@@ -4331,8 +4368,9 @@ def stage_sp_smd(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
                   batch_size: int = 0,
                   nprocs_per_job: Optional[int] = None,
                   maxcore_per_job: Optional[int] = None,
-                  boltzmann_min_pct: float = 20.0,
-                  temperature: float = 298.15) -> list[Path]:
+                  boltzmann_min_pct: float = 5.0,
+                  temperature: float = 298.15,
+                  cumulative_pct: Optional[float] = SPSMD_CUMULATIVE_PCT) -> list[Path]:
     """
     Etapa 04c_sp_smd (OPCIONAL — requiere --spsmd): single point con
     SMD(water) (idéntico al SP con CPCM(water) pero usando SMD en vez de
@@ -4357,6 +4395,7 @@ def stage_sp_smd(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
     selected_dirs = _collect_spsmd_selection(
         sp_dirs, mol_dir, log,
         boltzmann_min_pct=boltzmann_min_pct, temperature=temperature,
+        cumulative_pct=cumulative_pct,
     )
 
     _nprocs  = nprocs_per_job  if nprocs_per_job  is not None else NPROCS
@@ -4384,11 +4423,12 @@ def stage_sp_smd(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
 
 
 def stage_spsmd_batch(group_dir: Path, log: logging.Logger,
-                       boltzmann_min_pct: float = 20.0,
+                       boltzmann_min_pct: float = 5.0,
                        temperature: float = 298.15,
                        batch_size: int = 0,
                        nprocs_per_job: Optional[int] = None,
-                       maxcore_per_job: Optional[int] = None) -> None:
+                       maxcore_per_job: Optional[int] = None,
+                       cumulative_pct: Optional[float] = SPSMD_CUMULATIVE_PCT) -> None:
     """
     Modo batch de --spsmd: recorre TODAS las corridas (estados de
     protonación) dentro de una carpeta de grupo (<grupo>/runs/*/04_sp/conf_*).
@@ -4443,6 +4483,7 @@ def stage_spsmd_batch(group_dir: Path, log: logging.Logger,
         selected_dirs = _collect_spsmd_selection(
             sp_dirs, mol_dir, log,
             boltzmann_min_pct=boltzmann_min_pct, temperature=temperature,
+            cumulative_pct=cumulative_pct,
         )
         tasks_all.extend({
             "conf_id":  d.name,
@@ -4465,8 +4506,6 @@ def stage_spsmd_batch(group_dir: Path, log: logging.Logger,
 
     total_ok   = len(successful)
     total_pend = len(tasks_all) - total_ok
-    log.info(f"[SP_SMD] batch finalizado: {total_ok} completados, {total_pend} pendientes/fallidos")
-
     log.info(f"[SP_SMD] batch finalizado: {total_ok} completados, {total_pend} pendientes/fallidos")
 
 
@@ -5870,7 +5909,8 @@ def _run_one(args, parser):
         log.info("=" * 60)
         stage_spsmd_batch(group_dir, log,
                            boltzmann_min_pct=args.spsmd_boltzmann_threshold,
-                           temperature=args.temperature)
+                           temperature=args.temperature,
+                           cumulative_pct=args.spsmd_cumulative_pct)
         log.info("=" * 60)
         log.info("SP_SMD BATCH FINALIZADO")
         log.info("=" * 60)
@@ -6216,10 +6256,12 @@ def _run_downstream_from_crest(args, conformers_xyz, mol_dir, charge,
     if args.spsmd:
         log.info(f"[SP_SMD] calculando SP con SMD(water) para "
                  f"{len(sp_dirs)} confórmeros de 04_sp/ "
-                 f"(filtro Boltzmann > {args.spsmd_boltzmann_threshold}%)")
+                 f"(filtro Boltzmann > {args.spsmd_boltzmann_threshold}% "
+                 f"∪ acumulado ≥ {args.spsmd_cumulative_pct}%)")
         spsmd_dirs = stage_sp_smd(sp_dirs, mol_dir, log,
                                    boltzmann_min_pct=args.spsmd_boltzmann_threshold,
-                                   temperature=args.temperature)
+                                   temperature=args.temperature,
+                                   cumulative_pct=args.spsmd_cumulative_pct)
         if not spsmd_dirs:
             log.warning("[SP_SMD] ningún cálculo completado.")
         else:
@@ -6591,14 +6633,27 @@ Ejemplos (modo multi-molécula, --mol repetido):
         ),
     )
     parser.add_argument(
-        "--spsmd-boltzmann-threshold", type=float, default=20.0, metavar="PCT",
+        "--spsmd-boltzmann-threshold", type=float, default=5.0, metavar="PCT",
         help=(
-            "Umbral de peso Boltzmann (%%) para filtrar qué confórmeros de "
-            "04_sp/ se optimizan con --spsmd (SP_SMD): solo corre sobre los "
-            "confórmeros con peso Boltzmann > PCT en 1_SCREENING.out de CENSO "
-            "(por estado/run). Default: 20.0. Si no hay 1_SCREENING.out "
-            "disponible o el filtro no deja ningún confórmero, se cae de "
-            "vuelta a todos los confórmeros de 04_sp/ (fail-open)."
+            "Peso Boltzmann MÍNIMO individual (%%) para que un confórmero de "
+            "04_sp/ pase a SP_SMD (--spsmd). El peso se calcula desde las "
+            "energías de SP preexistentes (04_sp/*/sp.out), por estado/run. "
+            "Se combina por UNIÓN con --spsmd-cumulative-pct. Default: 5.0 "
+            "(antes 20.0, que dejaba estados con 1 solo confórmero SMD y "
+            "sesgaba G_boltz). Si no hay energías de SP válidas se cae al "
+            "filtro de CENSO (1_SCREENING.out) y, si tampoco hay dato, a "
+            "todos los confórmeros (fail-open)."
+        ),
+    )
+    parser.add_argument(
+        "--spsmd-cumulative-pct", type=float, default=SPSMD_CUMULATIVE_PCT,
+        metavar="PCT",
+        help=(
+            "Peso Boltzmann ACUMULADO (%%) a cubrir con --spsmd: se conservan "
+            "los confórmeros de mayor peso hasta sumar >= PCT, además de los "
+            "que superan --spsmd-boltzmann-threshold. Default: 95.0. Evita "
+            "truncar el ensemble SMD (que sesga G_boltz hasta RT·ln(1/f)). "
+            "Usa 100 para correr todos los confórmeros."
         ),
     )
 
@@ -7800,11 +7855,14 @@ def rc_compute_pka(
         return result
 
     # ── ΔG_aq (ciclo de Born completo) ───────────────────────────────────
-    #   ΔG_aq = ΔG_gas + ΔG_solv(A⁻) + ΔG_solv(H⁺) - ΔG_solv(AH)
+    #   ΔG_aq = ΔG_gas + ΔG_solv(A⁻) + ΔG_solv(H⁺) + δG_conc(H⁺) - ΔG_solv(AH)
+    #   (+ DG_CONC_CORR una vez: Δn = +1, H⁺ gas 1 atm → 1 M; el δG_conc de
+    #   A⁻ y AH ya está en dG_solv_* y se cancela entre ellos.)
     dG_aq_kcal = (
         dG_gas_kcal
         + dG_solv_base
         + DG_SOLV_HPLUS
+        + DG_CONC_CORR
         - dG_solv_acid
     )
     result["dG_aq_kcal"] = dG_aq_kcal
@@ -10560,28 +10618,41 @@ PC_WORK_ROOT        = Path.cwd() / "runs"  # default; sobreescribible con --work
 # 1) Para el CICLO DE BORN (gas + ΔG_solv separados):
 #      G(H⁺,gas) = -6.28 kcal/mol      [Tissandier et al. 1998]
 #      ΔG_solv(H⁺) = -265.9 kcal/mol   [Kelly, Cramer & Truhlar 2006]
-#      G(H⁺,aq) implícito = -272.18 kcal/mol
-#    Esta convención está calibrada para combinarse con E_SP en FASE GAS
-#    pura (sin CPCM). Úsala solo si G_gas_acid/G_gas_base vienen de SP sin
-#    solvente implícito.
+#      δG_conc(1 atm→1 M) = +1.894 kcal/mol (UNA vez, por Δn=+1)
+#      G(H⁺,aq) implícito = -6.28 + 1.894 - 265.9 = -270.286 kcal/mol
 #
 # 2) Para el MÉTODO DIRECTO (solo energías ya en CPCM, sin SP fase gas):
-#    Las energías E_SP_CPCM(X) ya incluyen el efecto de solvatación de la
-#    molécula vía el modelo de continuo. Usar G(H⁺,aq) de Tissandier/Kelly
-#    aquí sobreestima la estabilización del protón en ~8-10 kcal/mol, porque
-#    esa constante fue derivada para cerrar un ciclo gas+solv explícito, no
-#    para emparejarse con energías que ya son "solución implícita".
-#    El valor correcto para esquemas de fase condensada / esquema directo
-#    es el de Pliego & Riveros, J. Phys. Chem. A 2002, 106, 7434:
-#      G(H⁺,aq) = -264.61 kcal/mol  (escala molar, 298.15 K, calibrado con
-#                                     ciclos de fase condensada, consistente
-#                                     con Zhan & Dixon 2001 ≈ -262.4 kcal/mol)
+#    Las energías E_SP_CPCM(X) ya incluyen la solvatación de la molécula vía
+#    el modelo de continuo, y el protón se trata con la MISMA constante
+#    G(H⁺,aq) = -270.286 kcal/mol que el ciclo de Born (ver abajo). El valor
+#    anterior (-264.61, Pliego & Riveros 2002) omitía G(H⁺,gas) y δG_conc y
+#    desplazaba todos los pKa ≈ +4.2 unidades (ver G_HPLUS_AQ_PLIEGO_RIVEROS_LEGACY).
 
-# G(H⁺, aq) PARA EL CICLO DE BORN (gas + solv explícitos, NO usar con el método directo)
-G_HPLUS_AQ_BORN   = G_HPLUS_GAS + DG_SOLV_HPLUS   # kcal/mol  ≈ -272.18
+# G(H⁺, aq) CONSISTENTE CON EL CICLO DE ESTE SCRIPT (escala molar, 1 M, 298.15 K):
+#
+#   G(H⁺,aq) = G(H⁺,gas, 1 atm) + δG_conc(1 atm → 1 M) + ΔG_solv*(H⁺, 1 M → 1 M)
+#            = -6.28 + 1.894 + (-265.9) = -270.286 kcal/mol
+#
+# El término +δG_conc es necesario porque la reacción AH → A⁻ + H⁺ tiene
+# Δn = +1: en ΔG_solv(A⁻) − ΔG_solv(AH) el δG_conc de cada especie se cancela,
+# pero el H⁺ entra desde fase gas a 1 atm y debe convertirse a 1 M UNA vez.
+# Omitirlo (valor antiguo −272.18) subestima G(H⁺,aq) en 1.894 kcal/mol.
+#
+# MISMA constante para 'born' y 'direct': en este script ambos métodos se
+# reducen algebraicamente a  ΔG_aq = ΔG_total_aq(base − ácido) + G(H⁺,aq)
+# (los términos E_gas se cancelan, ver nota sobre compute_pka_montecarlo()).
+# Si G(H⁺,aq) difiriera entre métodos, mezclarlos en una misma cadena de pKa
+# sumaría dos escalas de referencia del protón.
+G_HPLUS_AQ_BORN   = G_HPLUS_GAS + DG_CONC_CORR + DG_SOLV_HPLUS   # kcal/mol ≈ -270.286
+G_HPLUS_AQ_DIRECT = G_HPLUS_AQ_BORN                              # kcal/mol ≈ -270.286
 
-# G(H⁺, aq) PARA EL MÉTODO DIRECTO (energías ya en CPCM) — Pliego & Riveros 2002
-G_HPLUS_AQ_DIRECT = -264.61   # kcal/mol   [Pliego & Riveros, JPCA 2002, 106, 7434]
+# Valor antiguo del método 'direct' (Pliego & Riveros, JPCA 2002, 106, 7434).
+# SOLO REFERENCIA — NO se usa en ningún cálculo. Ojo: −264.61 parece ser una
+# energía de solvatación del protón (sin el término de fase gas −6.28 ni la
+# conversión de estado estándar +1.89), no un G(H⁺,aq) total; verificar contra
+# el paper antes de citarlo como tal. Usarlo como G(H⁺,aq) total desplazaba
+# todos los pKa ≈ +4.2 unidades respecto a la constante consistente.
+G_HPLUS_AQ_PLIEGO_RIVEROS_LEGACY = -264.61
 
 # Alias retro-compatible: NO usar en código nuevo, mantenido solo por si algo
 # externo importa G_HPLUS_AQ directamente.
@@ -10699,6 +10770,15 @@ PH_STANDARD    = 7.0
 #   ninguna carga vecina) fuera de su dominio de calibración — pero el
 #   resultado corregido debe presentarse con esta salvedad explícita en el
 #   paper, no como un número con la misma confianza que 'carboxyl' (n=3).
+# ⚠ AVISO (revisión de constantes G(H⁺,aq)): los valores calc_harmonic /
+# calc_goodvibes de la tabla de abajo provienen de una calibración ANTIGUA
+# (born/CPCM, constantes previas: G(H⁺,aq) = −272.18 sin δG_conc para 'born',
+# −264.61 para 'direct'). NO son comparables con corridas hechas con la
+# constante unificada G(H⁺,aq) = −270.286 kcal/mol y, en particular, el bloque
+# "harmonic" que imprime `calibrate` sale de ESTA tabla (no de una corrida),
+# por lo que "cae" sobre el experimental solo por esa calibración vieja.
+# Re-correr `calibrate` con los datos actuales (o --calibration-file con
+# valores regenerados) antes de aplicar --empirical-correction.
 _REF_AA = "McMurry Table 26-1 / Carey & Giuliano (consistente con CRC)"
 _REF_AP = "4-aminopiridina, 9.17 a 25 °C (dato del proyecto)"
 
@@ -12210,32 +12290,43 @@ def compute_pka(
     verbose: bool = False,
     method: str = "auto",
     gcorr_source: str = "harmonic",
+    use_ensemble: bool = True,
 ) -> dict:
     """
     Calcula el pKa de AH → A⁻ + H⁺.
+
+    use_ensemble=True (default): ambos estados se tratan igual, con el G
+    Boltzmann del ensemble conformacional (data["G_boltz"][T]) en vez de solo
+    el best_conf — igual que ya hacían los pasos con macroestado (pKa₀/pKa₁).
+    Así una misma especie (p.ej. B) no entra al pKa₁ como ensemble y al pKa₂
+    como un único confórmero. En ese modo el ciclo se resuelve por la
+    reducción algebraica exacta (ver nota en compute_pka_montecarlo), así que
+    no usa SP de fase gas por confórmero. use_ensemble=False restituye el
+    comportamiento anterior (best_conf, con ciclo de Born explícito si hay
+    SP de fase gas).
 
     Dos métodos disponibles:
 
     1. "born"   — Ciclo de Born completo (Ho & Coote 2010). Requiere SP en
                   fase gas (04b_sp_gas) además del SP acuoso (CPCM):
                     ΔG_solv(X) = E_SP(CPCM) − E_SP(gas) + δG_conc
-                    ΔG_aq = ΔG_gas + ΔG_solv(A⁻) + ΔG_solv(H⁺) − ΔG_solv(AH)
-                  Usa G(H⁺,aq) implícito de Tissandier 1998 + Kelly 2006
-                  (−272.18 kcal/mol), calibrado para cerrar el ciclo gas+solv
-                  explícito.
+                    ΔG_aq = ΔG_gas + ΔG_solv(A⁻) + ΔG_solv(H⁺) + δG_conc(H⁺)
+                            − ΔG_solv(AH)
+                  Usa G(H⁺,aq) = G(H⁺,gas) + δG_conc + ΔG_solv(H⁺)
+                  = −6.28 + 1.894 − 265.9 = −270.286 kcal/mol (Tissandier
+                  1998 + Kelly 2006; el δG_conc del H⁺ se suma UNA vez por
+                  Δn = +1).
 
     2. "direct" — Método directo solo-CPCM. No requiere SP fase gas; usa
                   directamente G_total ya calculado con CPCM (E_SP_CPCM + G_corr)
-                  y la energía libre del protón de Pliego & Riveros 2002
-                  (G_HPLUS_AQ_DIRECT = −264.61 kcal/mol):
+                  y la MISMA G(H⁺,aq) que "born"
+                  (G_HPLUS_AQ_DIRECT = G_HPLUS_AQ_BORN = −270.286 kcal/mol):
                     ΔG_aq = G_total_CPCM(A⁻) − G_total_CPCM(AH) + G(H⁺, aq)
-                  IMPORTANTE: esta constante NO es la misma que la de "born".
-                  Las energías E_SP_CPCM ya incluyen el efecto de solvatación
-                  de la molécula vía el modelo de continuo; usar la constante
-                  de Tissandier/Kelly aquí sobreestima la estabilización del
-                  protón en ~8-10 kcal/mol porque esa constante está calibrada
-                  para emparejarse con energías en fase gas pura, no con
-                  energías ya en solución implícita.
+                  Con las definiciones de este script, "born" y "direct" se
+                  reducen algebraicamente a esta misma expresión (los E_gas
+                  se cancelan), así que comparten constante. El valor
+                  anterior de "direct" (−264.61, Pliego & Riveros 2002)
+                  omitía G(H⁺,gas) y δG_conc y desplazaba los pKa ≈ +4.2.
 
     method="auto" (default): usa "born" si hay SP fase gas disponibles para
     ambos confórmeros representativos; si no, cae automáticamente a "direct"
@@ -12334,7 +12425,9 @@ def compute_pka(
     # compute_tautomer_equilibrium(). Por eso tampoco hacía falta el SP de
     # fase gas para el lado que NO es macroestado: esos términos también se
     # cancelan ahí.
-    if data_acid.get("is_macrostate") or data_base.get("is_macrostate"):
+    _is_macro = bool(data_acid.get("is_macrostate") or data_base.get("is_macrostate"))
+    if _is_macro or use_ensemble:
+        # Rama de ensemble: macroestado y/o estados simples con G_boltz.
         # use_ensemble=True: para el lado que NO es macroestado (A o B), usa
         # el G_Boltzmann del ensemble conformacional completo en vez de solo
         # el best_conf — ver nota #3 del review. Para el lado que SÍ es
@@ -12359,6 +12452,7 @@ def compute_pka(
 
         result["conf_acid"] = g_acid.get("conf")
         result["conf_base"] = g_base.get("conf")
+        result["is_macro_pair"] = _is_macro
         result["theory_sp_acid"] = g_acid.get("theory_sp")
         result["theory_sp_base"] = g_base.get("theory_sp")
         result["aq_source_acid"] = data_acid.get("aq_source", "CPCM")
@@ -12403,7 +12497,9 @@ def compute_pka(
         if use_born_macro:
             result["G_hplus_aq_kcal"] = G_HPLUS_AQ_BORN
             result["method"] = "born"
-            if method == "auto":
+            if not _is_macro:
+                pass  # estados simples con ensemble: sin avisos de macroestado
+            elif method == "auto":
                 _warn(
                     f"method='auto' resolved to 'born' for the combined "
                     f"neutral+zwitterion macrostate "
@@ -12427,7 +12523,7 @@ def compute_pka(
         else:
             result["G_hplus_aq_kcal"] = G_HPLUS_AQ_DIRECT
             result["method"] = "direct"
-            if method == "direct":
+            if method == "direct" and _is_macro:
                 _warn(
                     f"method='direct' explicitly requested for the combined "
                     f"neutral+zwitterion macrostate "
@@ -12639,10 +12735,14 @@ def compute_pka(
 
         # ── ΔG_aq (ciclo de Born completo) ────────────────────────────────
         # ΔG_aq = ΔG_gas + ΔG_solv(A⁻) + ΔG_solv(H⁺) − ΔG_solv(AH)
+        # + DG_CONC_CORR (una vez): Δn = +1, el H⁺ entra desde gas a 1 atm y
+        # debe pasar a 1 M. El δG_conc de A⁻ y AH ya está en dG_solv_* y se
+        # cancela entre ellos; el del H⁺ no está en DG_SOLV_HPLUS (1 M→1 M).
         dG_aq_kcal = (
             dG_gas_kcal
             + dG_solv_base
             + DG_SOLV_HPLUS
+            + DG_CONC_CORR
             - dG_solv_acid
         )
         result["dG_aq_kcal"] = dG_aq_kcal
@@ -12685,24 +12785,25 @@ def compute_pka(
 #
 #   dG_gas       = (G_gas_base − G_gas_acid)·H2K + G_HPLUS_GAS
 #   dG_solv_X    = (E_aq_X − E_gas_X)·H2K + DG_CONC_CORR
-#   dG_aq(born)  = dG_gas + dG_solv_base + DG_SOLV_HPLUS − dG_solv_acid
+#   dG_aq(born)  = dG_gas + dG_solv_base + DG_SOLV_HPLUS + DG_CONC_CORR
+#                  − dG_solv_acid
 #
 #   Sustituyendo G_gas_X = E_gas_X + G_corr_X y expandiendo, TODOS los
 #   términos en E_gas_acid/E_gas_base se cancelan algebraicamente (y también
-#   DG_CONC_CORR, que aparece una vez con cada signo). Lo que queda es
+#   el DG_CONC_CORR de las especies, que aparece una vez con cada signo; el
+#   DG_CONC_CORR explícito del H⁺ NO se cancela: Δn = +1). Lo que queda es
 #   idéntico en forma al método directo:
 #
 #   dG_aq(born) = (E_aq_base − E_aq_acid + G_corr_base − G_corr_acid)·H2K
-#                 + (G_HPLUS_GAS + DG_SOLV_HPLUS)      # = G_HPLUS_AQ_BORN
+#                 + (G_HPLUS_GAS + DG_CONC_CORR + DG_SOLV_HPLUS)  # = G_HPLUS_AQ_BORN
 #
 #   dG_aq(direct) = (E_aq_base − E_aq_acid + G_corr_base − G_corr_acid)·H2K
-#                   + G_HPLUS_AQ_DIRECT
+#                   + G_HPLUS_AQ_DIRECT                           # (= la misma)
 #
-#   O sea: dado cómo compute_pka() arma el ciclo de Born hoy, "born" y
-#   "direct" tienen EXACTAMENTE la misma sensibilidad al ruido en E_aq/G_corr;
-#   solo difieren en qué constante de G(H⁺,aq) se suma. Por eso el modelo de
-#   ruido de abajo es el mismo para ambos métodos, y solo cambia el punto de
-#   partida (base_result["dG_aq_kcal"]). Si algún día cambia la fórmula de
+#   O sea: "born" y "direct" tienen EXACTAMENTE la misma sensibilidad al
+#   ruido en E_aq/G_corr y ahora también la misma constante G(H⁺,aq). El
+#   modelo de ruido de abajo es el mismo para ambos métodos, y solo cambia
+#   el punto de partida (base_result["dG_aq_kcal"]). Si algún día cambia la fórmula de
 #   compute_pka() (p. ej. DG_CONC_CORR deja de cancelarse), esta nota y el
 #   test test_born_and_direct_same_noise_sensitivity() dejan de ser válidos
 #   y hay que revisar esta función.
@@ -12925,6 +13026,7 @@ def _print_born_cycle(r: dict):
     print(f"  {'ΔG_solv(AH)  [kcal/mol]':<40} {fmt(r['dG_solv_acid_kcal'])}")
     print(f"  {'ΔG_solv(A⁻)  [kcal/mol]':<40} {fmt(r['dG_solv_base_kcal'])}")
     print(f"  {'ΔG_solv(H⁺) [Kelly 2006]  [kcal/mol]':<40} {DG_SOLV_HPLUS:>12.3f}")
+    print(f"  {'δG_conc(H⁺) 1 atm→1 M (Δn=+1) [kcal/mol]':<40} {DG_CONC_CORR:>12.3f}")
     print(f"  {'─'*40}  {'─'*12}")
     print(f"  {'ΔG_aq  [kcal/mol]':<40} {fmt(r['dG_aq_kcal'])}")
     print(f"  {'ΔG_aq  [kJ/mol]':<40} {r['dG_aq_kcal']*4.184:>12.3f}" if r['dG_aq_kcal'] else "")
@@ -12988,7 +13090,8 @@ def _print_born_cycle_macrostate(r: dict):
     aq_label_ms = aq_acid_ms if aq_acid_ms == aq_base_ms else f"{aq_acid_ms}/{aq_base_ms}"
     sep = "─" * 66
     print(f"\n  {sep}")
-    print(f"  BORN CYCLE (macrostate, algebraic reduction) — "
+    _kind = "macrostate" if r.get("is_macro_pair", True) else "Boltzmann ensemble"
+    print(f"  BORN CYCLE ({_kind}, algebraic reduction) — "
           f"{r['mol_acid']} → {r['mol_base']} + H⁺")
     print(f"  T = {r['T']:.2f} K")
     print(f"  {sep}")
@@ -12997,7 +13100,7 @@ def _print_born_cycle_macrostate(r: dict):
     print(f"  SP level (AH)  : {r['theory_sp_acid'] or '—'}")
     print(f"  SP level (A⁻)  : {r['theory_sp_base'] or '—'}")
     print()
-    print(f"  No explicit gas-phase SP is used for the mixture — the Born")
+    print(f"  No explicit gas-phase SP is used for the mixture/ensemble — the Born")
     print(f"  cycle reduces algebraically to the {aq_label_ms}-only energy difference")
     print(f"  (same E_gas-cancellation already present for a single species")
     print(f"  in this script; see the derivation note above")
@@ -13006,7 +13109,7 @@ def _print_born_cycle_macrostate(r: dict):
     print(f"  {'G_total_' + aq_acid_ms + '(AH)  [Eh]':<40} {r['G_total_acid_Eh']:>12.8f}")
     print(f"  {'G_total_' + aq_base_ms + '(A⁻)  [Eh]':<40} {r['G_total_base_Eh']:>12.8f}")
     print(f"  {'G(H⁺, aq)  [kcal/mol]':<40} {r['G_hplus_aq_kcal']:>12.3f}"
-          f"   [Tissandier 1998 + Kelly 2006]")
+          f"   [G_gas + δG_conc + ΔG_solv(H⁺)]")
     print(f"  {'─'*40}  {'─'*12}")
     dG = r["dG_aq_kcal"]
     print(f"  {'ΔG_aq  [kcal/mol]':<40} {dG:+12.3f}" if dG is not None else "")
@@ -13513,11 +13616,12 @@ def _print_single_pka(pka: dict, label: str):
             print(f"  ΔG_solv(ácido) = {pka['dG_solv_acid_kcal']:+.3f} kcal/mol")
             print(f"  ΔG_solv(base)  = {pka['dG_solv_base_kcal']:+.3f} kcal/mol")
             print(f"  ΔG_solv(H⁺)   = {DG_SOLV_HPLUS:+.3f} kcal/mol  [Kelly 2006]")
+            print(f"  δG_conc(H⁺)   = {DG_CONC_CORR:+.3f} kcal/mol  [1 atm→1 M, Δn=+1]")
         elif pka["method"] == "born":
             # Macroestado: ciclo de Born resuelto vía la reducción algebraica
             # (sin SP de fase gas para la mezcla) — ver compute_pka().
             print(f"  G(H⁺, aq)     = {pka['G_hplus_aq_kcal']:+.3f} kcal/mol "
-                  f"[Tissandier 1998 + Kelly 2006; macroestado, reducción algebraica]")
+                  f"[G_gas + δG_conc + ΔG_solv(H⁺); reducción algebraica]")
         else:
             print(f"  G(H⁺, aq)     = {pka['G_hplus_aq_kcal']:+.3f} kcal/mol "
                   f"[Pliego & Riveros 2002]")
@@ -13575,11 +13679,10 @@ def _cross_validate_ph_scale(
     pKa₂ (B→C, simple) pueden resolver a métodos distintos. pKa₁ resuelve a
     'born' siempre que involucre el macroestado (exacto ahí, sin necesitar
     SP fase gas — ver rama is_macrostate en compute_pka), mientras que pKa₂
-    depende de si existen SP fase gas para B y C. 'direct' y 'born' usan
-    constantes G(H⁺,aq) distintas y NO intercambiables (Pliego & Riveros
-    −264.61 kcal/mol vs. Tissandier/Kelly −272.18 kcal/mol) — sumar un pKa
-    'direct' con un pKa 'born' en la misma cadena mezcla dos escalas de
-    referencia del protón. Bajo method='auto' esto ahora se trata como error
+    depende de si existen SP fase gas para B y C. 'direct' y 'born' comparten ahora la misma
+    constante G(H⁺,aq) (−270.286 kcal/mol = G_gas + δG_conc + ΔG_solv), así
+    que el delta esperado es ~0; si deja de serlo, hay una escala del protón
+    distinta entre métodos (o SPs de fase gas inconsistentes). Bajo method='auto' esto ahora se trata como error
     duro en el caller (ver chequeo tras _cross_validate_ph_scale más abajo),
     no solo como diagnóstico.
 
@@ -14637,8 +14740,9 @@ Ejemplos:
                              "n_imag>0 o gcorr_source='harmonic' en vez de mRRHO)")
     parser.add_argument("--mc-sigma-hplus", type=float, default=2.5, metavar="KCAL",
                         help="σ asumida para G(H⁺,aq) — dispersión típica entre "
-                             "valores de literatura (Pliego-Riveros −264.61, "
-                             "Kelly-Cramer-Truhlar −265.9, Zhan-Dixon ≈−262.4; "
+                             "valores de literatura (G(H⁺,aq) total consistente "
+                             "−270.29; ΔG_solv solo: Kelly-Cramer-Truhlar −265.9, "
+                             "Pliego-Riveros −264.61, Zhan-Dixon ≈−262.4; "
                              "default: 2.5). Esta es sistemática y se comparte "
                              "entre los tres pKa's de la cadena, no se muestrea "
                              "independiente por tramo.")
@@ -15188,9 +15292,13 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
         # (G_HPLUS_AQ_DIRECT) en la misma cadena de pKa's suma dos escalas de
         # G(H+,aq) no intercambiables sin que nada lo señale. Se aborta en
         # vez de solo advertir.
+        # Con G_HPLUS_AQ_BORN == G_HPLUS_AQ_DIRECT (constante unificada) mezclar
+        # métodos ya no mezcla escalas del protón; solo se aborta si alguien
+        # vuelve a separar las constantes.
         if (args.method == "auto" and pka1_result is not None
                 and pka1_result.get("ok") and pka2_result.get("ok")
-                and pka1_result.get("method") != pka2_result.get("method")):
+                and pka1_result.get("method") != pka2_result.get("method")
+                and abs(G_HPLUS_AQ_DIRECT - G_HPLUS_AQ_BORN) > 1e-6):
             raise SystemExit(
                 f"\n❌ INCONSISTENT G(H+,aq) REFERENCE within the same pKa "
                 f"chain under method='auto':\n"
@@ -15199,8 +15307,8 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
                 f"   pKa₂ ({args.anion}→{args.dianion}) resolved to "
                 f"'{pka2_result.get('method')}'\n"
                 f"   These use different, non-interchangeable G(H+,aq) "
-                f"constants (Pliego-Riveros {G_HPLUS_AQ_DIRECT:.2f} kcal/mol "
-                f"vs. Tissandier/Kelly {G_HPLUS_AQ_BORN:.2f} kcal/mol).\n"
+                f"constants (direct {G_HPLUS_AQ_DIRECT:.2f} kcal/mol "
+                f"vs. born {G_HPLUS_AQ_BORN:.2f} kcal/mol).\n"
                 f"   Fix: either provide gas-phase SPs for all species in the "
                 f"chain (so 'auto' resolves to 'born' everywhere), or force "
                 f"a single method explicitly with --method direct or "
