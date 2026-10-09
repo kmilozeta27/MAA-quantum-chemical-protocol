@@ -1,0 +1,249 @@
+{
+  "meta": {
+    "created": "2026-10-04T16:39:45",
+    "T": 298.15,
+    "method_requested": "direct",
+    "method_resolved": "direct",
+    "gcorr": [
+      "goodvibes"
+    ],
+    "base": "/home/kmilozeta/PAPER1",
+    "script": "maaqc.py calibrate",
+    "solvent_model": "SMD",
+    "note": "pKa exp. a 25 °C; ver exp_ref por punto"
+  },
+  "points": [
+    {
+      "mol": "ASPARTIC",
+      "slot": "pKa0",
+      "type": "carboxyl",
+      "step": "A→R/D",
+      "group": "α-COOH",
+      "acid_files": "AA",
+      "base_files": "AR/AD",
+      "gcorr_source": "goodvibes",
+      "method": "direct",
+      "pKa_calc": 3.0151853494514906,
+      "pKa_exp": 1.88,
+      "error": 1.1351853494514907,
+      "ok": true
+    },
+    {
+      "mol": "ASPARTIC",
+      "slot": "pKa1",
+      "type": "carboxyl_2",
+      "step": "R/D→B",
+      "group": "β-COOH",
+      "acid_files": "AR/AD",
+      "base_files": "AB",
+      "gcorr_source": "goodvibes",
+      "method": "direct",
+      "pKa_calc": 5.961851505461702,
+      "pKa_exp": 3.65,
+      "error": 2.311851505461702,
+      "ok": true
+    },
+    {
+      "mol": "GLUTAMIC",
+      "slot": "pKa0",
+      "type": "carboxyl",
+      "step": "A→R/D",
+      "group": "α-COOH",
+      "acid_files": "GA",
+      "base_files": "GR/GD",
+      "gcorr_source": "goodvibes",
+      "method": "direct",
+      "pKa_calc": 3.697131352962261,
+      "pKa_exp": 2.19,
+      "error": 1.507131352962261,
+      "ok": true
+    },
+    {
+      "mol": "GLUTAMIC",
+      "slot": "pKa1",
+      "type": "carboxyl_2",
+      "step": "R/D→B",
+      "group": "γ-COOH",
+      "acid_files": "GR/GD",
+      "base_files": "GB",
+      "gcorr_source": "goodvibes",
+      "method": "direct",
+      "pKa_calc": 5.653708318383184,
+      "pKa_exp": 4.25,
+      "error": 1.4037083183831838,
+      "ok": true
+    },
+    {
+      "mol": "GLUTAMIC",
+      "slot": "pKa2",
+      "type": "amino_dianion",
+      "step": "B→C",
+      "group": "NH₃⁺ (2×COO⁻)",
+      "acid_files": "GB",
+      "base_files": "GC",
+      "gcorr_source": "goodvibes",
+      "method": "direct",
+      "pKa_calc": 15.679167085198713,
+      "pKa_exp": 9.67,
+      "error": 6.009167085198714,
+      "ok": true
+    },
+    {
+      "mol": "GLYCINE",
+      "slot": "pKa0",
+      "type": "carboxyl",
+      "step": "A→R/D",
+      "group": "COOH",
+      "acid_files": "GA",
+      "base_files": "GR/GD",
+      "gcorr_source": "goodvibes",
+      "method": "direct",
+      "pKa_calc": 3.8243077432276578,
+      "pKa_exp": 2.34,
+      "error": 1.484307743227658,
+      "ok": true
+    },
+    {
+      "mol": "GLYCINE",
+      "slot": "pKa1",
+      "type": "amino",
+      "step": "R/D→B",
+      "group": "NH₃⁺",
+      "acid_files": "GR/GD",
+      "base_files": "GB",
+      "gcorr_source": "goodvibes",
+      "method": "direct",
+      "pKa_calc": 11.590049577451515,
+      "pKa_exp": 9.6,
+      "error": 1.990049577451515,
+      "ok": true
+    },
+    {
+      "mol": "VALINE",
+      "slot": "pKa0",
+      "type": "carboxyl",
+      "step": "A→R/D",
+      "group": "COOH",
+      "acid_files": "VA",
+      "base_files": "VR/VD",
+      "gcorr_source": "goodvibes",
+      "method": "direct",
+      "pKa_calc": 3.6506316802307808,
+      "pKa_exp": 2.32,
+      "error": 1.330631680230781,
+      "ok": true
+    },
+    {
+      "mol": "VALINE",
+      "slot": "pKa1",
+      "type": "amino",
+      "step": "R/D→B",
+      "group": "NH₃⁺",
+      "acid_files": "VR/VD",
+      "base_files": "VB",
+      "gcorr_source": "goodvibes",
+      "method": "direct",
+      "pKa_calc": 12.762614882270377,
+      "pKa_exp": 9.62,
+      "error": 3.1426148822703777,
+      "ok": true
+    },
+    {
+      "mol": "AP",
+      "slot": "pair",
+      "type": "pyridinium",
+      "step": "APA→APR",
+      "group": "N–H⁺ (4-aminopiridinio)",
+      "acid_files": "APA",
+      "base_files": "APR",
+      "gcorr_source": "goodvibes",
+      "method": "direct",
+      "pKa_calc": 10.745338708768772,
+      "pKa_exp": 9.17,
+      "error": 1.575338708768772,
+      "ok": true
+    }
+  ],
+  "EMPIRICAL_CALIBRATION": {
+    "carboxyl": [
+      {
+        "mol": "Glycine",
+        "calc_harmonic": 2.5,
+        "calc_goodvibes": 3.824,
+        "exp": 2.34,
+        "exp_ref": "McMurry Table 26-1 / Carey & Giuliano (consistente con CRC)"
+      },
+      {
+        "mol": "Valine",
+        "calc_harmonic": 2.38,
+        "calc_goodvibes": 3.651,
+        "exp": 2.32,
+        "exp_ref": "McMurry Table 26-1 / Carey & Giuliano (consistente con CRC)"
+      },
+      {
+        "mol": "Aspartic",
+        "calc_harmonic": 2.09,
+        "calc_goodvibes": 3.015,
+        "exp": 1.88,
+        "exp_ref": "McMurry Table 26-1 / Carey & Giuliano (consistente con CRC) (α-COOH)"
+      },
+      {
+        "mol": "Glutamic",
+        "calc_harmonic": null,
+        "calc_goodvibes": 3.697,
+        "exp": 2.19,
+        "exp_ref": "McMurry Table 26-1 / Carey & Giuliano (consistente con CRC) (α-COOH)"
+      }
+    ],
+    "carboxyl_2": [
+      {
+        "mol": "Aspartic",
+        "calc_harmonic": null,
+        "calc_goodvibes": 5.962,
+        "exp": 3.65,
+        "exp_ref": "McMurry Table 26-1 / Carey & Giuliano (consistente con CRC) (β-COOH)"
+      },
+      {
+        "mol": "Glutamic",
+        "calc_harmonic": null,
+        "calc_goodvibes": 5.654,
+        "exp": 4.25,
+        "exp_ref": "McMurry Table 26-1 / Carey & Giuliano (consistente con CRC) (γ-COOH)"
+      }
+    ],
+    "amino": [
+      {
+        "mol": "Glycine",
+        "calc_harmonic": 11.95,
+        "calc_goodvibes": 11.59,
+        "exp": 9.6,
+        "exp_ref": "McMurry Table 26-1 / Carey & Giuliano (consistente con CRC)"
+      },
+      {
+        "mol": "Valine",
+        "calc_harmonic": 12.18,
+        "calc_goodvibes": 12.763,
+        "exp": 9.62,
+        "exp_ref": "McMurry Table 26-1 / Carey & Giuliano (consistente con CRC)"
+      }
+    ],
+    "amino_dianion": [
+      {
+        "mol": "Glutamic",
+        "calc_harmonic": 17.89,
+        "calc_goodvibes": 15.679,
+        "exp": 9.67,
+        "exp_ref": "McMurry Table 26-1 / Carey & Giuliano (consistente con CRC) (α-NH₃⁺ de Glu)"
+      }
+    ],
+    "pyridinium": [
+      {
+        "mol": "AP",
+        "calc_harmonic": null,
+        "calc_goodvibes": 10.745,
+        "exp": 9.17,
+        "exp_ref": "4-aminopiridina, 9.17 a 25 °C (dato del proyecto)"
+      }
+    ]
+  }
+}

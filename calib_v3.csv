@@ -1,0 +1,11 @@
+mol,slot,type,step,group,acid_files,base_files,gcorr_source,method,pKa_calc,pKa_exp,error,ok
+ASPARTIC,pKa0,carboxyl,A→R/D,α-COOH,AA,AR/AD,goodvibes,direct,3.0151853494514906,1.88,1.1351853494514907,True
+ASPARTIC,pKa1,carboxyl_2,R/D→B,β-COOH,AR/AD,AB,goodvibes,direct,5.961851505461702,3.65,2.311851505461702,True
+GLUTAMIC,pKa0,carboxyl,A→R/D,α-COOH,GA,GR/GD,goodvibes,direct,3.697131352962261,2.19,1.507131352962261,True
+GLUTAMIC,pKa1,carboxyl_2,R/D→B,γ-COOH,GR/GD,GB,goodvibes,direct,5.653708318383184,4.25,1.4037083183831838,True
+GLUTAMIC,pKa2,amino_dianion,B→C,NH₃⁺ (2×COO⁻),GB,GC,goodvibes,direct,15.679167085198713,9.67,6.009167085198714,True
+GLYCINE,pKa0,carboxyl,A→R/D,COOH,GA,GR/GD,goodvibes,direct,3.8243077432276578,2.34,1.484307743227658,True
+GLYCINE,pKa1,amino,R/D→B,NH₃⁺,GR/GD,GB,goodvibes,direct,11.590049577451515,9.6,1.990049577451515,True
+VALINE,pKa0,carboxyl,A→R/D,COOH,VA,VR/VD,goodvibes,direct,3.6506316802307808,2.32,1.330631680230781,True
+VALINE,pKa1,amino,R/D→B,NH₃⁺,VR/VD,VB,goodvibes,direct,12.762614882270377,9.62,3.1426148822703777,True
+AP,pair,pyridinium,APA→APR,N–H⁺ (4-aminopiridinio),APA,APR,goodvibes,direct,10.745338708768772,9.17,1.575338708768772,True
