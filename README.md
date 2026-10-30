@@ -65,7 +65,7 @@ quantum-mechanical free-energy calculation.
 ## The pipeline
 
 ```mermaid
-flowchart LR
+flowchart TD
     A["PubChem record<br/>protonation states<br/>A, R, D, B, C"] --> B["CREST<br/>conformer search<br/>GFN2-xTB, ALPB water"]
     B --> C["CENSO<br/>ensemble screening<br/>Boltzmann filter 5 percent"]
     C --> D["DFT optimisation<br/>wB97X-D3 / def2-SVP<br/>CPCM water"]
