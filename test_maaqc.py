@@ -287,6 +287,8 @@ def test_topology_covers_affinity():
     assert set(m.usable_pus()).isdisjoint(m.LP_CORE_SINGLES)
 
 
+@pytest.mark.skipif(len(os.sched_getaffinity(0)) < 8,
+                    reason="necesita ≥ 8 CPUs lógicas (p.ej. runner de CI con 4)")
 def test_cpu_lock_is_transactional(tmp_path, monkeypatch):
     lock = tmp_path / "lock.json"
     monkeypatch.setattr(m, "CPU_LOCK_FILE", lock)
