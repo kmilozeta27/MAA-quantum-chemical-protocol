@@ -66,15 +66,15 @@ quantum-mechanical free-energy calculation.
 
 ```mermaid
 flowchart LR
-    A["PubChem record<br/>+ protonation states<br/>A⁺ · R · D · B⁻ · C²⁻"] --> B["CREST<br/>conformer search<br/>GFN2-xTB / ALPB(water)"]
-    B --> C["CENSO<br/>ensemble screening<br/>Boltzmann filter ≥5 %"]
-    C --> D["DFT optimisation<br/>ωB97X-D3/def2-SVP<br/>CPCM(water)"]
+    A["PubChem record<br/>protonation states<br/>A, R, D, B, C"] --> B["CREST<br/>conformer search<br/>GFN2-xTB, ALPB water"]
+    B --> C["CENSO<br/>ensemble screening<br/>Boltzmann filter 5 percent"]
+    C --> D["DFT optimisation<br/>wB97X-D3 / def2-SVP<br/>CPCM water"]
     D --> E["Numerical frequencies<br/>no imaginary modes<br/>thermal corrections"]
-    E --> F["Single points<br/>def2-TZVPD<br/>gas · CPCM · SMD"]
-    F --> G["TD-DFT<br/>15 excited states<br/>NTOs · ESP · orbitals"]
+    E --> F["Single points<br/>def2-TZVPD<br/>gas, CPCM, SMD"]
+    F --> G["TD-DFT<br/>15 excited states<br/>NTOs, ESP, orbitals"]
     F --> H["pKa cycle<br/>class-resolved calibration<br/>Monte Carlo uncertainty"]
-    H --> I["Speciation<br/>pH 7.0 / 8.1<br/>4 temperatures"]
-    G --> J["Docking-ready structures<br/>+ electronic descriptors"]
+    H --> I["Speciation<br/>pH 7.0 and 8.1<br/>4 temperatures"]
+    G --> J["Docking-ready structures<br/>and electronic descriptors"]
     I --> J
 ```
 
