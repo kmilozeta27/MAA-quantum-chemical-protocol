@@ -1,0 +1,9 @@
+# Python dependencies of maaqc.py
+# External programs (install separately): ORCA 6.1.1, CREST 3.0.2, xTB 6.7.1, CENSO 3.0.9, Multiwfn
+numpy
+pandas
+ase
+matplotlib
+openpyxl
+goodvibes
+pytest

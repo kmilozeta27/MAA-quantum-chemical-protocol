@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "MAA-quantum-chemical-protocol: a calibrated quantum-chemical protocol for mycosporine-like amino acids"
+authors:
+  - family-names: "Zúñiga Jara"
+    given-names: "Camilo"
+license: MIT
+repository-code: "https://github.com/kmilozeta27/MAA-quantum-chemical-protocol"
+keywords:
+  - mycosporine-like amino acids
+  - quantum chemistry
+  - pKa
+  - TD-DFT
+  - conformational sampling
+  - protonation state

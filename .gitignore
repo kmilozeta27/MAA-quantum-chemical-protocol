@@ -69,3 +69,7 @@ __pycache__/
 # CENSO: guardar solo el resumen (json/out/xyz/log de la carpeta raíz),
 # no los miles de subcálculos por confórmero (0_PRESCREENING/CONF*/…)
 **/runs/**/01b_censo*/*/
+
+# === cachés regenerables de maaqc.py ===
+*.gv_cache.json
+.ruff_cache/
