@@ -55,7 +55,7 @@ tools/restore_molecule.sh DG                               # bring back text res
 tools/restore_molecule.sh DG /media/$USER/DISK1/PAPER1     # ... plus binaries from the drive
 ```
 ## Why this design
-The pipeline is built the way production quantum-chemistry software is built, not the way a one-off calculation is run: each stage is a discrete, resumable unit with a defined input/output contract, so a failure at NumFreq or a stalled TD-DFT job doesn't require re-running CREST from scratch. This mirrors the orchestration logic of tools like CREST/CENSO/ORCA themselves
+The pipeline is built the way production quantum-chemistry software is built: each stage is a discrete, resumable unit with a defined input/output contract, so a failure at NumFreq or a stalled TD-DFT job doesn't require re-running CREST from scratch. This mirrors the orchestration logic of tools like CREST/CENSO/ORCA themselves
 
 ## Expected impact
  
@@ -70,4 +70,4 @@ In active development.
  
 ## Authorship
  
-Camilo Zúñiga Jara, in collaboration with Mg. Tania Tapia (UFRO), Dr. Ricardo Veloso (UFRO) and Dr. Desmond Macleod (UAutónoma de Santiago).
+Camilo Zúñiga Jara, in collaboration with Dr. Ricardo Veloso (UFRO) and Dr. Desmond Macleod (UAutónoma de Santiago).
