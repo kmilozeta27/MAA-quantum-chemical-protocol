@@ -57,6 +57,29 @@ Colisiones de nombres resueltas (19 detectadas por AST):
 
 numpy, pandas y ase.io se cargan de forma perezosa: `maaqc.py status`
 ya no paga el arranque de pandas/ase, que era ~1 s de los scripts viejos.
+
+REVISIÓN 2026-10-30 (recuperabilidad / consistencia)
+───────────────────────────────────────────────────────────────────────────────
+  · Cada job ORCA lleva <job>/job.json con la huella del cálculo (input
+    normalizado + geometría de origen), estado, CPUs, tiempos y commit.
+    Un .out terminado con otros parámetros ya no se reutiliza en silencio:
+    se avisa, y con `run --rerun-stale` se archiva y se recalcula.
+  · Nada se pisa: outputs fallidos, obsoletos, no convergidos y gradientes
+    NumFreq de otra geometría van a <job>/_archive/<fecha>_<motivo>/.
+  · OPT: se exige "THE OPTIMIZATION HAS CONVERGED"; una OPT interrumpida o
+    que agotó MaxIter se reanuda desde opt.xyz (+ MORead de opt.gbw).
+  · Timeouts de ORCA/CENSO matan el process group completo (antes quedaban
+    workers de mpirun huérfanos). Ctrl-C detiene también la cola multi-mol.
+  · Reserva de CPUs entre instancias en una sola transacción con flock;
+    topología leída de /sys (la tabla fija del T14 queda de respaldo).
+  · NumFreq, SP_NROOT y ADC2 pasan por el mismo ejecutor por lotes
+    (_run_batched) que OPT/SP/TDDFT, con taskset y MAAQC_PE_LIST.
+  · TDDFT: `Guess MORead` — antes ORCA ignoraba MOInp "sp.gbw".
+  · pKa(T): G(H⁺,gas) y δG_conc dependen de T (g_hplus_gas/dg_conc_corr);
+    a 298.15 K los valores son idénticos a los de antes.
+  · `collect` usa la misma termoquímica que `pka` (GoodVibes a cada T).
+  · GoodVibes con caché en memoria y en <freq>.out.gv_cache.json.
+  · Tests: `pytest test_maaqc.py`.
 """
 
 from __future__ import annotations
@@ -110,6 +133,37 @@ T_STD       = 298.15               # K — temperatura de referencia para pKa
 G_HPLUS_GAS   = -6.28      # kcal/mol  G(H⁺, gas)        Tissandier et al. 1998
 DG_SOLV_HPLUS = -265.9     # kcal/mol  ΔG_solv(H⁺)       Kelly et al. 2006
 DG_CONC_CORR  = 1.894      # kcal/mol  δG_conc 1 atm→1 M  RT·ln(24.5)
+
+# ── Dependencia en T de las constantes del protón ────────────────────────────
+# Las tres constantes de arriba son valores a 298.15 K. El escaneo pKa(T)
+# (250–310 K) las usaba fijas, así que solo G_corr y RT·ln10 variaban con T
+# — a 250 K eso sesgaba el pKa en ≈ −0.7 unidades. Para el H⁺ (gas ideal
+# monoatómico, sin grados internos) ambas partes tienen forma cerrada:
+#     H(T) = 5/2·RT,   S(T) = S°₂₉₈ + 5/2·R·ln(T/298.15)   (Sackur–Tetrode a P cte)
+#     δG_conc(T) = RT·ln(R'T / 1 atm · 1 M) = RT·ln(0.082057·T)
+# Ambas funciones devuelven EXACTAMENTE las constantes de arriba a 298.15 K
+# (se anclan a ellas), así los resultados a T_STD no cambian.
+# ΔG_solv(H⁺) no tiene una dependencia en T tabulada comparable: se mantiene
+# en el valor de Kelly 2006 (298 K) y se declara como aproximación.
+R_LATM = 0.082057366       # L·atm/(mol·K)
+S_HPLUS_GAS_298 = (2.5 * R_KCAL * T_STD - G_HPLUS_GAS) / T_STD   # kcal/(mol·K) ≈ 26.0 cal
+
+
+def g_hplus_gas(T: float = T_STD) -> float:
+    """G(H⁺, gas, 1 atm) a la temperatura T [kcal/mol]."""
+    S = S_HPLUS_GAS_298 + 2.5 * R_KCAL * math.log(T / T_STD)
+    return 2.5 * R_KCAL * T - T * S
+
+
+def dg_conc_corr(T: float = T_STD) -> float:
+    """δG_conc 1 atm → 1 M a la temperatura T [kcal/mol]."""
+    return DG_CONC_CORR + (R_KCAL * T * math.log(R_LATM * T)
+                           - R_KCAL * T_STD * math.log(R_LATM * T_STD))
+
+
+def g_hplus_aq(T: float = T_STD) -> float:
+    """G(H⁺, aq, 1 M) = G_gas(T) + δG_conc(T) + ΔG_solv(H⁺) [kcal/mol]."""
+    return g_hplus_gas(T) + dg_conc_corr(T) + DG_SOLV_HPLUS
 
 # ── GoodVibes ────────────────────────────────────────────────────────────────
 GV_CONDA_ENV = "sciencebitch"
@@ -206,8 +260,8 @@ def _resolve_bin(name: str, conda_env: str = "sciencebitch") -> Path:
                     candidate = Path(env_path) / "bin" / name
                     if candidate.is_file() and os.access(candidate, os.X_OK):
                         return candidate
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.getLogger("maaqc").debug(f"_resolve_bin({name!r}) vía conda: {_exc!r}")
     return Path(name)
 
 
@@ -269,6 +323,11 @@ def _find_paper_root(start: Optional[Path] = None) -> Path:
         return Path(env_root).expanduser().resolve()
 
     here = (start or Path.cwd()).resolve()
+    # 1ª pasada: raíz del repo (.git) — un README.md suelto en una
+    # subcarpeta (p. ej. de una molécula) ya no corta la búsqueda antes.
+    for candidate in [here, *here.parents]:
+        if (candidate / ".git").exists():
+            return candidate
     markers = {"README.md", "LICENSE", "tasks.json", "scripts"}
     for candidate in [here, *here.parents]:
         if any((candidate / m).exists() for m in markers):
@@ -278,7 +337,11 @@ def _find_paper_root(start: Optional[Path] = None) -> Path:
 
 PAPER_ROOT = _find_paper_root()   # carpeta madre del proyecto (auto-detectada)
 PIPE_WORK_ROOT  = PAPER_ROOT                        # alias, usado solo por print_status()
-TMPL_DIR   = Path("templates")
+# templates/ y molecules.yml se buscan en el cwd (compatibilidad) y, si no
+# están ahí, en la raíz del proyecto — antes solo en el cwd, así que el
+# resultado dependía de desde dónde se lanzara el script.
+TMPL_DIRS  = [Path.cwd() / "templates", PAPER_ROOT / "templates"]
+TMPL_DIR   = TMPL_DIRS[0]   # alias retro-compatible
 MULT       = 1                      # multiplicidad siempre 1
 CREST_TIMEOUT_HOURS = 24.0          # timeout CREST (horas)
 CENSO_TIMEOUT_HOURS = 24.0          # timeout CENSO pre-screening (horas)
@@ -368,7 +431,8 @@ def resolve_charge(mol_name: str, explicit_charge: Optional[int],
         return explicit_charge
 
     if inferred is not None:
-        msg = f"Carga inferida automáticamente para '{mol_name}': {inferred:+d} (sufijo '{mol_name[-1].upper()}')"
+        suffix = mol_name.rstrip("0123456789")[-1].upper()
+        msg = f"Carga inferida automáticamente para '{mol_name}': {inferred:+d} (sufijo '{suffix}')"
         log.info(msg) if log else print(msg)
         return inferred
 
@@ -472,6 +536,7 @@ MAXCORE_ADC2    = 5500
 OPT_BATCH_SIZE  = 3
 SP_BATCH_SIZE   = 3
 TDDFT_BATCH_SIZE = 2
+NUMFREQ_BATCH_SIZE = 1   # recalculado en _setup_run_resources() según cores y RAM
 
 # ── Topología REAL de este ThinkPad T14 (Core Ultra 7), confirmada con
 #    `lscpu -e`. Elevada a nivel de módulo porque tanto assign_cpu_lists()
@@ -516,9 +581,94 @@ CORE_TO_PUS: dict[int, list[int]] = {
     6: [8], 7: [9], 8: [10], 9: [11],            # E-cores
     10: [12], 11: [13],                          # LP E-cores
 }
+
+
+def _detect_cpu_topology() -> Optional[tuple[list[list[int]], list[int], list[int],
+                                              dict[int, list[int]]]]:
+    """
+    Lee la topología real desde /sys (solo los PUs de sched_getaffinity):
+
+      · núcleos con ≥2 hilos SMT en una CPU híbrida  → P_CORE_BLOCKS
+      · núcleos de 1 hilo que comparten el L3 principal → E_CORE_SINGLES
+      · núcleos de 1 hilo fuera de ese L3 (LP E-cores) → LP_CORE_SINGLES
+
+    En una CPU homogénea con SMT se usa un PU por núcleo físico como
+    "single" (los hermanos SMT quedan fuera), para que los jobs de ≥3
+    ranks sigan recibiendo núcleos físicos reales. El índice de Core para
+    PRTE es el orden de los núcleos por su primer PU (orden de hwloc).
+    Devuelve None si /sys no es legible (se usa la tabla fija del T14).
+    """
+    base = Path("/sys/devices/system/cpu")
+    try:
+        pus = sorted(os.sched_getaffinity(0))
+        groups: dict[tuple[int, ...], None] = {}
+        l3_of: dict[int, str] = {}
+        for pu in pus:
+            sib = (base / f"cpu{pu}" / "topology" / "thread_siblings_list").read_text().strip()
+            groups[tuple(sorted(_parse_cpu_list(sib) & set(pus)))] = None
+            l3 = ""
+            for idx in (base / f"cpu{pu}" / "cache").glob("index*"):
+                if (idx / "level").read_text().strip() == "3":
+                    l3 = (idx / "shared_cpu_list").read_text().strip()
+            l3_of[pu] = l3
+    except (OSError, ValueError, AttributeError):
+        return None
+    cores = sorted(groups, key=lambda g: g[0])
+    if not cores:
+        return None
+    from collections import Counter
+    main_l3 = Counter(v for v in l3_of.values() if v).most_common(1)
+    main_l3 = main_l3[0][0] if main_l3 else ""
+    hybrid = any(len(g) >= 2 for g in cores) and any(len(g) == 1 for g in cores)
+
+    p_blocks, e_singles, lp_singles = [], [], []
+    for g in cores:
+        if len(g) >= 2:
+            if hybrid:
+                p_blocks.append(list(g))
+            else:
+                e_singles.append(g[0])
+        elif main_l3 and l3_of.get(g[0]) != main_l3:
+            lp_singles.append(g[0])
+        else:
+            e_singles.append(g[0])
+    core_to_pus = {i: list(g) for i, g in enumerate(cores)}
+    return p_blocks, e_singles, lp_singles, core_to_pus
+
+
+def _parse_cpu_list(text: str) -> set[int]:
+    """'0-3,8,10-11' → {0,1,2,3,8,10,11}"""
+    out: set[int] = set()
+    for part in text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo, hi = part.split("-")
+            out.update(range(int(lo), int(hi) + 1))
+        else:
+            out.add(int(part))
+    return out
+
+
+# La tabla de arriba es el respaldo; si /sys es legible se usa la topología
+# real, así el script no lanza KeyError en PU_TO_CORE en otra máquina.
+_topo = _detect_cpu_topology()
+if _topo is not None:
+    P_CORE_BLOCKS, E_CORE_SINGLES, LP_CORE_SINGLES, CORE_TO_PUS = _topo
+    CPU_TOPOLOGY_SOURCE = "sysfs"
+else:
+    CPU_TOPOLOGY_SOURCE = "tabla fija (ThinkPad T14)"
+del _topo
+
 PU_TO_CORE: dict[int, int] = {
     pu: core for core, pus in CORE_TO_PUS.items() for pu in pus
 }
+
+
+def usable_pus() -> list[int]:
+    """PUs que el pipeline reparte de verdad (P + E; los LP E-cores no cuentan)."""
+    return sorted({pu for b in P_CORE_BLOCKS for pu in b} | set(E_CORE_SINGLES))
 
 # OMP_ENV se construye bajo demanda en build_omp_env() para que siempre
 # refleje el valor actualizado de NPROCS (nunca queda obsoleto si el
@@ -633,7 +783,8 @@ EXP_LAMBDA_FALLBACK: dict[str, float] = {
     "SR": 334.0,
 }
 
-_MOLECULES_YML = Path("molecules.yml")   # ruta relativa al CWD donde corre el script
+_MOLECULES_YML = next((p for p in (Path.cwd() / "molecules.yml", PAPER_ROOT / "molecules.yml")
+                       if p.exists()), PAPER_ROOT / "molecules.yml")
 
 
 def load_exp_lambda(mol_name: str, log: logging.Logger) -> Optional[float]:
@@ -756,6 +907,10 @@ def _signal_process_group(p: subprocess.Popen, sig: int) -> None:
     """
     try:
         pgid = os.getpgid(p.pid)
+        if pgid == os.getpgrp():
+            # Sin start_new_session el hijo comparte NUESTRO grupo: killpg
+            # mataría también a maaqc.py. Se cae al PID directo.
+            raise OSError("mismo process group que el padre")
         os.killpg(pgid, sig)
     except (ProcessLookupError, PermissionError, OSError):
         # El proceso ya no existe, o no se pudo resolver el pgid (p.ej. si
@@ -767,6 +922,19 @@ def _signal_process_group(p: subprocess.Popen, sig: int) -> None:
             else:
                 p.terminate()
         except OSError:
+            pass
+
+
+def _terminate_group(p: subprocess.Popen, grace: float = 10.0) -> None:
+    """SIGTERM al grupo de procesos de p; SIGKILL si no muere en `grace` s."""
+    _signal_process_group(p, signal.SIGTERM)
+    try:
+        p.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        _signal_process_group(p, signal.SIGKILL)
+        try:
+            p.wait(timeout=30)
+        except subprocess.TimeoutExpired:
             pass
 
 
@@ -902,7 +1070,10 @@ class ResourceProfile:
         kernels). Si psutil no está disponible, estima 28 GB (valor
         conservador para el ThinkPad T14 Gen5 con 32 GB).
         """
-        total_cores = os.cpu_count() or 4
+        # Antes os.cpu_count() (14 en el T14), que contaba los 2 LP E-cores
+        # que assign_cpu_lists() evita: el perfil se dimensionaba para CPUs
+        # que nunca se iban a asignar.
+        total_cores = len(usable_pus()) or os.cpu_count() or 4
 
         try:
             import psutil
@@ -1047,9 +1218,11 @@ def setup_logging(mol_dir: Path) -> logging.Logger:
     Crea un logger con nombre único por molécula para evitar que dos
     instancias paralelas del script compartan handlers y dupliquen líneas.
     """
-    # mol_dir es <grupo>/runs/<mol_name>/ — el nombre de la molécula es
-    # directamente mol_dir.name (no mol_dir.parent.name, que sería "runs").
-    logger_name = f"pipeline.{mol_dir.name}"
+    # El nombre del logger es la RUTA completa: con solo mol_dir.name, dos
+    # grupos con el mismo estado (MGLYVAL/runs/A y SHI/runs/A) en un mismo
+    # proceso (--mol repetido) compartían handlers y el segundo escribía en
+    # el pipeline.log del primero.
+    logger_name = f"pipeline.{mol_dir.resolve()}"
     log = logging.getLogger(logger_name)
 
     # Evitar añadir handlers duplicados si se llama más de una vez
@@ -1057,8 +1230,11 @@ def setup_logging(mol_dir: Path) -> logging.Logger:
         return log
 
     log.setLevel(logging.DEBUG)
+    log.propagate = False
+    # Fecha completa: CREST/CENSO/NumFreq duran > 24 h y el log se acumula
+    # entre corridas; con solo HH:MM:SS era ambiguo.
     fmt = logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s",
-                            datefmt="%H:%M:%S")
+                            datefmt="%Y-%m-%d %H:%M:%S")
     # consola
     ch = logging.StreamHandler(sys.stdout)
     ch.setLevel(logging.INFO)
@@ -1071,6 +1247,24 @@ def setup_logging(mol_dir: Path) -> logging.Logger:
 
     log.addHandler(ch)
     log.addHandler(fh)
+
+    # Los diagnósticos internos (logger "maaqc": excepciones toleradas,
+    # cachés, manifiestos) van al pipeline.log de la corrida en curso.
+    core = logging.getLogger("maaqc")
+    core.setLevel(logging.DEBUG)
+    core.propagate = False
+    for h in [h for h in core.handlers if isinstance(h, logging.FileHandler)]:
+        core.removeHandler(h)
+    core.addHandler(fh)
+
+    # Encabezado de trazabilidad (solo al archivo): qué versión del script,
+    # con qué argumentos y sobre qué binarios/topología corrió esto.
+    prov = _provenance()
+    fh.handle(log.makeRecord(log.name, logging.INFO, __file__, 0,
+        "── maaqc.py  commit=%s%s  sha1=%s  argv=%s  orca=%s  cpu_topo=%s  host=%s",
+        (prov["maaqc_git"] or "?", " (modificado)" if prov["maaqc_dirty"] else "",
+         prov["maaqc_sha1"], " ".join(sys.argv), prov["orca_bin"],
+         CPU_TOPOLOGY_SOURCE, os.uname().nodename), None))
     return log
 
 
@@ -1237,6 +1431,7 @@ end
 %maxcore {MAXCORE}
 %scf
   MaxIter 300
+  Guess   MORead
   MOInp "{GBW_PATH}"
 end
 %tddft
@@ -1274,11 +1469,21 @@ end
 """
 
 
+_TEMPLATE_OVERRIDES_SEEN: set[str] = set()
+
+
 def get_template(step: str) -> str:
     """Devuelve el template inline. Si existe un .tmpl en templates/, lo prioriza."""
-    tmpl_file = TMPL_DIR / f"{step}.inp.tmpl"
-    if tmpl_file.exists():
-        return tmpl_file.read_text()
+    for d in TMPL_DIRS:
+        tmpl_file = d / f"{step}.inp.tmpl"
+        if tmpl_file.exists():
+            text = tmpl_file.read_text()
+            if step not in _TEMPLATE_OVERRIDES_SEEN:
+                _TEMPLATE_OVERRIDES_SEEN.add(step)
+                print(f"AVISO: template '{step}' tomado de {tmpl_file} "
+                      f"(sha1 {_sha1_bytes(text.encode())[:12]}), no del inline",
+                      file=sys.stderr)
+            return text
     mapping = {
         "opt":             TEMPLATE_OPT,
         "numfreq":         TEMPLATE_NUMFREQ,
@@ -1297,29 +1502,317 @@ def get_template(step: str) -> str:
 #  VERIFICACIÓN DE ÉXITO
 # ─────────────────────────────────────────────
 
+_ORCA_OK_MARK = b"ORCA TERMINATED NORMALLY"
+_ORCA_TAIL_BYTES = 16384
+
+
+def _read_tail(path: Path, nbytes: int = _ORCA_TAIL_BYTES) -> bytes:
+    """Últimos `nbytes` de un archivo (sin cargar outputs de cientos de MB)."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        f.seek(max(0, f.tell() - nbytes))
+        return f.read()
+
+
 def check_success(out_file: Path) -> bool:
-    """Devuelve True si ORCA terminó normalmente."""
-    if not out_file.exists():
-        return False
+    """Devuelve True si ORCA terminó normalmente.
+
+    La marca está siempre al final del .out, así que basta con leer la cola
+    (antes se leía el archivo completo, varias veces por job).
+    """
     try:
-        text = out_file.read_text(errors="replace")
+        return _ORCA_OK_MARK in _read_tail(out_file)
     except OSError:
         return False
-    return "ORCA TERMINATED NORMALLY" in text
+
+
+def check_opt_converged(out_file: Path) -> bool:
+    """True si la OPT terminó normalmente Y la geometría convergió.
+
+    ORCA termina "normalmente" también cuando agota MaxIter sin converger
+    ("The optimization did not converge but reached the maximum number of
+    optimization cycles"), así que TERMINATED NORMALLY no basta.
+    """
+    if not check_success(out_file):
+        return False
+    try:
+        data = out_file.read_bytes()
+    except OSError:
+        return False
+    return (b"THE OPTIMIZATION HAS CONVERGED" in data
+            and b"did not converge" not in data)
+
+
+_FREQ_LINE_RE = re.compile(r"^\s*\d+:\s+(-?\d+\.\d+)\s+cm\*\*-1")
 
 
 def check_no_imaginary(out_file: Path) -> bool:
-    """Devuelve True si no hay frecuencias imaginarias (NUMFREQ)."""
-    if not out_file.exists():
-        return True
+    """True si el ÚLTIMO bloque VIBRATIONAL FREQUENCIES no tiene modos negativos.
+
+    Un .out ausente o ilegible devuelve False (antes devolvía True, es decir
+    "sin imaginarias" para un cálculo que no existe). Solo se miran las
+    líneas del bloque de frecuencias, no cualquier línea "N: -x" del output.
+    """
     try:
         text = out_file.read_text(errors="replace")
     except OSError:
-        return True
-    for line in text.splitlines():
-        if re.match(r"\s+\d+:\s+-\d", line):
+        return False
+    start = text.rfind("VIBRATIONAL FREQUENCIES")
+    if start == -1:
+        return False
+    end = text.find("NORMAL MODES", start)
+    block = text[start:end if end != -1 else None]
+    for line in block.splitlines():
+        m = _FREQ_LINE_RE.match(line)
+        if m and float(m.group(1)) < 0.0:
             return False
     return True
+
+
+# ─────────────────────────────────────────────
+#  ESCRITURA ATÓMICA / MANIFIESTO POR JOB / ARCHIVO
+# ─────────────────────────────────────────────
+#
+# Cada directorio de job ORCA lleva un job.json con la "huella" (spec_sha1)
+# del cálculo: el .inp normalizado (sin %pal/%maxcore ni bloques de
+# restart, que no cambian la química) + la geometría referenciada por
+# `* xyzfile`. Un .out "TERMINATED NORMALLY" solo se reutiliza si la huella
+# coincide; si no coincide (cambió --charge, el template, la geometría de
+# origen...) se avisa y, con --rerun-stale, se archiva y se recalcula.
+# Los outputs que se reemplazan nunca se borran: van a <job>/_archive/.
+
+JOB_MANIFEST = "job.json"
+RERUN_STALE: bool = False   # --rerun-stale en `maaqc.py run`
+
+_XYZFILE_RE = re.compile(r"^\*\s*xyzfile\s+-?\d+\s+\d+\s+(\S+)", re.MULTILINE)
+_SPEC_STRIP_RES = (
+    re.compile(r"^%pal\b.*?^\s*end\s*$", re.MULTILINE | re.DOTALL | re.IGNORECASE),
+    re.compile(r"^%maxcore\b.*$", re.MULTILINE | re.IGNORECASE),
+    re.compile(r"^\s*Restart\s+true\s*$", re.MULTILINE | re.IGNORECASE),
+    re.compile(r"^%freq\s*\n\s*end\s*$", re.MULTILINE | re.IGNORECASE),
+    re.compile(r"^!\s*MORead\s*$", re.MULTILINE | re.IGNORECASE),
+    re.compile(r"^%moinp\b.*$", re.MULTILINE | re.IGNORECASE),
+    # El guess orbital y la memoria por bloque no cambian la química:
+    re.compile(r"^\s*MOInp\b.*$", re.MULTILINE | re.IGNORECASE),
+    re.compile(r"^\s*Guess\s+MORead\s*$", re.MULTILINE | re.IGNORECASE),
+    re.compile(r"^\s*MaxCore\s+\d+\s*$", re.MULTILINE),
+)
+
+
+def atomic_write(path: Path, text: str, encoding: str = "utf-8") -> None:
+    """Escribe `text` en `path` vía archivo temporal + os.replace.
+
+    Un corte a mitad de escritura deja el archivo anterior intacto en vez
+    de un JSON/inp truncado.
+    """
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding=encoding) as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _sha1_bytes(data: bytes) -> str:
+    import hashlib
+    return hashlib.sha1(data).hexdigest()
+
+
+def _normalize_inp(inp_text: str) -> str:
+    for rx in _SPEC_STRIP_RES:
+        inp_text = rx.sub("", inp_text)
+    lines = [ln.rstrip() for ln in inp_text.splitlines()]
+    return "\n".join(ln for ln in lines if ln.strip())
+
+
+def _normalize_xyz(data: bytes) -> bytes:
+    """Solo las líneas de átomos (el comentario de ORCA trae la energía)."""
+    lines = data.decode(errors="replace").splitlines()
+    return "\n".join(" ".join(ln.split()) for ln in lines[2:] if ln.strip()).encode()
+
+
+def xyz_sha1(path: Path) -> Optional[str]:
+    try:
+        return _sha1_bytes(_normalize_xyz(Path(path).read_bytes()))
+    except OSError:
+        return None
+
+
+def job_spec_sha1(inp_text: str, xyz_bytes: Optional[bytes] = None) -> str:
+    payload = _normalize_inp(inp_text).encode()
+    if xyz_bytes is not None:
+        payload += b"\0xyz\0" + _normalize_xyz(xyz_bytes)
+    return _sha1_bytes(payload)
+
+
+def _now_iso() -> str:
+    return _dt_datetime.now().isoformat(timespec="seconds")
+
+
+def read_manifest(job_dir: Path) -> dict:
+    try:
+        return json.loads((Path(job_dir) / JOB_MANIFEST).read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def update_manifest(job_dir: Path, **fields) -> None:
+    """Mezcla `fields` en <job_dir>/job.json (escritura atómica, nunca lanza)."""
+    try:
+        data = read_manifest(job_dir)
+        data.update(fields)
+        atomic_write(Path(job_dir) / JOB_MANIFEST,
+                     json.dumps(data, indent=2, ensure_ascii=False, default=str) + "\n")
+    except OSError as e:
+        logging.getLogger("maaqc").debug(f"no se pudo escribir {job_dir}/{JOB_MANIFEST}: {e}")
+
+
+def archive_files(job_dir: Path, files: list[Path], reason: str) -> Optional[Path]:
+    """Mueve `files` a <job_dir>/_archive/<timestamp>_<reason>/ (nunca borra)."""
+    files = [f for f in files if f.exists()]
+    if not files:
+        return None
+    dest = Path(job_dir) / "_archive" / f"{_dt_datetime.now():%Y%m%d-%H%M%S}_{reason}"
+    n = 1
+    base = dest
+    while dest.exists():
+        n += 1
+        dest = base.with_name(f"{base.name}.{n}")
+    dest.mkdir(parents=True)
+    for f in files:
+        shutil.move(str(f), dest / f.name)
+    return dest
+
+
+def prepare_orca_job(job_dir: Path, inp_name: str, inp_text: str,
+                     log: logging.Logger, tag: str,
+                     xyz_src: Optional[Path] = None,
+                     extra_copies: tuple = (),
+                     write_text: Optional[str] = None) -> Optional[Path]:
+    """
+    Prepara <job_dir>/<inp_name> de forma reproducible y devuelve su ruta
+    (o None si falló la copia de algún insumo). Reemplaza el patrón
+    `if not check_success(out): write inp` que reutilizaba en silencio un
+    .out calculado con otros parámetros.
+
+      inp_text     : input canónico (define la huella del job).
+      xyz_src      : geometría que se copia como el `* xyzfile` del input.
+      extra_copies : pares (src, nombre_destino) a copiar junto al input
+                     (p. ej. el sp.gbw para el guess de TDDFT).
+      write_text   : si se da, es lo que realmente se escribe (p. ej. un
+                     input de restart); la huella sigue siendo la de inp_text.
+    """
+    job_dir.mkdir(parents=True, exist_ok=True)
+    inp_file = job_dir / inp_name
+    out_file = inp_file.with_suffix(".out")
+    m = _XYZFILE_RE.search(inp_text)
+    xyz_name = m.group(1) if m else None
+
+    try:
+        xyz_bytes = Path(xyz_src).read_bytes() if xyz_src is not None else None
+    except OSError as e:
+        log.warning(f"[{tag}] {job_dir.name}: no se pudo leer {xyz_src}: {e}")
+        return None
+    spec = job_spec_sha1(inp_text, xyz_bytes)
+    man = read_manifest(job_dir)
+
+    if check_success(out_file):
+        old = man.get("spec_sha1")
+        legacy = old is None
+        if legacy and inp_file.exists():
+            # Job anterior al manifiesto: reconstruir la huella desde disco.
+            disk_xyz = None
+            if xyz_src is not None and xyz_name and (job_dir / xyz_name).exists():
+                disk_xyz = (job_dir / xyz_name).read_bytes()
+            old = job_spec_sha1(inp_file.read_text(errors="replace"), disk_xyz)
+        if old is None or old == spec:
+            if legacy:
+                update_manifest(job_dir, spec_sha1=spec, inp=inp_name,
+                                xyz_sha1=xyz_sha1(job_dir / xyz_name) if xyz_name else None,
+                                status="ok", backfilled=_now_iso(),
+                                **_provenance())
+            return inp_file
+        if not RERUN_STALE:
+            log.warning(
+                f"[{tag}] {job_dir.name}: el resultado existente se calculó con "
+                f"parámetros distintos a los actuales (input o geometría de origen "
+                f"cambió). Se REUTILIZA tal cual; corre con --rerun-stale para "
+                f"archivarlo y recalcular."
+            )
+            update_manifest(job_dir, stale_detected=_now_iso(), stale_spec_sha1=spec)
+            return inp_file
+        moved = archive_files(job_dir, [p for p in job_dir.iterdir()
+                                        if p.is_file() and p.name != JOB_MANIFEST],
+                              "stale")
+        log.warning(f"[{tag}] {job_dir.name}: resultado obsoleto archivado en "
+                    f"{moved} — recalculando (--rerun-stale)")
+
+    try:
+        if xyz_src is not None and xyz_name:
+            dst = job_dir / xyz_name
+            if not (dst.exists() and dst.read_bytes() == xyz_bytes):
+                atomic_write(dst, xyz_bytes.decode(errors="replace"))
+        for src, dst_name in extra_copies:
+            if not safe_copy(Path(src), job_dir / dst_name):
+                log.warning(f"[{tag}] {job_dir.name}: error copiando {src} — saltando")
+                return None
+        atomic_write(inp_file, write_text if write_text is not None else inp_text)
+    except OSError as e:
+        log.warning(f"[{tag}] {job_dir.name}: error preparando el input: {e}")
+        return None
+
+    # Manifiesto nuevo por intento; el anterior queda en "history" (los 10
+    # últimos) para no arrastrar campos de otra corrida (stale_detected...).
+    history = (man.pop("history", []) + [man])[-10:] if man else []
+    fresh = {"spec_sha1": spec, "inp": inp_name,
+             "xyz_sha1": _sha1_bytes(_normalize_xyz(xyz_bytes)) if xyz_bytes else None,
+             "xyz_src": str(xyz_src) if xyz_src else None,
+             "status": "prepared", "prepared": _now_iso(),
+             "restart": write_text is not None, **_provenance(),
+             "history": history}
+    try:
+        atomic_write(job_dir / JOB_MANIFEST,
+                     json.dumps(fresh, indent=2, ensure_ascii=False, default=str) + "\n")
+    except OSError as e:
+        log.debug(f"[{tag}] no se pudo escribir {job_dir}/{JOB_MANIFEST}: {e}")
+    return inp_file
+
+
+def _provenance() -> dict:
+    """Commit de git + huella del script, cacheados (para manifiestos y logs)."""
+    global _PROVENANCE_CACHE
+    if _PROVENANCE_CACHE is None:
+        here = Path(__file__).resolve()
+        commit, dirty = None, None
+        try:
+            r = subprocess.run(["git", "-C", str(here.parent), "rev-parse", "HEAD"],
+                               capture_output=True, text=True, timeout=5, check=False)
+            if r.returncode == 0:
+                commit = r.stdout.strip()
+                s = subprocess.run(["git", "-C", str(here.parent), "status",
+                                    "--porcelain", "--", here.name],
+                                   capture_output=True, text=True, timeout=5, check=False)
+                dirty = bool(s.stdout.strip())
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        try:
+            script_sha1 = _sha1_bytes(here.read_bytes())[:12]
+        except OSError:
+            script_sha1 = None
+        _PROVENANCE_CACHE = {"maaqc_git": commit, "maaqc_dirty": dirty,
+                             "maaqc_sha1": script_sha1, "orca_bin": str(ORCA_BIN)}
+    return dict(_PROVENANCE_CACHE)
+
+
+_PROVENANCE_CACHE: Optional[dict] = None
 
 
 def has_numfreq_restart(freq_dir: Path) -> bool:
@@ -1432,6 +1925,7 @@ def safe_copy(src: Path, dst: Path) -> bool:
     except shutil.SameFileError:
         return True   # mismo archivo, no hay nada que hacer
     except OSError as e:
+        logging.getLogger("maaqc").debug(f"safe_copy {src} → {dst}: {e}")
         return False
 
 
@@ -1457,15 +1951,22 @@ def resolve_opt_xyz(opt_dir: Path) -> Optional[Path]:
     normalizando siempre a 'opt_opt.xyz' mediante una copia si hace falta.
     Devuelve la ruta a opt_opt.xyz, o None si no se encuentra ninguno.
     """
-    canonical = opt_dir / "opt_opt.xyz"
-    if canonical.exists() and canonical.stat().st_size > 0:
-        return canonical
-    # ORCA 6: buscar opt.xyz y normalizar
+    canonical  = opt_dir / "opt_opt.xyz"
     orca6_name = opt_dir / "opt.xyz"
-    if orca6_name.exists() and orca6_name.stat().st_size > 0:
-        shutil.copy(orca6_name, canonical)
+
+    def _ok(p: Path) -> bool:
+        try:
+            return p.stat().st_size > 0
+        except OSError:
+            return False
+
+    # Si ORCA re-escribió opt.xyz después de la última normalización (OPT
+    # rehecha o reanudada), la copia canónica está obsoleta: se refresca.
+    if _ok(orca6_name) and (not _ok(canonical)
+                            or orca6_name.stat().st_mtime > canonical.stat().st_mtime):
+        shutil.copy2(orca6_name, canonical)
         return canonical
-    return None
+    return canonical if _ok(canonical) else None
 
 
 # ─────────────────────────────────────────────
@@ -1518,7 +2019,17 @@ def run_orca(inp_file: Path, out_file: Path, log: logging.Logger,
 
     t0       = time.time()
     timeout  = timeout_hours * 3600
-    proc_env = env if env is not None else build_omp_env(NPROCS)
+    proc_env = env if env is not None else build_omp_env(NPROCS, cpu_list=cpu_list)
+    job_dir  = inp_file.parent
+
+    # Un .out de un intento fallido anterior se archiva, no se pisa: es el
+    # único diagnóstico de por qué falló (SCF, memoria, MPI...).
+    if out_file.exists() and out_file.stat().st_size > 0:
+        dest = archive_files(job_dir, [out_file], "failed")
+        if dest is not None:
+            log.info(f"  ⤷  output fallido previo archivado en {dest}")
+    update_manifest(job_dir, status="running", started=_now_iso(),
+                    cpu_list=cpu_list, host=os.uname().nodename)
 
     # start_new_session=True coloca el proceso en un nuevo grupo de procesos,
     # evitando que reciba SIGHUP al cerrarse el terminal padre — complementa
@@ -1543,9 +2054,11 @@ def run_orca(inp_file: Path, out_file: Path, log: logging.Logger,
         try:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+            # Señal a TODO el grupo: proc.kill() solo mataba al líder y los
+            # workers de mpirun quedaban huérfanos ocupando los CPUs.
+            _terminate_group(proc)
             log.error(f"  ✗  {inp_file.name} TIMEOUT ({timeout_hours} h)")
+            update_manifest(job_dir, status="timeout", finished=_now_iso())
             return False
         finally:
             with _procs_lock:
@@ -1557,6 +2070,8 @@ def run_orca(inp_file: Path, out_file: Path, log: logging.Logger,
         elapsed = (time.time() - t0) / 60
         if check_success(out_file):
             log.info(f"  ✓  {inp_file.name} terminó en {elapsed:.1f} min")
+            update_manifest(job_dir, status="ok", finished=_now_iso(),
+                            elapsed_min=round(elapsed, 2))
             return True
         else:
             # Extraer las últimas líneas del .out para diagnóstico rápido
@@ -1568,11 +2083,13 @@ def run_orca(inp_file: Path, out_file: Path, log: logging.Logger,
                 pass
             log.error(f"  ✗  {inp_file.name} FALLÓ (returncode={proc.returncode}, "
                       f"{elapsed:.1f} min) — revisa {out_file}")
+            update_manifest(job_dir, status="failed", finished=_now_iso(),
+                            returncode=proc.returncode, elapsed_min=round(elapsed, 2))
             return False
     except FileNotFoundError as e:
         if cpu_list and "taskset" in str(e):
-            log.error(f"  ✗  no se encontró 'taskset' en PATH — instálalo "
-                      f"(paquete util-linux) o llama a run_orca sin cpu_list")
+            log.error("  ✗  no se encontró 'taskset' en PATH — instálalo "
+                      "(paquete util-linux) o llama a run_orca sin cpu_list")
         else:
             log.error(f"  ✗  no se pudo ejecutar ORCA — verifica ORCA_BIN: {ORCA_BIN}")
         return False
@@ -1910,7 +2427,7 @@ def _censo_prescreen_recover(
         "data"     : data,
     }
     try:
-        recovered_json.write_text(json.dumps(dump, indent=4))
+        atomic_write(recovered_json, json.dumps(dump, indent=4))
     except OSError as e:
         log.error(f"[CENSO-RECOVER]  no se pudo escribir {recovered_json}: {e}")
         return None
@@ -2040,11 +2557,9 @@ def _run_censo_locked(cmd: list[str], censo_dir: Path, log_file: Path,
         try:
             returncode = proc.wait(timeout=timeout_hours * 3600)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            try:
-                proc.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                pass
+            # Grupo completo: CENSO lanza sub-jobs ORCA/xTB que sobrevivían
+            # a proc.kill() del líder.
+            _terminate_group(proc)
             raise
         finally:
             with _procs_lock:
@@ -2356,9 +2871,9 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
                 )
                 _reload_attempted = _eff_maxcores > 0
                 if not _reload_attempted:
-                    log.error(f"[CENSO-RECOVER]  ✗  sin CPUs disponibles — "
-                              f"se omite --reload, se limpiará la carpeta y "
-                              f"CENSO correrá desde cero")
+                    log.error("[CENSO-RECOVER]  ✗  sin CPUs disponibles — "
+                              "se omite --reload, se limpiará la carpeta y "
+                              "CENSO correrá desde cero")
             if _reload_attempted:
                 cmd_reload = [
                     str(CENSO_BIN),
@@ -2555,8 +3070,8 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
         )
         if eff_maxcores == 0:
             _cpu_lock_release()
-            log.error(f"[CENSO]  ✗  sin CPUs disponibles — "
-                      f"usando ensemble CREST sin filtrar")
+            log.error("[CENSO]  ✗  sin CPUs disponibles — "
+                      "usando ensemble CREST sin filtrar")
             return conformers_xyz
 
         cmd = [
@@ -2616,9 +3131,9 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
         return conformers_xyz
     except FileNotFoundError as e:
         if "taskset" in str(e):
-            log.error(f"  ✗  no se encontró 'taskset' en PATH — instálalo "
-                      f"(paquete util-linux) o llama a stage_censo_prescreen "
-                      f"sin cpu pinning")
+            log.error("  ✗  no se encontró 'taskset' en PATH — instálalo "
+                      "(paquete util-linux) o llama a stage_censo_prescreen "
+                      "sin cpu pinning")
         else:
             log.error(f"[CENSO]  ✗  no se encontró el ejecutable ({CENSO_BIN}) — "
                       f"¿'conda activate sciencebitch'? Usando ensemble CREST sin filtrar")
@@ -2649,8 +3164,8 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
                     f"(returncode={returncode}) — posible causa: ~/.censo2rc incompleto "
                     f"o falta 'tm'/'orca' en [paths]. Detalle: {_censo_log_snippet}"
                 )
-        except Exception:
-            pass
+        except Exception as _exc:
+            logging.getLogger("maaqc").debug(f"diagnóstico del log de CENSO: {_exc!r}")
 
     # ── Reconstrucción preferente desde el .out con energías (Gtot) ─────────
     # CENSO escribe las energías reales (Gtot/ΔGtot/Boltzmann weight) en
@@ -2814,44 +3329,10 @@ def extract_conformers_by_id(
     Devuelve True si se escribió al menos un confórmero.
     """
     try:
-        all_frames = read(str(source_xyz), index=":")
-        if not isinstance(all_frames, list):
-            all_frames = [all_frames]
+        frame_index = index_frames_by_conf_id(source_xyz)
     except Exception as e:
         log.warning(f"[CENSO] no se pudo leer {source_xyz}: {e}")
         return False
-
-    # Construir índice: conf_id → atoms
-    # ASE solo popula atoms.info para formato extXYZ (key=value en comentario).
-    # Para XYZ simples (comentario = "CONF7" o "-76.301"), atoms.info queda
-    # vacío y hay que leer el comentario directamente del archivo de texto.
-    frame_index: dict[str, object] = {}
-    try:
-        _raw_lines = source_xyz.read_text(errors="replace").splitlines()
-        _n_atoms   = len(all_frames[0]) if all_frames else 0
-        _fi = 0   # índice en all_frames
-        _li = 0   # índice en _raw_lines
-        while _li < len(_raw_lines) and _fi < len(all_frames):
-            _line = _raw_lines[_li].strip()
-            if _line.isdigit() and int(_line) == _n_atoms:
-                _comment = _raw_lines[_li + 1].strip() if _li + 1 < len(_raw_lines) else ""
-                _token   = _comment.split()[0] if _comment.split() else ""
-                if _token.startswith("CONF"):
-                    frame_index[_token] = all_frames[_fi]
-                _fi += 1
-                _li += _n_atoms + 2
-            else:
-                _li += 1
-    except Exception:
-        # Fallback: intentar con atoms.info (funciona si es extXYZ)
-        for atoms in all_frames:
-            comment = (
-                atoms.info.get("comment", "")
-                or atoms.info.get("description", "")
-            )
-            token = str(comment).split()[0] if comment else ""
-            if token.startswith("CONF"):
-                frame_index[token] = atoms
 
     selected = []
     missing  = []
@@ -2939,7 +3420,7 @@ def run_censo_standalone(input_xyz: Path, charge: int, out_dir: Path,
     )
     if eff_maxcores == 0:
         _cpu_lock_release()
-        log.error(f"[CENSO-STANDALONE]  ✗  sin CPUs disponibles — abortando")
+        log.error("[CENSO-STANDALONE]  ✗  sin CPUs disponibles — abortando")
         return False
 
     cmd = [
@@ -3110,8 +3591,7 @@ def stage_censo_multitemp(
         "ensemble_input": str(conformers_xyz),
     }
     try:
-        with open(summary_path, "w") as f:
-            json.dump(summary_data, f, indent=2)
+        atomic_write(summary_path, json.dumps(summary_data, indent=2))
         log.info(f"[CENSO-MULTITEMP]  ✓  resumen guardado en {summary_path.name}")
     except OSError as e:
         log.warning(f"[CENSO-MULTITEMP]  ⚠  no se pudo guardar resumen JSON: {e}")
@@ -3539,6 +4019,20 @@ def select_nconf_auto(conformers_xyz: Path, log: logging.Logger) -> int:
     return max(NCONF_MIN, min(NCONF_MAX, nconf))
 
 
+def index_frames_by_conf_id(source_xyz: Path) -> dict[str, object]:
+    """
+    {CONF# → ase.Atoms} de un multi-XYZ de CREST/CENSO. Única implementación
+    del emparejamiento frame↔CONF# (antes había tres variantes: la de
+    extract_conformers_by_id no reconocía comentarios extXYZ "CONF7=T").
+    Lanza la excepción de ase.io.read si el archivo no se puede leer.
+    """
+    frames = read(str(source_xyz), index=":")
+    if not isinstance(frames, list):
+        frames = [frames]
+    ids = _extract_conf_ids_from_xyz(source_xyz)
+    return {cid: frames[i] for i, cid in ids.items() if i < len(frames)}
+
+
 def _extract_conf_ids_from_xyz(source_xyz: Path) -> dict[int, str]:
     """
     Lee el multi-XYZ de CREST/CENSO y devuelve un dict {índice_0based → CONF#}.
@@ -3630,32 +4124,10 @@ def stage_opt(conformers_xyz: Path, mol_dir: Path,
         _selection_mode = f"Boltzmann ({len(conf_ids)} conf(s): {', '.join(conf_ids)})"
         log.info(f"[OPT] optimizando {len(conf_ids)} confórmeros ({_selection_mode})")
         try:
-            _all = read(str(conformers_xyz), index=":")
-            if not isinstance(_all, list):
-                _all = [_all]
+            _frame_idx = index_frames_by_conf_id(conformers_xyz)
         except Exception as e:
             log.error(f"[OPT] no se pudo leer {conformers_xyz}: {e}")
             return []
-        # Construir índice CONF# → atoms (igual que extract_conformers_by_id)
-        _frame_idx: dict[str, object] = {}
-        try:
-            _raw = conformers_xyz.read_text(errors="replace").splitlines()
-            _nat = len(_all[0]) if _all else 0
-            _fi, _li = 0, 0
-            while _li < len(_raw) and _fi < len(_all):
-                _l = _raw[_li].strip()
-                if _l.isdigit() and int(_l) == _nat:
-                    _comment = _raw[_li + 1].strip() if _li + 1 < len(_raw) else ""
-                    _m = re.search(r"(CONF\d+)=", _comment)
-                    _tok = _m.group(1) if _m else (_comment.split()[0] if _comment.split() else "")
-                    if _tok.startswith("CONF"):
-                        _frame_idx[_tok] = _all[_fi]
-                    _fi += 1
-                    _li += _nat + 2
-                else:
-                    _li += 1
-        except Exception:
-            pass
         conformers = [_frame_idx[cid] for cid in conf_ids if cid in _frame_idx]
         _missing = [cid for cid in conf_ids if cid not in _frame_idx]
         if _missing:
@@ -3718,7 +4190,7 @@ def stage_opt(conformers_xyz: Path, mol_dir: Path,
 
     log.info(f"[OPT] {len(conformers)} confórmeros disponibles — "
              f"batch {OPT_BATCH_SIZE}x{NPROCS} cores")
-    log.info(f"[OPT] IDs CREST → dirs: "
+    log.info("[OPT] IDs CREST → dirs: "
              + "  ".join(f"{lbl}→conf_{lbl[4:]}" for lbl in _crest_labels))
     template   = get_template("opt")
     successful = []
@@ -3737,133 +4209,120 @@ def stage_opt(conformers_xyz: Path, mol_dir: Path,
         for crest_lbl, atoms in zip(_crest_labels, conformers)
     ]
 
-    n_lotes_est = -(-len(tasks_all) // OPT_BATCH_SIZE)   # ceiling division (estimado)
-    _check_cpu_budget(OPT_BATCH_SIZE, NPROCS, log)
-
-    # BUGFIX: assign_cpu_lists() puede devolver MENOS listas que el batch_size
-    # pedido cuando no hay suficientes cores físicos independientes (está
-    # documentado en su docstring). El código anterior hacía zip(batch,
-    # cpu_lists) y lanzaba max_workers=len(batch) de todas formas — los
-    # tasks que quedaban fuera del zip nunca recibían "cpu_list" y
-    # run_orca() los lanzaba SIN taskset (mpirun "pelado", compitiendo con
-    # los jobs sí pineados). Ahora el tamaño real del lote se recorta al
-    # número de cpu_lists efectivamente disponibles, y solo se lanzan esos.
-    idx      = 0
-    lote_num = 0
-    while idx < len(tasks_all):
-        want      = min(OPT_BATCH_SIZE, len(tasks_all) - idx)
-        cpu_lists = _acquire_cpu_lists(want, NPROCS, log, "OPT")
-        if not cpu_lists:
-            log.error("[OPT] no hay suficientes cores físicos independientes "
-                       "para asignar ni un solo job — abortando etapa OPT")
-            break
-        batch    = tasks_all[idx: idx + len(cpu_lists)]
-        lote_num += 1
-        ids      = [t["conf_id"] for t in batch]
-
-        for t, cl in zip(batch, cpu_lists):
-            t["cpu_list"] = cl
-
-        log.info(f"[OPT] ── Lote {lote_num}/~{n_lotes_est}: {ids}  "
-                 f"(cores: {[','.join(map(str, cl)) for cl in cpu_lists]})")
-
-        with ThreadPoolExecutor(max_workers=len(batch)) as pool:
-            futures = {pool.submit(_opt_worker, t): t["conf_id"] for t in batch}
-            try:
-                for fut in as_completed(futures):
-                    res = fut.result()
-                    tag = "✓" if res["success"] else "✗"
-                    log.info(f"[OPT]   {tag} {res['conf_id']}  ({res['elapsed']:.1f} min)")
-                    if res["success"]:
-                        xyz_out = resolve_opt_xyz(res["conf_dir"])
-                        if xyz_out is None:
-                            log.warning(f"[OPT] {res['conf_id']}: ORCA OK pero sin "
-                                        f"geometría optimizada — excluido")
-                        else:
-                            successful.append(res["conf_dir"])
-                    else:
-                        log.warning(f"[OPT] {res['conf_id']} falló — excluido de etapas siguientes")
-            except KeyboardInterrupt:
-                log.warning("[OPT] Ctrl-C — cancelando lote, esperando workers…")
-                pool.shutdown(wait=False, cancel_futures=True)
-                _kill_active_procs()
-                _cpu_lock_release()
-                sys.exit(130)
-
-        _cpu_lock_release()
-        idx += len(cpu_lists)
+    successful = _run_batched(tasks_all, _opt_worker, OPT_BATCH_SIZE, NPROCS,
+                              log, "OPT", result_key="conf_dir")
 
     log.info(f"[OPT] {len(successful)}/{len(conformers)} confórmeros optimizados")
     return successful
+
+
+def _numfreq_restart_text(fresh_text: str) -> str:
+    """Input de NumFreq con '%freq Restart true end' (derivado del template
+    vigente, así también funciona con un templates/numfreq.inp.tmpl propio)."""
+    return re.sub(r"^(\*\s*xyzfile)", "%freq\n  Restart true\nend\n\n\\1",
+                  fresh_text, count=1, flags=re.MULTILINE)
+
+
+def _numfreq_worker(task: dict) -> dict:
+    """
+    Worker de un NumFreq (mismo patrón que _sp_worker).
+
+    Restart: los freq_D*.res.Gradients de una corrida interrumpida solo se
+    reutilizan si fueron calculados sobre la MISMA geometría que la OPT
+    actual (xyz_sha1 en job.json, o el opt_opt.xyz copiado en 03_numfreq/
+    para runs anteriores al manifiesto). Si la OPT se rehízo, mezclarlos
+    daría un Hessiano de dos geometrías distintas: se archivan.
+    """
+    conf_id  : str            = task["conf_id"]
+    opt_dir  : Path           = task["opt_dir"]
+    freq_dir : Path           = task["freq_dir"]
+    charge   : int            = task["charge"]
+    template : str            = task["template"]
+    nprocs   : int            = task["nprocs"]
+    maxcore  : int            = task["maxcore"]
+    log      : logging.Logger = task["log"]
+    cpu_list : Optional[list[int]] = task.get("cpu_list")
+    fail = {"conf_id": conf_id, "freq_dir": None, "success": False, "elapsed": 0.0}
+
+    opt_xyz = resolve_opt_xyz(opt_dir)
+    if opt_xyz is None:
+        log.warning(f"[NUMFREQ] {conf_id}: no se encontró opt_opt.xyz — saltando")
+        return fail
+
+    freq_dir.mkdir(parents=True, exist_ok=True)
+    out_file = freq_dir / "freq.out"
+    inp_text = template.format(
+        CHARGE=charge, MULT=MULT,
+        NPROCS_NUMFREQ=nprocs, MAXCORE_NUMFREQ=maxcore,
+    )
+
+    restart_text = None
+    if not check_success(out_file) and has_numfreq_restart(freq_dir):
+        grads = sorted(freq_dir.glob("freq_D*.res.Gradients"))
+        prev  = read_manifest(freq_dir).get("xyz_sha1") or xyz_sha1(freq_dir / "opt_opt.xyz")
+        if prev is not None and prev == xyz_sha1(opt_xyz):
+            log.info(f"[NUMFREQ] {conf_id}: restart detectado ({len(grads)} "
+                     f"gradientes de la misma geometría) — activando Restart true")
+            restart_text = _numfreq_restart_text(inp_text)
+        else:
+            dest = archive_files(freq_dir, grads + [freq_dir / "opt_opt.xyz"],
+                                 "stale_restart")
+            log.warning(f"[NUMFREQ] {conf_id}: los gradientes parciales son de OTRA "
+                        f"geometría (la OPT cambió) — archivados en {dest}; "
+                        f"NumFreq desde cero")
+
+    inp_file = prepare_orca_job(freq_dir, "freq.inp", inp_text, log, "NUMFREQ",
+                                xyz_src=opt_xyz, write_text=restart_text)
+    if inp_file is None:
+        return fail
+
+    t0      = time.time()
+    env     = build_omp_env(nprocs, cpu_list=cpu_list)
+    ok      = run_orca(inp_file, out_file, log, env=env, cpu_list=cpu_list)
+    elapsed = (time.time() - t0) / 60
+    if not ok:
+        return {**fail, "elapsed": elapsed}
+
+    if check_no_imaginary(out_file):
+        log.info(f"[NUMFREQ] {conf_id}: sin frecuencias imaginarias ✓")
+    else:
+        log.warning(f"[NUMFREQ] {conf_id}: frecuencias imaginarias detectadas "
+                    f"— incluido de todos modos (revisar manualmente)")
+        update_manifest(freq_dir, imaginary_freqs=True)
+    return {"conf_id": conf_id, "freq_dir": freq_dir, "success": True, "elapsed": elapsed}
 
 
 def stage_numfreq(opt_dirs: list[Path], mol_dir: Path,
                   charge: int, log: logging.Logger) -> list[Path]:
     """
     Etapa 03_numfreq: frecuencias numéricas.
-    Usa NPROCS_NUMFREQ cores y MAXCORE_NUMFREQ MB/core (defaults: 6 / 2300 MB).
+    Usa NPROCS_NUMFREQ cores y MAXCORE_NUMFREQ MB/core por job, en lotes de
+    NUMFREQ_BATCH_SIZE jobs (lo que permitan cores y RAM; en el T14 es 1).
     Configurable vía --nprocs-numfreq / --maxcore-numfreq o --cores.
 
-    Restart automático: si en la carpeta de un conformero hay archivos
-    freq_D*.res.Gradients de una corrida interrumpida, escribe el inp con
-    '%freq Restart true end' para que ORCA retome sin recalcular gradientes.
-    Si el .out ya tiene TERMINATED NORMALLY, salta directamente.
+    Antes corría en serie y SIN taskset/MAAQC_PE_LIST (run_orca sin env ni
+    cpu_list): ahora cada job queda confinado igual que OPT/SP.
+    Restart automático y seguro: ver _numfreq_worker().
     """
-    log.info(f"[NUMFREQ] calculando frecuencias para {len(opt_dirs)} confórmeros")
-    template_fresh   = get_template("numfreq")
-    template_restart = TEMPLATE_NUMFREQ_RESTART
-    successful = []
-
-    for opt_dir in opt_dirs:
-        conf_id = opt_dir.name
-        opt_xyz = resolve_opt_xyz(opt_dir)
-
-        if opt_xyz is None:
-            log.warning(f"[NUMFREQ] {conf_id}: no se encontró opt_opt.xyz — saltando")
-            continue
-
-        freq_dir = mol_dir / "03_numfreq" / conf_id
-        freq_dir.mkdir(parents=True, exist_ok=True)
-
-        out_file = freq_dir / "freq.out"
-        inp_file = freq_dir / "freq.inp"
-
-        if not check_success(out_file):
-            # Copiar geometría si aún no está en la carpeta de freq
-            if not safe_copy(opt_xyz, freq_dir / "opt_opt.xyz"):
-                log.warning(f"[NUMFREQ] {conf_id}: error copiando opt_opt.xyz — saltando")
-                continue
-
-            # Detectar restart automáticamente
-            if has_numfreq_restart(freq_dir):
-                n_done = len(list(freq_dir.glob("freq_D*.res.Gradients")))
-                log.info(f"[NUMFREQ] {conf_id}: restart detectado "
-                         f"({n_done} gradientes guardados) — activando Restart true")
-                inp_text = template_restart.format(
-                    CHARGE=charge, MULT=MULT,
-                    NPROCS_NUMFREQ=NPROCS_NUMFREQ,
-                    MAXCORE_NUMFREQ=MAXCORE_NUMFREQ,
-                )
-            else:
-                inp_text = template_fresh.format(
-                    CHARGE=charge, MULT=MULT,
-                    NPROCS_NUMFREQ=NPROCS_NUMFREQ,
-                    MAXCORE_NUMFREQ=MAXCORE_NUMFREQ,
-                )
-            inp_file.write_text(inp_text)
-
-        ok = run_orca(inp_file, out_file, log)
-        if not ok:
-            log.warning(f"[NUMFREQ] {conf_id} falló — excluido")
-            continue
-
-        if check_no_imaginary(out_file):
-            log.info(f"[NUMFREQ] {conf_id}: sin frecuencias imaginarias ✓")
-        else:
-            log.warning(f"[NUMFREQ] {conf_id}: frecuencias imaginarias detectadas "
-                        f"— incluido de todos modos (revisar manualmente)")
-        successful.append(freq_dir)
-
+    log.info(f"[NUMFREQ] calculando frecuencias para {len(opt_dirs)} confórmeros "
+             f"(batch {NUMFREQ_BATCH_SIZE}×{NPROCS_NUMFREQ} cores)")
+    template = get_template("numfreq")
+    tasks = [
+        {
+            "conf_id":  d.name,
+            "opt_dir":  d,
+            "freq_dir": mol_dir / "03_numfreq" / d.name,
+            "charge":   charge,
+            "template": template,
+            "nprocs":   NPROCS_NUMFREQ,
+            "maxcore":  MAXCORE_NUMFREQ,
+            "log":      log,
+        }
+        for d in opt_dirs
+    ]
+    successful = _run_batched(tasks, _numfreq_worker, NUMFREQ_BATCH_SIZE,
+                              NPROCS_NUMFREQ, log, "NUMFREQ", result_key="freq_dir",
+                              allow_unpinned=True)
     log.info(f"[NUMFREQ] {len(successful)}/{len(opt_dirs)} completados")
     return successful
 
@@ -3909,51 +4368,8 @@ def stage_sp(freq_dirs: list[Path], mol_dir: Path,
         for d in freq_dirs
     ]
 
-    _check_cpu_budget(_batch, _nprocs, log)
-
-    # BUGFIX: ver comentario equivalente en stage_opt — assign_cpu_lists()
-    # puede devolver menos listas que _batch; recortamos el lote real al
-    # número de cpu_lists disponibles para que ningún job se lance sin
-    # taskset asignado.
-    idx      = 0
-    lote_num = 0
-    while idx < len(tasks_all):
-        want      = min(_batch, len(tasks_all) - idx)
-        cpu_lists = _acquire_cpu_lists(want, _nprocs, log, "SP")
-        if not cpu_lists:
-            log.error("[SP] no hay suficientes cores físicos independientes "
-                       "para asignar ni un solo job — abortando etapa SP")
-            break
-        batch    = tasks_all[idx: idx + len(cpu_lists)]
-        lote_num += 1
-        ids      = [t["conf_id"] for t in batch]
-
-        for t, cl in zip(batch, cpu_lists):
-            t["cpu_list"] = cl
-
-        log.info(f"[SP] ── Lote {lote_num}/~{n_lotes}: {ids}  "
-                 f"(cores: {[','.join(map(str, cl)) for cl in cpu_lists]})")
-
-        with ThreadPoolExecutor(max_workers=len(batch)) as pool:
-            futures = {pool.submit(_sp_worker, t): t["conf_id"] for t in batch}
-            try:
-                for fut in as_completed(futures):
-                    res = fut.result()
-                    tag = "✓" if res["success"] else "✗"
-                    log.info(f"[SP]   {tag} {res['conf_id']}  ({res['elapsed']:.1f} min)")
-                    if res["success"] and res["sp_dir"] is not None:
-                        successful.append(res["sp_dir"])
-                    else:
-                        log.warning(f"[SP] {res['conf_id']} falló — excluido")
-            except KeyboardInterrupt:
-                log.warning("[SP] Ctrl-C — cancelando lote, esperando workers…")
-                pool.shutdown(wait=False, cancel_futures=True)
-                _kill_active_procs()
-                _cpu_lock_release()
-                sys.exit(130)
-
-        _cpu_lock_release()
-        idx += len(cpu_lists)
+    successful = _run_batched(tasks_all, _sp_worker, _batch, _nprocs,
+                              log, "SP", result_key="sp_dir")
 
     log.info(f"[SP] {len(successful)}/{len(freq_dirs)} completados")
     return successful
@@ -4001,47 +4417,8 @@ def stage_sp_gas(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
         for d in sp_dirs
     ]
 
-    _check_cpu_budget(_batch, _nprocs, log)
-
-    idx      = 0
-    lote_num = 0
-    while idx < len(tasks_all):
-        want      = min(_batch, len(tasks_all) - idx)
-        cpu_lists = _acquire_cpu_lists(want, _nprocs, log, "SP_GAS")
-        if not cpu_lists:
-            log.error("[SP_GAS] no hay suficientes cores físicos independientes "
-                       "para asignar ni un solo job — abortando etapa SP_GAS")
-            break
-        batch    = tasks_all[idx: idx + len(cpu_lists)]
-        lote_num += 1
-        ids      = [t["conf_id"] for t in batch]
-
-        for t, cl in zip(batch, cpu_lists):
-            t["cpu_list"] = cl
-
-        log.info(f"[SP_GAS] ── Lote {lote_num}/~{n_lotes}: {ids}  "
-                 f"(cores: {[','.join(map(str, cl)) for cl in cpu_lists]})")
-
-        with ThreadPoolExecutor(max_workers=len(batch)) as pool:
-            futures = {pool.submit(_sp_gas_worker, t): t["conf_id"] for t in batch}
-            try:
-                for fut in as_completed(futures):
-                    res = fut.result()
-                    tag = "✓" if res["success"] else "✗"
-                    log.info(f"[SP_GAS]   {tag} {res['conf_id']}  ({res['elapsed']:.1f} min)")
-                    if res["success"] and res["sp_gas_dir"] is not None:
-                        successful.append(res["sp_gas_dir"])
-                    else:
-                        log.warning(f"[SP_GAS] {res['conf_id']} falló — excluido")
-            except KeyboardInterrupt:
-                log.warning("[SP_GAS] Ctrl-C — cancelando lote, esperando workers…")
-                pool.shutdown(wait=False, cancel_futures=True)
-                _kill_active_procs()
-                _cpu_lock_release()
-                sys.exit(130)
-
-        _cpu_lock_release()
-        idx += len(cpu_lists)
+    successful = _run_batched(tasks_all, _sp_gas_worker, _batch, _nprocs,
+                              log, "SP_GAS", result_key="sp_gas_dir")
 
     log.info(f"[SP_GAS] {len(successful)}/{len(sp_dirs)} completados")
     return successful
@@ -4259,7 +4636,7 @@ def _collect_spsmd_selection(
         smd_root.mkdir(parents=True, exist_ok=True)
         weights_path = smd_root / "sp_boltzmann_weights.json"
         try:
-            weights_path.write_text(json.dumps(
+            atomic_write(weights_path, json.dumps(
                 {
                     "temperature_K":     temperature,
                     "source":            "04_sp/<conf_id>/sp.out (FINAL SINGLE POINT ENERGY)",
@@ -4312,53 +4689,11 @@ def _run_spsmd_execution(
     log.info(f"[SP_SMD] {len(tasks_all)} SPs SMD en cola, {n_lotes} lote(s) de "
              f"≤{_batch} (CPUs activos/lote: {_batch * _nprocs_first})")
 
-    successful: list[Path] = []
-    _check_cpu_budget(_batch, _nprocs_first, log)
-
-    idx      = 0
-    lote_num = 0
-    while idx < len(tasks_all):
-        want      = min(_batch, len(tasks_all) - idx)
-        nprocs_want = tasks_all[idx]["nprocs"]
-        cpu_lists = _acquire_cpu_lists(want, nprocs_want, log, "SP_SMD")
-        if not cpu_lists:
-            log.error("[SP_SMD] no hay suficientes cores físicos independientes "
-                       "para asignar ni un solo job — abortando etapa SP_SMD")
-            break
-        batch    = tasks_all[idx: idx + len(cpu_lists)]
-        lote_num += 1
-        labels   = [f"{t['mol_dir'].name}/{t['conf_id']}" for t in batch]
-
-        for t, cl in zip(batch, cpu_lists):
-            t["cpu_list"] = cl
-
-        log.info(f"[SP_SMD] ── Lote {lote_num}/~{n_lotes}: {labels}  "
-                 f"(cores: {[','.join(map(str, cl)) for cl in cpu_lists]})")
-
-        with ThreadPoolExecutor(max_workers=len(batch)) as pool:
-            futures = {
-                pool.submit(_sp_smd_worker, t): f"{t['mol_dir'].name}/{t['conf_id']}"
-                for t in batch
-            }
-            try:
-                for fut in as_completed(futures):
-                    res   = fut.result()
-                    label = futures[fut]
-                    tag   = "✓" if res["success"] else "✗"
-                    log.info(f"[SP_SMD]   {tag} {label}  ({res['elapsed']:.1f} min)")
-                    if res["success"] and res["sp_smd_dir"] is not None:
-                        successful.append(res["sp_smd_dir"])
-                    else:
-                        log.warning(f"[SP_SMD] {label} falló — excluido")
-            except KeyboardInterrupt:
-                log.warning("[SP_SMD] Ctrl-C — cancelando lote, esperando workers…")
-                pool.shutdown(wait=False, cancel_futures=True)
-                _kill_active_procs()
-                _cpu_lock_release()
-                sys.exit(130)
-
-        _cpu_lock_release()
-        idx += len(cpu_lists)
+    successful = _run_batched(
+        tasks_all, _sp_smd_worker, _batch, _nprocs_first, log, "SP_SMD",
+        result_key="sp_smd_dir",
+        label=lambda t: f"{t['mol_dir'].name}/{t['conf_id']}",
+    )
 
     log.info(f"[SP_SMD] {len(successful)}/{len(tasks_all)} completados")
     return successful
@@ -4572,7 +4907,9 @@ def _tddft_worker(task: dict) -> dict:
     gbw_file = sp_dir / "sp.gbw"
     opt_xyz  = resolve_opt_xyz(sp_dir)
 
-    if not gbw_file.exists():
+    # El sp.gbw solo hace falta para LANZAR un TDDFT: uno ya terminado no
+    # debe darse por fallido porque los .gbw se archivaron en el disco externo.
+    if not gbw_file.exists() and not check_success(mol_dir / "05_tddft" / conf_id / "tddft.out"):
         log.warning(f"[TDDFT] {conf_id}: no se encontró sp.gbw — saltando")
         return {"conf_id": conf_id, "tddft_dir": None, "success": False, "elapsed": 0.0}
     if opt_xyz is None:
@@ -4580,24 +4917,17 @@ def _tddft_worker(task: dict) -> dict:
         return {"conf_id": conf_id, "tddft_dir": None, "success": False, "elapsed": 0.0}
 
     tddft_dir = mol_dir / "05_tddft" / conf_id
-    tddft_dir.mkdir(parents=True, exist_ok=True)
-
-    out_file = tddft_dir / "tddft.out"
-    inp_file = tddft_dir / "tddft.inp"
-
-    if not check_success(out_file):
-        if not safe_copy(opt_xyz, tddft_dir / "sp_opt.xyz"):
-            log.warning(f"[TDDFT] {conf_id}: error copiando sp_opt.xyz — saltando")
-            return {"conf_id": conf_id, "tddft_dir": None, "success": False, "elapsed": 0.0}
-        if not safe_copy(gbw_file, tddft_dir / "sp.gbw"):
-            log.warning(f"[TDDFT] {conf_id}: error copiando sp.gbw — saltando")
-            return {"conf_id": conf_id, "tddft_dir": None, "success": False, "elapsed": 0.0}
-        inp_text = template.format(
-            CHARGE=charge, MULT=MULT,
-            NPROCS=nprocs, MAXCORE=maxcore,
-            GBW_PATH="sp.gbw",
-        )
-        inp_file.write_text(inp_text)
+    out_file  = tddft_dir / "tddft.out"
+    inp_text  = template.format(
+        CHARGE=charge, MULT=MULT,
+        NPROCS=nprocs, MAXCORE=maxcore,
+        GBW_PATH="sp.gbw",
+    )
+    inp_file = prepare_orca_job(tddft_dir, "tddft.inp", inp_text, log, "TDDFT",
+                                xyz_src=opt_xyz,
+                                extra_copies=((gbw_file, "sp.gbw"),) if gbw_file.exists() else ())
+    if inp_file is None:
+        return {"conf_id": conf_id, "tddft_dir": None, "success": False, "elapsed": 0.0}
 
     t0         = time.time()
     worker_env = build_omp_env(nprocs, cpu_list=cpu_list)
@@ -4639,52 +4969,9 @@ def stage_tddft(sp_dirs: list[Path], mol_dir: Path,
         for d in sp_dirs
     ]
 
-    n_lotes_est = -(-len(tasks_all) // TDDFT_BATCH_SIZE)   # ceiling division (estimado)
-    _check_cpu_budget(TDDFT_BATCH_SIZE, NPROCS_TDDFT, log)
-
-    # BUGFIX: ver comentario equivalente en stage_opt/stage_sp — assign_cpu_lists()
-    # puede devolver menos listas que TDDFT_BATCH_SIZE; recortamos el lote real al
-    # número de cpu_lists disponibles para que ningún job se lance sin taskset
-    # asignado (el mpirun "pelado" visto en ps -eLf).
-    idx      = 0
-    lote_num = 0
-    while idx < len(tasks_all):
-        want      = min(TDDFT_BATCH_SIZE, len(tasks_all) - idx)
-        cpu_lists = _acquire_cpu_lists(want, NPROCS_TDDFT, log, "TDDFT")
-        if not cpu_lists:
-            log.error("[TDDFT] no hay suficientes cores físicos independientes "
-                       "para asignar ni un solo job — abortando etapa TDDFT")
-            break
-        batch    = tasks_all[idx: idx + len(cpu_lists)]
-        lote_num += 1
-        ids      = [t["conf_id"] for t in batch]
-
-        for t, cl in zip(batch, cpu_lists):
-            t["cpu_list"] = cl
-
-        log.info(f"[TDDFT] ── Lote {lote_num}/~{n_lotes_est}: {ids}  "
-                 f"(cores: {[','.join(map(str, cl)) for cl in cpu_lists]})")
-
-        with ThreadPoolExecutor(max_workers=len(batch)) as pool:
-            futures = {pool.submit(_tddft_worker, t): t["conf_id"] for t in batch}
-            try:
-                for fut in as_completed(futures):
-                    res = fut.result()
-                    tag = "✓" if res["success"] else "✗"
-                    log.info(f"[TDDFT]   {tag} {res['conf_id']}  ({res['elapsed']:.1f} min)")
-                    if res["success"] and res["tddft_dir"] is not None:
-                        successful.append(res["tddft_dir"])
-                    else:
-                        log.warning(f"[TDDFT] {res['conf_id']} falló")
-            except KeyboardInterrupt:
-                log.warning("[TDDFT] Ctrl-C — cancelando lote, esperando workers…")
-                pool.shutdown(wait=False, cancel_futures=True)
-                _kill_active_procs()
-                _cpu_lock_release()
-                sys.exit(130)
-
-        _cpu_lock_release()
-        idx += len(cpu_lists)
+    successful = _run_batched(tasks_all, _tddft_worker, TDDFT_BATCH_SIZE,
+                              NPROCS_TDDFT, log, "TDDFT", result_key="tddft_dir",
+                              fail_msg="falló")
 
     log.info(f"[TDDFT] {len(successful)}/{len(sp_dirs)} completados")
     return successful
@@ -4717,7 +5004,7 @@ def stage_sp_nroot(mol_dir: Path, charge: int, log: logging.Logger,
     energies: list[tuple[float, Path]] = []
     for conf_dir in sorted(opt_root.glob("conf_*")):
         out_file = conf_dir / "opt.out"
-        if not check_success(out_file):
+        if not check_opt_converged(out_file):
             continue
         e = extract_sp_energy(out_file)
         if e is not None:
@@ -4745,37 +5032,25 @@ def stage_sp_nroot(mol_dir: Path, charge: int, log: logging.Logger,
     template   = get_template("sp_nroot")
     nroot_root = mol_dir / "06_sp_nroot"
     nroot_root.mkdir(parents=True, exist_ok=True)
-    successful = []
-
+    tasks = []
     for e, opt_dir in selected:
-        conf_id  = opt_dir.name
-        opt_xyz  = resolve_opt_xyz(opt_dir)
-
+        opt_xyz = resolve_opt_xyz(opt_dir)
         if opt_xyz is None:
-            log.warning(f"[SP_NROOT] {conf_id}: no se encontró opt_opt.xyz — saltando")
+            log.warning(f"[SP_NROOT] {opt_dir.name}: no se encontró opt_opt.xyz — saltando")
             continue
-
-        nroot_dir = nroot_root / conf_id
-        nroot_dir.mkdir(parents=True, exist_ok=True)
-
-        out_file = nroot_dir / "sp_nroot.out"
-        inp_file = nroot_dir / "sp_nroot.inp"
-
-        if not check_success(out_file):
-            if not safe_copy(opt_xyz, nroot_dir / "opt_opt.xyz"):
-                log.warning(f"[SP_NROOT] {conf_id}: error copiando opt_opt.xyz — saltando")
-                continue
-            inp_text = template.format(
-                CHARGE=charge, MULT=MULT,
-                NPROCS=NPROCS, MAXCORE=MAXCORE,
-            )
-            inp_file.write_text(inp_text)
-
-        ok = run_orca(inp_file, out_file, log)
-        if ok:
-            successful.append(nroot_dir)
-        else:
-            log.warning(f"[SP_NROOT] {conf_id} falló")
+        tasks.append({
+            "conf_id":  opt_dir.name,
+            "job_dir":  nroot_root / opt_dir.name,
+            "inp_name": "sp_nroot.inp",
+            "inp_text": template.format(CHARGE=charge, MULT=MULT,
+                                        NPROCS=NPROCS, MAXCORE=MAXCORE),
+            "xyz_src":  opt_xyz,
+            "nprocs":   NPROCS,
+            "tag":      "SP_NROOT",
+            "log":      log,
+        })
+    successful = _run_batched(tasks, _orca_job_worker, SP_BATCH_SIZE, NPROCS,
+                              log, "SP_NROOT", result_key="job_dir", fail_msg="falló")
 
     log.info(f"[SP_NROOT] {len(successful)}/{len(selected)} completados")
     return successful
@@ -4872,23 +5147,23 @@ def stage_adc2(
     # ── Preparar y correr ADC2 ────────────────────────────────────
     adc2_root = mol_dir / "07_adc2"
     adc2_dir  = adc2_root / conf_id
-    adc2_dir.mkdir(parents=True, exist_ok=True)
+    out_file  = adc2_dir / "adc2.out"
 
-    out_file = adc2_dir / "adc2.out"
-    inp_file = adc2_dir / "adc2.inp"
-
-    if not check_success(out_file):
-        if not safe_copy(geom_src, adc2_dir / "adc2_geom.xyz"):
-            log.error(f"[ADC2] {conf_id}: error copiando geometría — abortando etapa.")
-            return None
-        template = get_template("adc2")
-        inp_text = template.format(
+    task = {
+        "conf_id":  conf_id,
+        "job_dir":  adc2_dir,
+        "inp_name": "adc2.inp",
+        "inp_text": get_template("adc2").format(
             CHARGE=charge, MULT=MULT,
             NPROCS_ADC2=NPROCS_ADC2, MAXCORE_ADC2=MAXCORE_ADC2,
-        )
-        inp_file.write_text(inp_text)
-
-    ok = run_orca(inp_file, out_file, log)
+        ),
+        "xyz_src":  geom_src,
+        "nprocs":   NPROCS_ADC2,
+        "tag":      "ADC2",
+        "log":      log,
+    }
+    ok = bool(_run_batched([task], _orca_job_worker, 1, NPROCS_ADC2, log, "ADC2",
+                           result_key="job_dir", fail_msg="falló", allow_unpinned=True))
     if ok:
         log.info(f"[ADC2] {conf_id} completado ✓ → {adc2_dir}")
 
@@ -4930,9 +5205,8 @@ def stage_adc2(
                 "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
             }
             try:
-                results_json.write_text(
-                    json.dumps(record, indent=2, ensure_ascii=False) + "\n"
-                )
+                atomic_write(results_json,
+                             json.dumps(record, indent=2, ensure_ascii=False) + "\n")
                 log.info(f"[ADC2] resultados guardados → {results_json}")
             except OSError as e:
                 log.warning(f"[ADC2] no se pudo escribir {results_json}: {e}")
@@ -4947,6 +5221,144 @@ def stage_adc2(
 
     log.error(f"[ADC2] {conf_id} falló.")
     return None
+
+
+# ─────────────────────────────────────────────
+#  EJECUCIÓN POR LOTES (común a OPT/NumFreq/SP/SP_GAS/SP_SMD/TDDFT/NRoot)
+# ─────────────────────────────────────────────
+
+def _run_batched(tasks: list[dict], worker, batch_size: int, nprocs: int,
+                 log: logging.Logger, tag: str, result_key: str,
+                 label=None, fail_msg: str = "falló — excluido",
+                 allow_unpinned: bool = False) -> list[Path]:
+    """
+    Corre `worker(task)` sobre `tasks` en lotes de ≤batch_size jobs
+    paralelos, cada uno confinado a su propia cpu_list (taskset +
+    MAAQC_PE_LIST). Devuelve los `res[result_key]` de los jobs exitosos.
+
+    assign_cpu_lists() puede devolver MENOS listas que las pedidas: el lote
+    real se recorta a las listas obtenidas, así ningún job corre sin
+    taskset. La reserva de CPUs se libera en `finally`, también ante
+    Ctrl-C/SIGTERM (que _sigint_handler convierte en SystemExit tras matar
+    los procesos ORCA) o ante una excepción dentro de un worker.
+    """
+    results: dict[int, Path] = {}   # índice de task → resultado (orden estable)
+    if not tasks:
+        return []
+    label = label or (lambda t: t["conf_id"])
+    batch_size = max(1, batch_size)
+    n_lotes_est = -(-len(tasks) // batch_size)
+    _check_cpu_budget(batch_size, nprocs, log)
+
+    idx, lote_num = 0, 0
+    while idx < len(tasks):
+        want        = min(batch_size, len(tasks) - idx)
+        nprocs_want = tasks[idx].get("nprocs", nprocs)
+        cpu_lists   = _acquire_cpu_lists(want, nprocs_want, log, tag)
+        if not cpu_lists and allow_unpinned and not _cpu_lock_busy_cpus():
+            # Job más ancho que los núcleos físicos independientes (p. ej.
+            # NumFreq con 12 ranks en el T14) y nadie más usando la máquina:
+            # se corre sin taskset, uno a la vez, como hacía el código viejo.
+            log.warning(f"[{tag}] {nprocs_want} ranks no caben en núcleos físicos "
+                        f"independientes — corriendo sin pinning (1 job a la vez)")
+            cpu_lists = [None]
+        if not cpu_lists:
+            log.error(f"[{tag}] no hay suficientes cores físicos independientes "
+                      f"para asignar ni un solo job — abortando etapa {tag}")
+            break
+        batch = tasks[idx: idx + len(cpu_lists)]
+        lote_num += 1
+        for t, cl in zip(batch, cpu_lists, strict=False):
+            t["cpu_list"] = cl
+        log.info(f"[{tag}] ── Lote {lote_num}/~{n_lotes_est}: {[label(t) for t in batch]}  "
+                 f"(cores: {[','.join(map(str, cl)) if cl else 'libre' for cl in cpu_lists]})")
+        try:
+            with ThreadPoolExecutor(max_workers=len(batch)) as pool:
+                futures = {pool.submit(worker, t): (idx + k, label(t))
+                           for k, t in enumerate(batch)}
+                for fut in as_completed(futures):
+                    pos, lbl = futures[fut]
+                    try:
+                        res = fut.result()
+                    except Exception as e:
+                        log.error(f"[{tag}] {lbl}: error inesperado en el worker: {e}",
+                                  exc_info=True)
+                        continue
+                    ok = bool(res.get("success")) and res.get(result_key) is not None
+                    log.info(f"[{tag}]   {'✓' if ok else '✗'} {lbl}  "
+                             f"({res.get('elapsed', 0.0):.1f} min)")
+                    if ok:
+                        results[pos] = res[result_key]
+                    else:
+                        log.warning(f"[{tag}] {lbl} {fail_msg}")
+        finally:
+            _cpu_lock_release()
+        idx += len(cpu_lists)
+    return [results[k] for k in sorted(results)]
+
+
+def _orca_job_worker(task: dict) -> dict:
+    """Worker genérico: prepara (prepare_orca_job) y corre un único input.
+
+    task: conf_id, job_dir, inp_name, inp_text, nprocs, tag, log;
+          opcionales xyz_src, extra_copies, cpu_list.
+    """
+    log      = task["log"]
+    job_dir  = task["job_dir"]
+    cpu_list = task.get("cpu_list")
+    inp_file = prepare_orca_job(job_dir, task["inp_name"], task["inp_text"], log,
+                                task["tag"], xyz_src=task.get("xyz_src"),
+                                extra_copies=task.get("extra_copies", ()))
+    if inp_file is None:
+        return {"conf_id": task["conf_id"], "job_dir": None, "success": False, "elapsed": 0.0}
+    t0 = time.time()
+    ok = run_orca(inp_file, inp_file.with_suffix(".out"), log,
+                  env=build_omp_env(task["nprocs"], cpu_list=cpu_list), cpu_list=cpu_list)
+    return {"conf_id": task["conf_id"], "job_dir": job_dir if ok else None,
+            "success": ok, "elapsed": (time.time() - t0) / 60}
+
+
+def _opt_restart_input(conf_dir: Path, inp_text: str, natoms: int,
+                       log: logging.Logger, conf_id: str) -> Optional[str]:
+    """
+    Si hay una OPT previa interrumpida o no convergida DEL MISMO job (misma
+    huella en job.json, o mismo opt.inp para runs anteriores al manifiesto),
+    devuelve un input que parte de la última geometría (opt.xyz, que ORCA
+    reescribe en cada ciclo) y de los orbitales opt.gbw si existen. Si no,
+    None (se parte de la geometría de CREST/CENSO).
+    """
+    partial = conf_dir / "opt.xyz"
+    if not partial.exists():
+        return None
+    spec = job_spec_sha1(inp_text)
+    man  = read_manifest(conf_dir)
+    same_job = man.get("spec_sha1") == spec
+    if not man.get("spec_sha1") and (conf_dir / "opt.inp").exists():
+        same_job = job_spec_sha1((conf_dir / "opt.inp").read_text(errors="replace")) == spec
+    if not same_job:
+        return None
+    try:
+        lines = partial.read_text(errors="replace").splitlines()
+        coords = [ln for ln in lines[2:] if ln.strip()]
+    except OSError:
+        return None
+    if len(coords) != natoms:
+        log.warning(f"[OPT] {conf_id}: opt.xyz parcial tiene {len(coords)} átomos "
+                    f"(esperados {natoms}) — se ignora, partiendo de CREST")
+        return None
+
+    text = re.sub(r"(^\*\s*xyz\s+-?\d+\s+\d+\s*\n).*?(^\*\s*$)",
+                  lambda m: m.group(1) + "\n".join(coords) + "\n" + m.group(2),
+                  inp_text, count=1, flags=re.MULTILINE | re.DOTALL)
+    gbw = conf_dir / "opt.gbw"
+    if gbw.exists() and gbw.stat().st_size > 0:
+        # ORCA no puede leer el guess del mismo .gbw que va a reescribir.
+        shutil.copy2(gbw, conf_dir / "opt_restart.gbw")
+        first, _, rest = text.partition("\n")
+        text = f'{first}\n! MORead\n%moinp "opt_restart.gbw"\n{rest}'
+    log.info(f"[OPT] {conf_id}: reanudando desde la última geometría de opt.xyz"
+             + (" + orbitales opt.gbw" if gbw.exists() else ""))
+    return text
 
 
 def _opt_worker(task: dict) -> dict:
@@ -4976,19 +5388,33 @@ def _opt_worker(task: dict) -> dict:
     log      : logging.Logger = task["log"]
     cpu_list : Optional[list[int]] = task.get("cpu_list")
 
-    inp_file = conf_dir / "opt.inp"
     out_file = conf_dir / "opt.out"
-
     conf_dir.mkdir(parents=True, exist_ok=True)
 
+    fail = {"conf_id": conf_id, "conf_dir": conf_dir, "energy": None,
+            "success": False, "elapsed": 0.0}
+
+    inp_text = template.format(
+        CHARGE=charge, MULT=MULT,
+        NPROCS=nprocs, MAXCORE=maxcore,
+        COORDS=atoms_to_xyz_block(atoms),
+    )
+
+    # Terminó "normalmente" pero agotó MaxIter sin converger: el .out se
+    # archiva y la OPT se reanuda desde la última geometría (abajo).
+    if check_success(out_file) and not check_opt_converged(out_file):
+        dest = archive_files(conf_dir, [out_file], "notconverged")
+        log.warning(f"[OPT] {conf_id}: la geometría NO convergió (MaxIter) — "
+                    f"output archivado en {dest}; se reanuda la optimización")
+
+    restart_text = None
     if not check_success(out_file):
-        coords   = atoms_to_xyz_block(atoms)
-        inp_text = template.format(
-            CHARGE=charge, MULT=MULT,
-            NPROCS=nprocs, MAXCORE=maxcore,
-            COORDS=coords,
-        )
-        inp_file.write_text(inp_text)
+        restart_text = _opt_restart_input(conf_dir, inp_text, len(atoms), log, conf_id)
+
+    inp_file = prepare_orca_job(conf_dir, "opt.inp", inp_text, log, "OPT",
+                                write_text=restart_text)
+    if inp_file is None:
+        return fail
 
     t0      = time.time()
     # Env por worker: construido con el nprocs del task, no con el global.
@@ -4999,7 +5425,11 @@ def _opt_worker(task: dict) -> dict:
 
     energy: Optional[float] = None
     if success:
-        if resolve_opt_xyz(conf_dir) is None:
+        if not check_opt_converged(out_file):
+            log.warning(f"[OPT] {conf_id}: ORCA terminó pero la geometría NO "
+                        f"convergió — excluido (se reanudará en la próxima corrida)")
+            success = False
+        elif resolve_opt_xyz(conf_dir) is None:
             log.warning(f"[OPT] {conf_id}: ORCA OK pero sin geometría optimizada")
             success = False
         else:
@@ -5043,21 +5473,15 @@ def _sp_worker(task: dict) -> dict:
         log.warning(f"[SP] {conf_id}: no se encontró opt_opt.xyz ni opt.xyz — saltando")
         return {"conf_id": conf_id, "sp_dir": None, "success": False, "elapsed": 0.0}
 
-    sp_dir = mol_dir / "04_sp" / conf_id
-    sp_dir.mkdir(parents=True, exist_ok=True)
-
+    sp_dir   = mol_dir / "04_sp" / conf_id
     out_file = sp_dir / "sp.out"
-    inp_file = sp_dir / "sp.inp"
-
-    if not check_success(out_file):
-        if not safe_copy(opt_xyz, sp_dir / "opt_opt.xyz"):
-            log.warning(f"[SP] {conf_id}: error copiando opt_opt.xyz — saltando")
-            return {"conf_id": conf_id, "sp_dir": None, "success": False, "elapsed": 0.0}
-        inp_text = template.format(
-            CHARGE=charge, MULT=MULT,
-            NPROCS=nprocs, MAXCORE=maxcore,
-        )
-        inp_file.write_text(inp_text)
+    inp_text = template.format(
+        CHARGE=charge, MULT=MULT,
+        NPROCS=nprocs, MAXCORE=maxcore,
+    )
+    inp_file = prepare_orca_job(sp_dir, "sp.inp", inp_text, log, "SP", xyz_src=opt_xyz)
+    if inp_file is None:
+        return {"conf_id": conf_id, "sp_dir": None, "success": False, "elapsed": 0.0}
 
     t0         = time.time()
     worker_env = build_omp_env(nprocs, cpu_list=cpu_list)
@@ -5114,20 +5538,15 @@ def _sp_gas_worker(task: dict) -> dict:
         return {"conf_id": conf_id, "sp_gas_dir": None, "success": False, "elapsed": 0.0}
 
     sp_gas_dir = mol_dir / "04b_sp_gas" / conf_id
-    sp_gas_dir.mkdir(parents=True, exist_ok=True)
-
     out_file = sp_gas_dir / "sp_gas.out"
-    inp_file = sp_gas_dir / "sp_gas.inp"
-
-    if not check_success(out_file):
-        if not safe_copy(opt_xyz, sp_gas_dir / "opt_opt.xyz"):
-            log.warning(f"[SP_GAS] {conf_id}: error copiando opt_opt.xyz — saltando")
-            return {"conf_id": conf_id, "sp_gas_dir": None, "success": False, "elapsed": 0.0}
-        inp_text = template.format(
-            CHARGE=charge, MULT=mult,
-            NPROCS=nprocs, MAXCORE=maxcore,
-        )
-        inp_file.write_text(inp_text)
+    inp_text = template.format(
+        CHARGE=charge, MULT=mult,
+        NPROCS=nprocs, MAXCORE=maxcore,
+    )
+    inp_file = prepare_orca_job(sp_gas_dir, "sp_gas.inp", inp_text, log, "SP_GAS",
+                                xyz_src=opt_xyz)
+    if inp_file is None:
+        return {"conf_id": conf_id, "sp_gas_dir": None, "success": False, "elapsed": 0.0}
 
     t0         = time.time()
     worker_env = build_omp_env(nprocs, cpu_list=cpu_list)
@@ -5186,20 +5605,15 @@ def _sp_smd_worker(task: dict) -> dict:
         return {"conf_id": conf_id, "sp_smd_dir": None, "success": False, "elapsed": 0.0}
 
     sp_smd_dir = mol_dir / "04c_sp_smd" / conf_id
-    sp_smd_dir.mkdir(parents=True, exist_ok=True)
-
     out_file = sp_smd_dir / "sp_smd.out"
-    inp_file = sp_smd_dir / "sp_smd.inp"
-
-    if not check_success(out_file):
-        if not safe_copy(opt_xyz, sp_smd_dir / "opt_opt.xyz"):
-            log.warning(f"[SP_SMD] {conf_id}: error copiando opt_opt.xyz — saltando")
-            return {"conf_id": conf_id, "sp_smd_dir": None, "success": False, "elapsed": 0.0}
-        inp_text = template.format(
-            CHARGE=charge, MULT=mult,
-            NPROCS=nprocs, MAXCORE=maxcore,
-        )
-        inp_file.write_text(inp_text)
+    inp_text = template.format(
+        CHARGE=charge, MULT=mult,
+        NPROCS=nprocs, MAXCORE=maxcore,
+    )
+    inp_file = prepare_orca_job(sp_smd_dir, "sp_smd.inp", inp_text, log, "SP_SMD",
+                                xyz_src=opt_xyz)
+    if inp_file is None:
+        return {"conf_id": conf_id, "sp_smd_dir": None, "success": False, "elapsed": 0.0}
 
     t0         = time.time()
     worker_env = build_omp_env(nprocs, cpu_list=cpu_list)
@@ -5240,102 +5654,95 @@ def _sp_smd_worker(task: dict) -> dict:
 CPU_LOCK_FILE = Path("/tmp/maaqc_cpu_lock.json")
 
 
-def _cpu_lock_busy_cpus() -> set[int]:
+from contextlib import contextmanager as _contextmanager
+
+
+@_contextmanager
+def _cpu_lock_txn():
     """
-    Devuelve el conjunto de CPUs lógicas reservadas AHORA MISMO por OTROS
-    procesos vivos (pipeline.py u otros que usen este lock), leyendo y
-    depurando CPU_LOCK_FILE. Nunca incluye la reserva del propio proceso.
+    Transacción sobre CPU_LOCK_FILE bajo UN solo flock exclusivo: entrega el
+    dict {pid: [cpus]} ya podado de PIDs muertos y lo reescribe al salir.
+
+    Antes, leer reservas ajenas → calcular asignación → registrar la propia
+    eran tres flock separados: dos instancias que arrancaban a la vez podían
+    leer el mismo estado y reservar los MISMOS PUs. Fail-open: si el archivo
+    no se puede usar, entrega un dict vacío y no persiste nada.
     """
-    if not CPU_LOCK_FILE.exists():
-        return set()
-    my_pid = str(os.getpid())
     try:
-        with open(CPU_LOCK_FILE, "r+") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
+        fd = os.open(CPU_LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o666)
+    except OSError:
+        yield {}
+        return
+    with os.fdopen(fd, "r+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
             try:
-                raw = f.read().strip()
+                raw  = f.read().strip()
                 data = json.loads(raw) if raw else {}
-                alive: dict[str, list[int]] = {}
-                for pid_str, cpus in data.items():
-                    if pid_str == my_pid:
-                        continue
-                    try:
-                        os.kill(int(pid_str), 0)
-                    except (OSError, ValueError):
-                        continue   # PID muerto o inválido — se poda
-                    alive[pid_str] = cpus
-                # Reescribir depurado (poda de PIDs muertos), preservando
-                # la propia reserva si existía.
-                if my_pid in data:
-                    alive[my_pid] = data[my_pid]
-                f.seek(0)
-                json.dump(alive, f)
-                f.truncate()
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
-        alive.pop(my_pid, None)
-        return {c for cpus in alive.values() for c in cpus}
-    except (OSError, ValueError, json.JSONDecodeError):
-        return set()   # fail-open
+                if not isinstance(data, dict):
+                    data = {}
+            except ValueError:
+                data = {}
+            alive: dict[str, list[int]] = {}
+            for pid_str, cpus in data.items():
+                try:
+                    os.kill(int(pid_str), 0)
+                except ProcessLookupError:
+                    continue            # PID muerto — se poda
+                except PermissionError:
+                    pass                # vivo, de otro usuario
+                except (OSError, ValueError):
+                    continue
+                alive[pid_str] = list(cpus)
+            yield alive
+            f.seek(0)
+            json.dump(alive, f)
+            f.truncate()
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def _cpu_lock_busy_cpus() -> set[int]:
+    """CPUs reservados AHORA por OTROS procesos vivos (nunca los propios)."""
+    my_pid = str(os.getpid())
+    with _cpu_lock_txn() as data:
+        return {c for pid, cpus in data.items() if pid != my_pid for c in cpus}
 
 
 def _cpu_lock_reserve(cpus: list[int]) -> None:
     """Registra los CPUs que el proceso actual (PID) usará en este lote."""
-    try:
-        CPU_LOCK_FILE.touch(exist_ok=True)
-        with open(CPU_LOCK_FILE, "r+") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            try:
-                raw = f.read().strip()
-                data = json.loads(raw) if raw else {}
-                data[str(os.getpid())] = cpus
-                f.seek(0)
-                json.dump(data, f)
-                f.truncate()
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
-    except (OSError, ValueError, json.JSONDecodeError):
-        pass   # fail-open: sin coordinación, pero el pipeline sigue
+    with _cpu_lock_txn() as data:
+        data[str(os.getpid())] = sorted(set(cpus))
 
 
 def _cpu_lock_release() -> None:
     """Libera la reserva de CPUs del proceso actual (llamar al terminar cada lote)."""
     if not CPU_LOCK_FILE.exists():
         return
-    try:
-        with open(CPU_LOCK_FILE, "r+") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            try:
-                raw = f.read().strip()
-                data = json.loads(raw) if raw else {}
-                data.pop(str(os.getpid()), None)
-                f.seek(0)
-                json.dump(data, f)
-                f.truncate()
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
-    except (OSError, ValueError, json.JSONDecodeError):
-        pass
+    with _cpu_lock_txn() as data:
+        data.pop(str(os.getpid()), None)
 
 
 def _acquire_cpu_lists(want: int, nprocs_per_job: int,
                         log: logging.Logger, tag: str) -> list[list[int]]:
     """
     Wrapper de assign_cpu_lists() que coordina con OTRAS instancias de
-    pipeline.py corriendo en paralelo vía CPU_LOCK_FILE: excluye los PUs
-    que otro proceso vivo ya tiene reservados, calcula la asignación sobre
-    el resto, y registra la reserva propia bajo el PID actual.
+    maaqc.py vía CPU_LOCK_FILE: excluye los PUs que otro proceso vivo ya
+    tiene reservados, calcula la asignación sobre el resto y registra la
+    reserva propia — todo dentro de la MISMA transacción con lock.
 
     El caller es responsable de llamar _cpu_lock_release() cuando el lote
     termina (éxito, fallo o Ctrl-C) para liberar los PUs para otros procesos.
     """
-    busy_others = _cpu_lock_busy_cpus()
-    cpu_lists = assign_cpu_lists(want, nprocs_per_job, exclude=busy_others)
+    my_pid = str(os.getpid())
+    with _cpu_lock_txn() as data:
+        busy_others = {c for pid, cpus in data.items() if pid != my_pid for c in cpus}
+        cpu_lists = assign_cpu_lists(want, nprocs_per_job, exclude=busy_others)
+        if cpu_lists:
+            data[my_pid] = sorted({c for cl in cpu_lists for c in cl})
     if busy_others:
         log.info(f"[{tag}] excluyendo PUs reservados por otra(s) instancia(s) "
-                 f"de pipeline.py: {sorted(busy_others)}")
-    if cpu_lists:
-        _cpu_lock_reserve([c for cl in cpu_lists for c in cl])
+                 f"de maaqc.py: {sorted(busy_others)}")
     return cpu_lists
 
 
@@ -5343,19 +5750,20 @@ def _acquire_cpu_pool(n_cores: int, log: logging.Logger, tag: str) -> list[int]:
     """
     Wrapper de assign_cpu_pool() — análogo a _acquire_cpu_lists() pero para
     el pool "plano" que usa CENSO (un único proceso de larga duración, no
-    un lote de workers). Excluye los PUs que otra instancia de pipeline.py
-    ya tiene reservados y registra la reserva propia bajo el PID actual.
+    un lote de workers). Misma transacción atómica que _acquire_cpu_lists().
 
     El caller es responsable de llamar _cpu_lock_release() cuando CENSO
     termina (éxito, timeout, error o Ctrl-C) para liberar los PUs.
     """
-    busy_others = _cpu_lock_busy_cpus()
-    cpu_pool = assign_cpu_pool(n_cores, exclude=busy_others)
+    my_pid = str(os.getpid())
+    with _cpu_lock_txn() as data:
+        busy_others = {c for pid, cpus in data.items() if pid != my_pid for c in cpus}
+        cpu_pool = assign_cpu_pool(n_cores, exclude=busy_others)
+        if cpu_pool:
+            data[my_pid] = sorted(set(cpu_pool))
     if busy_others:
         log.info(f"[{tag}] excluyendo PUs reservados por otra(s) instancia(s) "
-                 f"de pipeline.py: {sorted(busy_others)}")
-    if cpu_pool:
-        _cpu_lock_reserve(cpu_pool)
+                 f"de maaqc.py: {sorted(busy_others)}")
     return cpu_pool
 
 
@@ -5658,7 +6066,7 @@ def print_status():
 
     print(f"\n{'─'*60}")
     print(f"  Estado de runs en: {PIPE_WORK_ROOT.resolve()}")
-    print(f"  (raíz auto-detectada — usa $PIPELINE_ROOT para forzar otra)")
+    print("  (raíz auto-detectada — usa $PIPELINE_ROOT para forzar otra)")
     print(f"{'─'*60}")
 
     # Estructura: PAPER_ROOT/<grupo>/runs/<mol_name>/<etapas>
@@ -5723,7 +6131,8 @@ def _setup_run_resources(args):
     """
     global NPROCS_CREST, NPROCS, MAXCORE, NPROCS_NUMFREQ, MAXCORE_NUMFREQ, \
            NPROCS_TDDFT, MAXCORE_TDDFT, NPROCS_ADC2, MAXCORE_ADC2, \
-           OPT_BATCH_SIZE, SP_BATCH_SIZE, TDDFT_BATCH_SIZE, OMP_ENV
+           OPT_BATCH_SIZE, SP_BATCH_SIZE, TDDFT_BATCH_SIZE, OMP_ENV, \
+           NUMFREQ_BATCH_SIZE
 
     # ── Validar --multitemp / --trange ───────────────────────────────────────
     if args.trange is not None and not args.multitemp:
@@ -5749,7 +6158,6 @@ def _setup_run_resources(args):
             censo_temperatures = list(_np.linspace(t_ini, t_fin, n_pts))
         # Validar que --temperature cae dentro del rango generado
         ref_temp = args.temperature
-        temp_set = {round(t, 8) for t in censo_temperatures}
         # Buscar la temperatura más cercana en el rango generado
         closest = min(censo_temperatures, key=lambda t: abs(t - ref_temp))
         if abs(closest - ref_temp) > 1e-4:
@@ -5835,6 +6243,12 @@ def _setup_run_resources(args):
     OPT_BATCH_SIZE   = opt_batch_size
     SP_BATCH_SIZE    = sp_batch_size
     TDDFT_BATCH_SIZE = tddft_batch
+    # NumFreq: tantos jobs simultáneos como quepan en cores Y en RAM usable.
+    _ram_usable = int(rp.ram_mb * rp.SAFETY_FACTOR)
+    NUMFREQ_BATCH_SIZE = max(1, min(
+        len(usable_pus()) // max(nprocs_numfreq, 1),
+        _ram_usable // max(nprocs_numfreq * maxcore_nf, 1),
+    ))
     OMP_ENV          = build_omp_env(NPROCS)
 
     resources = dict(
@@ -5858,6 +6272,8 @@ def _run_one(args, parser):
     consecutivamente para cada una en el orden en que se escribieron en
     la terminal.
     """
+    global RERUN_STALE
+    RERUN_STALE = bool(getattr(args, "rerun_stale", False))
     censo_temperatures, _res = _setup_run_resources(args)
     nprocs_crest   = _res["nprocs_crest"]
     nprocs         = _res["nprocs"]
@@ -5951,7 +6367,7 @@ def _run_one(args, parser):
     log.info("=" * 60)
     log.info(f"PIPELINE ORCA  —  molécula: {mol_name}")
     log.info(f"Carga: {args.charge}   Mult: {MULT}")
-    log.info(f"Flujo: CREST → CENSO (prescreen) → OPT (nconf auto) → NumFreq → SP → TDDFT → ADC2")
+    log.info("Flujo: CREST → CENSO (prescreen) → OPT (nconf auto) → NumFreq → SP → TDDFT → ADC2")
     log.info(f"Inicio desde etapa: {args.start.upper()}")
     log.info(f"ORCA: {ORCA_BIN}")
     # ── Temperatura / Multitemp ──────────────────────────────────────────────
@@ -6093,6 +6509,21 @@ def _run_one(args, parser):
     )
 
 
+def _previous_ok_dirs(stage_root: Path, log: logging.Logger, tag: str, ok) -> list[Path]:
+    """conf_* de una etapa saltada, filtrando los que no terminaron bien.
+
+    Antes se tomaban TODOS los conf_* existentes, incluidos OPT fallidas o
+    no convergidas, que luego entraban a NumFreq/SP.
+    """
+    dirs = sorted(stage_root.glob("conf_*")) if stage_root.exists() else []
+    good = [d for d in dirs if ok(d)]
+    bad  = [d.name for d in dirs if d not in good]
+    log.info(f"[{tag}] saltado — {len(good)}/{len(dirs)} directorios previos válidos")
+    if bad:
+        log.warning(f"[{tag}] excluidos por fallo/no convergencia: {bad}")
+    return good
+
+
 def _run_downstream_from_crest(args, conformers_xyz, mol_dir, charge,
                                 natoms_ref_xyz, mol_name, log,
                                 censo_temperatures, start_idx):
@@ -6216,9 +6647,13 @@ def _run_downstream_from_crest(args, conformers_xyz, mol_dir, charge,
             log.error("Ningún confórmero optimizado correctamente. Abortando.")
             sys.exit(1)
     else:
-        opt_dirs = sorted((mol_dir / "02_opt").glob("conf_*")) \
-                   if (mol_dir / "02_opt").exists() else []
-        log.info(f"[OPT] saltado — encontrados {len(opt_dirs)} directorios previos")
+        opt_dirs = _previous_ok_dirs(
+            mol_dir / "02_opt", log, "OPT",
+            # --start freq coloca un opt_opt.xyz sin opt.out: también vale.
+            ok=lambda d: (check_opt_converged(d / "opt.out")
+                          or (not (d / "opt.out").exists()
+                              and resolve_opt_xyz(d) is not None)),
+        )
 
     # ── Etapa 3: NUMFREQ ────────────────────────────────────────
     if args.skipnumfreq:
@@ -6234,9 +6669,8 @@ def _run_downstream_from_crest(args, conformers_xyz, mol_dir, charge,
             log.error("Ningún cálculo de frecuencias completado. Abortando.")
             sys.exit(1)
     else:
-        freq_dirs = sorted((mol_dir / "03_numfreq").glob("conf_*")) \
-                    if (mol_dir / "03_numfreq").exists() else []
-        log.info(f"[NUMFREQ] saltado — encontrados {len(freq_dirs)} directorios previos")
+        freq_dirs = _previous_ok_dirs(mol_dir / "03_numfreq", log, "NUMFREQ",
+                                      ok=lambda d: check_success(d / "freq.out"))
 
     # ── Etapa 4: SP (fase gas) — OBLIGATORIA ─────────────────────
     # SP es la etapa mínima requerida para dar el pipeline por finalizado.
@@ -6472,6 +6906,12 @@ Ejemplos (modo multi-molécula, --mol repetido):
                              "sus directorios.")
     parser.add_argument("--status", action="store_true",
                         help="mostrar estado de todos los runs y salir")
+    parser.add_argument("--rerun-stale", action="store_true",
+                        help="si un job ORCA ya terminado se calculó con parámetros "
+                             "distintos a los actuales (input, carga o geometría de "
+                             "origen; ver <job>/job.json), archivarlo en "
+                             "<job>/_archive/ y recalcularlo. Sin este flag solo se "
+                             "avisa y se reutiliza.")
     parser.add_argument(
         "--censo-standalone", type=Path, default=None, metavar="ENSEMBLE_XYZ",
         help=(
@@ -6750,6 +7190,11 @@ Ejemplos (modo multi-molécula, --mol repetido):
             resumen.append((etiqueta, "OK"))
         except SystemExit as e:
             codigo = e.code if isinstance(e.code, int) else 1
+            if codigo == 130:
+                # Ctrl-C/SIGTERM: _sigint_handler ya mató los ORCA activos;
+                # NO se pasa a la siguiente molécula.
+                print(f"\n[{i}/{n}] {etiqueta}: interrumpido — se detiene la cola.")
+                raise
             print(f"\n[{i}/{n}] {etiqueta}: termino con error (sys.exit={codigo}). "
                   f"Continuando con la siguiente molecula...\n")
             resumen.append((etiqueta, f"ERROR (sys.exit={codigo})"))
@@ -7306,7 +7751,7 @@ def print_crest_dft_analysis(df: pd.DataFrame):
     inversions = df["rank_change"].abs() if "rank_change" in df.columns else pd.Series(dtype=float)
     n_inv = (inversions > 0).sum() if not inversions.empty else 0
 
-    print(f"\n  ── Reordenamiento conformacional CREST (GFN2-xTB) → DFT ──")
+    print("\n  ── Reordenamiento conformacional CREST (GFN2-xTB) → DFT ──")
     print(f"  Inversiones de rango detectadas: {n_inv}/{len(df)}")
 
     def fmt(x):
@@ -7353,6 +7798,26 @@ def print_crest_dft_analysis(df: pd.DataFrame):
 #  CICLO TERMODINÁMICO COMPUESTO + BOLTZMANN
 # ─────────────────────────────────────────────
 
+RC_GCORR_SOURCE = "harmonic"   # misma convención que --goodvibes off en `pka`
+
+
+def rc_thermochem_multiT(freq_out: Path, source: Optional[str] = None) -> dict:
+    """
+    Termoquímica de un freq.out para `collect`, con la MISMA fuente que
+    `pka` (get_thermochem → GoodVibes) evaluada en cada T de TEMPS_K.
+    Devuelve el dict de get_thermochem(T_STD) más "G_corr_by_T" {label: Eh}.
+    Las llamadas a GoodVibes quedan cacheadas (memoria + disco).
+    """
+    source = source or RC_GCORR_SOURCE
+    kw = dict(source=source, gv_cutoff=GV_CUTOFF, gv_qs=GV_QS, gv_qh=GV_QH)
+    tc = get_thermochem(freq_out, T=T_STD, **kw)
+    by_T = {}
+    for T, label in zip(TEMPS_K, TEMP_LABELS):
+        r = tc if T == T_STD else get_thermochem(freq_out, T=T, **kw)
+        by_T[label] = r.get("G_corr") if r.get("ok") else None
+    return {**tc, "G_corr_by_T": by_T}
+
+
 def compute_G_total(df_conf: pd.DataFrame) -> pd.DataFrame:
     """
     Aplica el ciclo termodinámico compuesto para calcular G_total de cada
@@ -7365,17 +7830,12 @@ def compute_G_total(df_conf: pd.DataFrame) -> pd.DataFrame:
     donde G_corr_i(T) = H_corr_i - T·S_total_i
     y H_corr, S_total provienen del NumFreq a def2-SVP/CPCM.
 
-    IMPORTANTE — temperatura del NumFreq:
-    El NumFreq de ORCA se corre a 298.15 K por defecto. Para las otras
-    temperaturas (250 K, 274.15 K, 310 K) se recalcula G_corr(T) usando
-    la aproximación rígido-rotor/oscilador-armónico (RRHO):
+    IMPORTANTE — temperatura:
+    Si la fila trae "G_corr_by_T" (rc_thermochem_multiT, el camino normal de
+    collect_results) se usa GoodVibes evaluado A CADA T — la misma fuente
+    que `maaqc.py pka`. Solo si falta se cae a la extrapolación
 
         G_corr(T) = H_corr(T_ref) - T · S_total(T_ref)
-
-    Esto es una aproximación válida cuando |T - T_ref| < 60 K (Grimme 2012),
-    adecuada para nuestro rango 250–310 K. Para rigor máximo se debería
-    relanzar el NumFreq a cada T, pero el costo computacional no lo justifica
-    en este sistema.
 
     Columnas añadidas al DataFrame:
         G_corr_298K       : corrección de Gibbs a 298.15 K (Hartree)
@@ -7421,7 +7881,7 @@ def compute_G_total(df_conf: pd.DataFrame) -> pd.DataFrame:
         if e_sp is None or pd.isna(e_sp):
             df.at[idx, "thermo_warning"] = (
                 df.at[idx, "thermo_warning"] + " | E_SP faltante"
-            ).lstrip(" | ")
+            ).removeprefix(" | ")
             continue
 
         H_corr  = tc["H_corr"]
@@ -7433,17 +7893,21 @@ def compute_G_total(df_conf: pd.DataFrame) -> pd.DataFrame:
         df.at[idx, "ZPE"]          = ZPE
         df.at[idx, "thermo_ok"]    = True
 
-        # G_corr a cada T  (aproximación RRHO, válida ±60 K respecto a T_ref)
+        # G_corr a cada T: si viene de rc_thermochem_multiT() es GoodVibes
+        # evaluado A ESA T (la misma fuente que `maaqc.py pka`); si no,
+        # extrapolación H(T_ref) − T·S(T_ref).
+        by_T = tc.get("G_corr_by_T") or {}
         for T, label in zip(TEMPS_K, TEMP_LABELS):
-            G_corr_T = H_corr - T * S_total
-            G_total  = e_sp + G_corr_T
-            df.at[idx, f"G_total_{label}"] = G_total
+            G_corr_T = by_T.get(label)
+            if G_corr_T is None:
+                G_corr_T = H_corr - T * S_total
+            df.at[idx, f"G_total_{label}"] = e_sp + G_corr_T
 
         # G_corr de referencia a 298.15 K
-        df.at[idx, "G_corr_298K"] = H_corr - T_STD * S_total
+        g298 = by_T.get(TEMP_LABELS[TEMPS_K.index(T_STD)])
+        df.at[idx, "G_corr_298K"] = g298 if g298 is not None else H_corr - T_STD * S_total
 
     # ΔG relativo al mínimo para cada temperatura
-    n_ok = df["thermo_ok"].sum()
     for T, label in zip(TEMPS_K, TEMP_LABELS):
         col_g   = f"G_total_{label}"
         col_dg  = f"dG_{label}_kcal"
@@ -7563,7 +8027,7 @@ def print_boltzmann_analysis(df: pd.DataFrame):
         "unknown":          "modo desconocido",
     }.get(mode, mode)
 
-    print(f"\n  ── Pesos de Boltzmann por temperatura ──")
+    print("\n  ── Pesos de Boltzmann por temperatura ──")
     print(f"  Modo: {mode_str}")
 
     avail_labels = [lbl for lbl in TEMP_LABELS if f"boltz_{lbl}" in df.columns]
@@ -7626,7 +8090,7 @@ def print_boltzmann_analysis(df: pd.DataFrame):
             dom_low  = df.loc[df[b_low].idxmax(),  "conformer"]
             dom_high = df.loc[df[b_high].idxmax(), "conformer"]
             if dom_low != dom_high:
-                print(f"\n  ⚠  Confórmero dominante cambia con T:")
+                print("\n  ⚠  Confórmero dominante cambia con T:")
                 print(f"     {TEMP_LABELS[0]} → {dom_low}   │   "
                       f"{TEMP_LABELS[-1]} → {dom_high}")
             else:
@@ -7819,8 +8283,14 @@ def rc_compute_pka(
     acid_freq_file = RC_WORK_ROOT / mol_acid / "03_numfreq" / conf_acid / "freq.out"
     base_freq_file = RC_WORK_ROOT / mol_base / "03_numfreq" / conf_base / "freq.out"
 
-    tc_acid = rc_parse_thermochem(acid_freq_file, T=T)
-    tc_base = rc_parse_thermochem(base_freq_file, T=T)
+    # Misma fuente que compute_pka() (`maaqc.py pka`): GoodVibes evaluado a
+    # T. Antes era el bloque THERMOCHEMISTRY de ORCA (fijo a 298 K y con
+    # su propio quasi-RRHO), así que `collect` y `pka` daban pKa distintos
+    # para los mismos datos.
+    tc_acid = get_thermochem(acid_freq_file, T=T, source=RC_GCORR_SOURCE,
+                             gv_cutoff=GV_CUTOFF, gv_qs=GV_QS, gv_qh=GV_QH)
+    tc_base = get_thermochem(base_freq_file, T=T, source=RC_GCORR_SOURCE,
+                             gv_cutoff=GV_CUTOFF, gv_qs=GV_QS, gv_qh=GV_QH)
 
     G_corr_acid: Optional[float] = None
     G_corr_base: Optional[float] = None
@@ -7855,21 +8325,22 @@ def rc_compute_pka(
     # ── ΔG_gas (en kcal/mol) ─────────────────────────────────────────────
     #   ΔG_gas = G(A⁻, gas) + G(H⁺, gas) - G(AH, gas)
     dG_gas_hartree = G_base_gas - G_acid_gas   # en Hartree (H⁺ se suma aparte)
-    dG_gas_kcal    = dG_gas_hartree * HARTREE_TO_KCAL + G_HPLUS_GAS
+    dG_conc        = dg_conc_corr(T)
+    dG_gas_kcal    = dG_gas_hartree * HARTREE_TO_KCAL + g_hplus_gas(T)
     result["dG_gas_kcal"] = dG_gas_kcal
 
     # ── ΔG_solv para cada especie ─────────────────────────────────────────
     #   ΔG_solv(X) = E_SP_aq(X, CPCM) - E_SP_gas(X)
     #   En kcal/mol. Incluye corrección de concentración estándar δG_conc.
     if E_acid_aq is not None:
-        dG_solv_acid = (E_acid_aq - E_acid_gas) * HARTREE_TO_KCAL + DG_CONC_CORR
+        dG_solv_acid = (E_acid_aq - E_acid_gas) * HARTREE_TO_KCAL + dG_conc
         result["dG_solv_acid"] = dG_solv_acid
     else:
         _warn("No se puede calcular ΔG_solv(AH) sin E_SP acuoso.")
         return result
 
     if E_base_aq is not None:
-        dG_solv_base = (E_base_aq - E_base_gas) * HARTREE_TO_KCAL + DG_CONC_CORR
+        dG_solv_base = (E_base_aq - E_base_gas) * HARTREE_TO_KCAL + dG_conc
         result["dG_solv_base"] = dG_solv_base
     else:
         _warn("No se puede calcular ΔG_solv(A⁻) sin E_SP acuoso.")
@@ -7883,7 +8354,7 @@ def rc_compute_pka(
         dG_gas_kcal
         + dG_solv_base
         + DG_SOLV_HPLUS
-        + DG_CONC_CORR
+        + dG_conc
         - dG_solv_acid
     )
     result["dG_aq_kcal"] = dG_aq_kcal
@@ -7900,7 +8371,7 @@ def print_pka_analysis(pka_result: dict, mol_acid: str, mol_base: str):
     """Imprime el análisis completo del ciclo termodinámico de pKa."""
     sep = "─" * 74
     print(f"\n{sep}")
-    print(f"  ANÁLISIS DE pKa TEÓRICO")
+    print("  ANÁLISIS DE pKa TEÓRICO")
     print(f"  AH = {mol_acid}   │   A⁻ = {mol_base}")
     print(f"  T  = {pka_result['T']:.2f} K")
     print(sep)
@@ -7914,7 +8385,7 @@ def print_pka_analysis(pka_result: dict, mol_acid: str, mol_base: str):
     print(f"\n  Confórmero representativo AH : {pka_result['conf_acid']}")
     print(f"  Confórmero representativo A⁻ : {pka_result['conf_base']}")
 
-    print(f"\n  ── Contribuciones al ciclo de Born ──")
+    print("\n  ── Contribuciones al ciclo de Born ──")
     print(f"  {'ΔG_gas':>30} = {pka_result['dG_gas_kcal']:+10.3f} kcal/mol")
     print(f"  {'ΔG_solv(AH)':>30} = {pka_result['dG_solv_acid']:+10.3f} kcal/mol")
     print(f"  {'ΔG_solv(A⁻)':>30} = {pka_result['dG_solv_base']:+10.3f} kcal/mol")
@@ -7922,11 +8393,11 @@ def print_pka_analysis(pka_result: dict, mol_acid: str, mol_base: str):
     print(f"  {'─'*48}")
     print(f"  {'ΔG_aq':>30} = {pka_result['dG_aq_kcal']:+10.3f} kcal/mol")
     print(f"\n  pKa (teórico, {pka_result['T']:.2f} K) = {pka_result['pKa']:.2f}")
-    print(f"\n  Nota: incertidumbre típica ±1–2 unidades de pKa para ciclos")
-    print(f"  Born/CPCM a nivel ωB97X-D3/def2-TZVPD (Ho & Coote 2010).")
+    print("\n  Nota: incertidumbre típica ±1–2 unidades de pKa para ciclos")
+    print("  Born/CPCM a nivel ωB97X-D3/def2-TZVPD (Ho & Coote 2010).")
 
     if pka_result["warnings"]:
-        print(f"\n  Advertencias:")
+        print("\n  Advertencias:")
         for w in pka_result["warnings"]:
             print(f"    ⚠  {w}")
 
@@ -7970,6 +8441,7 @@ def collect_results(mol_name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
             "conformer":      conf_id,
             "E_hartree":      e_sp,       # SP de alta precisión (def2-TZVPD)
             "E_opt_hartree":  e_opt,      # energía al final de la Opt (def2-SVP)
+            "opt_converged":  check_opt_converged(opt_out),
             "has_imaginary":  len(imag_freqs) > 0,
             "n_imaginary":    len(imag_freqs),
             "imag_freqs_cm1": str(imag_freqs) if imag_freqs else "—",
@@ -7995,7 +8467,7 @@ def collect_results(mol_name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     for _, row in df_conf.iterrows():
         conf_id  = row["conformer"]
         freq_out = mol_dir / "03_numfreq" / conf_id / "freq.out"
-        tc = rc_parse_thermochem(freq_out, T=T_STD)
+        tc = rc_thermochem_multiT(freq_out)
         _thermochem_cache.append(tc if tc.get("ok") else None)
     df_conf["_thermochem"] = _thermochem_cache
     df_conf = compute_G_total(df_conf)
@@ -8273,7 +8745,6 @@ def plot_spectrum(df_tddft: pd.DataFrame, df_conf: pd.DataFrame, mol_name: str,
     """Espectro UV-Vis individual: Boltzmann-promediado a múltiples temperaturas."""
     try:
         import matplotlib.pyplot as plt
-        import matplotlib.cm as cm
     except ImportError:
         print("matplotlib no disponible — saltando plot")
         return
@@ -8437,57 +8908,9 @@ GV_SUBDIR      = "goodvibes"  # subcarpeta creada dentro de cada conf_xxx
 
 
 def _rc_resolve_gv_python() -> str:
-    """
-    Devuelve la ruta absoluta al intérprete Python que tiene goodvibes instalado.
-
-    Estrategia (en orden de prioridad):
-      1. Si GV_CONDA_ENV está definido, buscar ese entorno en los prefijos
-         estándar de miniforge3, miniconda3 y anaconda3 en /home/kmilozeta.
-      2. Intentar `python -m goodvibes --version` con el ejecutable actual
-         (sys.executable) por si el entorno ya lo incluye.
-      3. Buscar `goodvibes` en el PATH como script de entrada.
-      4. Fallback: devolver sys.executable (fallará con el error habitual).
-    """
-    import shutil
-
-    # ── 1. Entorno conda explícito ────────────────────────────────────────
-    if GV_CONDA_ENV:
-        home = Path.home()
-        for base in ["miniforge3", "miniconda3", "anaconda3", "conda"]:
-            candidate = home / base / "envs" / GV_CONDA_ENV / "bin" / "python"
-            if candidate.exists():
-                # Verificar que goodvibes esté realmente disponible allí
-                try:
-                    r = subprocess.run(
-                        [str(candidate), "-c", "import goodvibes"],
-                        capture_output=True, timeout=10
-                    )
-                    if r.returncode == 0:
-                        return str(candidate)
-                except Exception:
-                    pass
-
-    # ── 2. Python actual ──────────────────────────────────────────────────
-    try:
-        r = subprocess.run(
-            [sys.executable, "-c", "import goodvibes"],
-            capture_output=True, timeout=10
-        )
-        if r.returncode == 0:
-            return sys.executable
-    except Exception:
-        pass
-
-    # ── 3. goodvibes en PATH (instalado como script de consola) ──────────
-    gv_script = shutil.which("goodvibes")
-    if gv_script:
-        # Derivar el Python del mismo directorio bin/
-        py_candidate = Path(gv_script).parent / "python"
-        if py_candidate.exists():
-            return str(py_candidate)
-
-    # ── 4. Fallback ───────────────────────────────────────────────────────
-    return sys.executable
+    """Alias de _resolve_gv_python() (misma estrategia, ahora una sola copia
+    y con caché: antes se re-resolvía con subprocesses en cada llamada)."""
+    return _resolve_gv_python()
 
 
 def _probe_gv_capabilities(python_exe: str) -> dict:
@@ -8524,8 +8947,8 @@ def _probe_gv_capabilities(python_exe: str) -> dict:
             if m:
                 caps["version"] = m.group(1).lstrip("v")
                 break
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.getLogger("maaqc").debug(f"sondeo de capacidades de GoodVibes: {_exc!r}")
     return caps
 
 
@@ -8651,7 +9074,7 @@ def _parse_goodvibes_dat(dat_path: Path) -> dict:
             except (ValueError, IndexError):
                 continue
 
-        def _get_col(idx: Optional[int]) -> Optional[float]:
+        def _get_col(idx: Optional[int], parts=parts, offset=offset) -> Optional[float]:
             if idx is None:
                 return None
             real_idx = idx + offset
@@ -8665,8 +9088,14 @@ def _parse_goodvibes_dat(dat_path: Path) -> dict:
         E_elec = _get_col(idx_e)
         ZPE    = _get_col(idx_zpe)
         H_GV   = _get_col(idx_h)
-        TS_GV  = _get_col(idx_tqs) or _get_col(idx_ts)  # preferir quasi-RRHO
-        G_GV   = _get_col(idx_qhg) or _get_col(idx_g)   # preferir quasi-RRHO
+        # preferir quasi-RRHO; `is None` y no `or`: un 0.0 válido no debe
+        # caer a la columna armónica.
+        TS_GV  = _get_col(idx_tqs)
+        if TS_GV is None:
+            TS_GV = _get_col(idx_ts)
+        G_GV   = _get_col(idx_qhg)
+        if G_GV is None:
+            G_GV = _get_col(idx_g)
         break  # solo necesitamos la primera fila de datos
 
     if G_GV is None:
@@ -9195,10 +9624,10 @@ def print_gv_appendix(df_gv: pd.DataFrame, mol_name: str):
     """
     sep = "─" * 74
     print(f"\n{sep}")
-    print(f"  APÉNDICE GOODVIBES — Corrección cuasi-armónica mRRHO (Grimme)")
+    print("  APÉNDICE GOODVIBES — Corrección cuasi-armónica mRRHO (Grimme)")
     print(f"  Molécula : {mol_name}")
     print(f"  Método   : -q --qs grimme -f {GV_FREQ_CUTOFF:.0f} cm⁻¹ (v{_gv_version()})")
-    print(f"  Ciclo    : G_GV = E_SP(TZVPD/CPCM) + G_corr_GV(mRRHO, SVP/CPCM)")
+    print("  Ciclo    : G_GV = E_SP(TZVPD/CPCM) + G_corr_GV(mRRHO, SVP/CPCM)")
     print(sep)
 
     if df_gv.empty:
@@ -9251,7 +9680,7 @@ def print_gv_appendix(df_gv: pd.DataFrame, mol_name: str):
               f"{'(mRRHO menos negativo → G más alto)' if dg_vals.mean()>0 else '(mRRHO más negativo → G más bajo)'}")
 
     # ── Sección 2: Impacto en ΔG relativo y Boltzmann ────────────────────
-    print(f"\n  ── 2. Impacto en ΔG relativo y pesos Boltzmann (T = 298.15 K) ──")
+    print("\n  ── 2. Impacto en ΔG relativo y pesos Boltzmann (T = 298.15 K) ──")
     print(f"\n  {'conf':>10}  {'ΔG_ORCA':>9}  {'ΔG_GV':>8}  {'ΔΔG_rel':>9}  "
           f"{'boltz_ORCA':>11}  {'boltz_GV':>10}  {'Δboltz':>8}  {'dominante':>9}")
     print("  " + "─" * 85)
@@ -9298,7 +9727,7 @@ def print_gv_appendix(df_gv: pd.DataFrame, mol_name: str):
     if "rank_change_GV" in df_gv.columns:
         inversions = df_gv["rank_change_GV"].dropna()
         n_inv = (inversions.abs() > 0).sum()
-        print(f"\n  ── 3. Ranking conformacional: ORCA vs GoodVibes ──")
+        print("\n  ── 3. Ranking conformacional: ORCA vs GoodVibes ──")
         print(f"  Inversiones detectadas: {n_inv}/{len(ok)}")
 
         if n_inv > 0:
@@ -9316,7 +9745,7 @@ def print_gv_appendix(df_gv: pd.DataFrame, mol_name: str):
         else:
             print("  → El ranking conformacional es idéntico con ORCA-RRHO y GV-mRRHO.")
 
-    print(f"\n  Archivos GV guardados en:")
+    print("\n  Archivos GV guardados en:")
     for conf_id in df_gv["conformer"]:
         p = RC_WORK_ROOT / mol_name / "03_numfreq" / conf_id / GV_SUBDIR
         if p.exists():
@@ -9340,8 +9769,8 @@ def _gv_version() -> str:
             m = re.search(r"([\d]+\.[\d]+\.[\d]+|v[\d.]+)", line)
             if m:
                 return m.group(1).lstrip("v")
-    except Exception:
-        pass
+    except Exception as _exc:
+        logging.getLogger("maaqc").debug(f"versión de GoodVibes: {_exc!r}")
     return "?"
 
 
@@ -9911,7 +10340,6 @@ def parse_adc2_excitations(adc2_out: Path) -> list[dict]:
         if in_abs_block and current_block:
             m = pat_line.match(line)
             if m:
-                root_initial = int(m.group(1))
                 root_final   = int(m.group(2))
                 # El estado excitado es root_final (convenio ORCA: "0->1" = S1)
                 state_n = root_final if root_final > 0 else 1
@@ -10151,7 +10579,7 @@ def print_adc2_tddft_comparison(df_cmp: pd.DataFrame):
     """
     sep = "═" * 80
     print(f"\n{sep}")
-    print(f"  COMPARACIÓN ADC(2) vs TD-DFT — λ_max Boltzmann-promediado (298 K)")
+    print("  COMPARACIÓN ADC(2) vs TD-DFT — λ_max Boltzmann-promediado (298 K)")
     print(sep)
 
     if df_cmp.empty:
@@ -10187,7 +10615,7 @@ def print_adc2_tddft_comparison(df_cmp: pd.DataFrame):
             valid_rows.append(row)
 
     if not valid_rows:
-        print(f"\n  Sin pares TDDFT+ADC2 completos para análisis de sistematicidad.")
+        print("\n  Sin pares TDDFT+ADC2 completos para análisis de sistematicidad.")
         print(f"{sep}\n")
         return
 
@@ -10200,7 +10628,7 @@ def print_adc2_tddft_comparison(df_cmp: pd.DataFrame):
     mean_eV = float(np.mean(deltas_eV))
     std_eV  = float(np.std(deltas_eV, ddof=1)) if len(deltas_eV) > 1 else 0.0
 
-    print(f"\n  ── Sistematicidad del desplazamiento TDDFT − ADC2 ──")
+    print("\n  ── Sistematicidad del desplazamiento TDDFT − ADC2 ──")
     print(f"  N pares válidos       : {len(deltas_nm)}")
     print(f"  Δ medio (nm)          : {mean_nm:+.2f} ± {std_nm:.2f}")
     print(f"  Δ medio (eV)          : {mean_eV:+.4f} ± {std_eV:.4f}")
@@ -10213,24 +10641,24 @@ def print_adc2_tddft_comparison(df_cmp: pd.DataFrame):
         print(f"\n  ✓  Desplazamiento SISTEMÁTICO ({direction}):")
         print(f"     TD-DFT predice λ_max {abs(mean_nm):.1f} nm más {direction.replace('shift','ed')}"
               f" que ADC2 (CV = {std_nm/abs(mean_nm)*100:.1f}%)")
-        print(f"\n  ► Corrección empírica recomendada:")
+        print("\n  ► Corrección empírica recomendada:")
         print(f"     λ_corr(nm) = λ_TDDFT(nm) − ({mean_nm:+.1f} nm)")
         print(f"     E_corr(eV) = E_TDDFT(eV) − ({mean_eV:+.4f} eV)")
         print(f"     Incertidumbre: ±{std_nm:.1f} nm  (±{std_eV:.4f} eV)")
     elif len(deltas_nm) == 1:
-        print(f"\n  ⚠  Solo 1 par: imposible evaluar sistematicidad.")
+        print("\n  ⚠  Solo 1 par: imposible evaluar sistematicidad.")
         print(f"     Desplazamiento observado: {mean_nm:+.1f} nm ({mean_eV:+.4f} eV)")
     else:
         print(f"\n  ⚠  Desplazamiento NO sistemático (std/|mean| = "
               f"{std_nm/abs(mean_nm)*100:.1f}% > 33%).")
         print(f"     La corrección empírica tiene alta incertidumbre (±{std_nm:.1f} nm).")
-        print(f"     Considerar revisar geometrías o ampliar ensemble conformacional.")
+        print("     Considerar revisar geometrías o ampliar ensemble conformacional.")
 
     # ADC2 inter-estados: comparación relativa
     if len(valid_rows) > 1:
         lmax_adc2_vals = [r["lambda_adc2_nm"] for r in valid_rows]
         mols_valid     = [r["molecule"]        for r in valid_rows]
-        print(f"\n  ── Comparación λ_max ADC2 entre estados de protonación ──")
+        print("\n  ── Comparación λ_max ADC2 entre estados de protonación ──")
         adc2_min  = min(lmax_adc2_vals)
         adc2_max  = max(lmax_adc2_vals)
         mol_min   = mols_valid[lmax_adc2_vals.index(adc2_min)]
@@ -10270,7 +10698,6 @@ def plot_adc2_tddft_comparison(df_cmp: pd.DataFrame,
     """
     try:
         import matplotlib.pyplot as plt
-        import matplotlib.patches as mpatches
     except ImportError:
         print("matplotlib no disponible — saltando plot ADC2")
         return
@@ -10284,7 +10711,6 @@ def plot_adc2_tddft_comparison(df_cmp: pd.DataFrame,
         print("  Sin pares TDDFT+ADC2 para graficar.")
         return
 
-    n_mols = len(valid)
     palette = [
         "#4477AA", "#EE6677", "#228833", "#CCBB44",
         "#66CCEE", "#AA3377", "#BBBBBB"
@@ -11557,24 +11983,109 @@ def run_goodvibes(
     if not freq_out.exists():
         return {**null, "warning": f"No existe {freq_out}"}
 
+    # Caché: memoria (por proceso) + disco (<freq>.gv_cache.json junto al
+    # freq.out, invalidado si cambia el .out). Antes cada llamada lanzaba
+    # DOS procesos Python (un `import goodvibes` de verificación + el
+    # cálculo), por confórmero × T × par × fuente: en `pka` con escaneo de T
+    # y Monte Carlo eran cientos de llamadas idénticas.
+    st = freq_out.stat()
+    key = f"T={T:.4f}|qs={qs}|cutoff={float(cutoff):.2f}|qh={bool(qh)}"
+    mem_key = (str(freq_out.resolve()), st.st_mtime_ns, st.st_size, key)
+    with _GV_CACHE_LOCK:
+        hit = _GV_MEM_CACHE.get(mem_key)
+    if hit is not None:
+        return dict(hit)
+    disk = _gv_disk_cache_load(freq_out, st)
+    if key in disk:
+        res = {**null, **disk[key]}
+        with _GV_CACHE_LOCK:
+            _GV_MEM_CACHE[mem_key] = res
+        return dict(res)
+
     python_exe = _resolve_gv_python()
+    if not _gv_importable(python_exe):
+        return {**null, "warning": (
+            f"No se puede importar goodvibes con {python_exe}. "
+            f"Instalar con: conda activate {GV_CONDA_ENV or '<env>'} && "
+            f"pip install goodvibes --break-system-packages"
+        )}
+    res = _run_goodvibes_uncached(freq_out, T, cutoff, qs, qh, python_exe, null)
+    if res.get("ok"):
+        with _GV_CACHE_LOCK:
+            _GV_MEM_CACHE[mem_key] = res
+        _gv_disk_cache_store(freq_out, st, key, res, python_exe)
+    return dict(res)
 
+
+_GV_CACHE_LOCK = threading.Lock()
+_GV_MEM_CACHE: dict = {}
+_GV_IMPORTABLE: dict[str, bool] = {}
+_GV_VERSION: dict[str, Optional[str]] = {}
+
+
+def _gv_importable(python_exe: str) -> bool:
+    if python_exe not in _GV_IMPORTABLE:
+        try:
+            r = subprocess.run([python_exe, "-c", "import goodvibes"],
+                               capture_output=True, timeout=10, check=False)
+            _GV_IMPORTABLE[python_exe] = r.returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            _GV_IMPORTABLE[python_exe] = False
+    return _GV_IMPORTABLE[python_exe]
+
+
+def _gv_cache_path(freq_out: Path) -> Path:
+    return freq_out.with_name(freq_out.name + ".gv_cache.json")
+
+
+def _gv_disk_cache_load(freq_out: Path, st) -> dict:
     try:
-        r = subprocess.run(
-            [python_exe, "-c", "import goodvibes"],
-            capture_output=True, timeout=10,
-        )
-        if r.returncode != 0:
-            return {**null, "warning": (
-                f"No se puede importar goodvibes con {python_exe}. "
-                f"Instalar con: conda activate {GV_CONDA_ENV or '<env>'} && "
-                f"pip install goodvibes --break-system-packages"
-            )}
-    except (subprocess.TimeoutExpired, OSError) as e:
-        return {**null, "warning": f"No se pudo verificar goodvibes con {python_exe}: {e}"}
+        blob = json.loads(_gv_cache_path(freq_out).read_text())
+    except (OSError, ValueError):
+        return {}
+    if blob.get("freq_mtime_ns") != st.st_mtime_ns or blob.get("freq_size") != st.st_size:
+        return {}
+    return blob.get("entries", {})
 
+
+def _gv_disk_cache_store(freq_out: Path, st, key: str, res: dict, python_exe: str) -> None:
+    path = _gv_cache_path(freq_out)
+    version = _gv_version_str(python_exe)
+    with _GV_CACHE_LOCK:
+        try:
+            blob = json.loads(path.read_text())
+            if blob.get("freq_mtime_ns") != st.st_mtime_ns or blob.get("freq_size") != st.st_size:
+                blob = {}
+        except (OSError, ValueError):
+            blob = {}
+        blob.update(freq_mtime_ns=st.st_mtime_ns, freq_size=st.st_size, goodvibes=version)
+        blob.setdefault("entries", {})[key] = res
+        try:
+            atomic_write(path, json.dumps(blob, indent=1, default=str))
+        except OSError as e:
+            logging.getLogger("maaqc").debug(f"no se pudo escribir {path}: {e}")
+
+
+def _gv_version_str(python_exe: str) -> Optional[str]:
+    if python_exe not in _GV_VERSION:
+        try:
+            r = subprocess.run(
+                [python_exe, "-c",
+                 "import importlib.metadata as m; print(m.version('goodvibes'))"],
+                capture_output=True, text=True, timeout=10, check=False)
+            _GV_VERSION[python_exe] = r.stdout.strip() or None
+        except (subprocess.TimeoutExpired, OSError):
+            _GV_VERSION[python_exe] = None
+    return _GV_VERSION[python_exe]
+
+
+def _run_goodvibes_uncached(freq_out: Path, T: float, cutoff: float, qs: str,
+                            qh: bool, python_exe: str, null: dict) -> dict:
+    """Ejecución real de GoodVibes (sin caché) — ver run_goodvibes()."""
     cmd = [
-        python_exe, "-m", "goodvibes.GoodVibes", str(freq_out),
+        # Ruta ABSOLUTA: GoodVibes corre con cwd en un directorio temporal,
+        # así que una ruta relativa (p. ej. desde `collect`) no se encontraba.
+        python_exe, "-m", "goodvibes.GoodVibes", str(freq_out.resolve()),
         "--qs", qs, "--freq_cutoff", str(cutoff), "-t", str(T),
     ]
     if qh:
@@ -12291,10 +12802,10 @@ def _print_tautomer_cycle(r: dict):
     dominant = "R (neutral)" if r["f_R"] >= r["f_D"] else "D (zwitterion)"
     print(f"  Dominant tautomer: {dominant}")
     print(f"\n  Neutral macrostate G (Boltzmann R+D) = {r['G_macro_Eh']:.8f} Eh")
-    print(f"  (this combined value is what enters the pKa cycle as the")
-    print(f"   'neutral/zwitterion' state versus the cation and the anion)")
+    print("  (this combined value is what enters the pKa cycle as the")
+    print("   'neutral/zwitterion' state versus the cation and the anion)")
     if r["warnings"]:
-        print(f"\n  Warnings:")
+        print("\n  Warnings:")
         for w in r["warnings"]:
             print(f"    ⚠  {w}")
     print(f"  {sep}\n")
@@ -12516,7 +13027,7 @@ def compute_pka(
             use_born_macro = True
 
         if use_born_macro:
-            result["G_hplus_aq_kcal"] = G_HPLUS_AQ_BORN
+            result["G_hplus_aq_kcal"] = g_hplus_aq(T)
             result["method"] = "born"
             if not _is_macro:
                 pass  # estados simples con ensemble: sin avisos de macroestado
@@ -12542,7 +13053,7 @@ def compute_pka(
                     f"compute_pka_montecarlo())."
                 )
         else:
-            result["G_hplus_aq_kcal"] = G_HPLUS_AQ_DIRECT
+            result["G_hplus_aq_kcal"] = g_hplus_aq(T)
             result["method"] = "direct"
             if method == "direct" and _is_macro:
                 _warn(
@@ -12680,14 +13191,14 @@ def compute_pka(
 
     if use_born and (use_smd_acid or use_smd_base):
         _warn(
-            f"method='born' with --spsmd: the Born-cycle constants "
-            f"(G_HPLUS_GAS, DG_SOLV_HPLUS, DG_CONC_CORR) were calibrated "
-            f"against CPCM(water) aqueous energies, not SMD(water). "
-            f"ΔG_solv(X) = E_SP(SMD) − E_SP(gas) + δG_conc mixes solvent "
-            f"models against a cycle closed for CPCM — treat this pKa as "
-            f"uncalibrated/exploratory. Consider method='direct' with "
-            f"--spsmd instead, which only compares SMD energies to each "
-            f"other and does not depend on the Born-cycle gas-phase constants."
+            "method='born' with --spsmd: the Born-cycle constants "
+            "(G_HPLUS_GAS, DG_SOLV_HPLUS, DG_CONC_CORR) were calibrated "
+            "against CPCM(water) aqueous energies, not SMD(water). "
+            "ΔG_solv(X) = E_SP(SMD) − E_SP(gas) + δG_conc mixes solvent "
+            "models against a cycle closed for CPCM — treat this pKa as "
+            "uncalibrated/exploratory. Consider method='direct' with "
+            "--spsmd instead, which only compares SMD energies to each "
+            "other and does not depend on the Born-cycle gas-phase constants."
         )
 
     if method == "auto" and not have_gas:
@@ -12741,7 +13252,11 @@ def compute_pka(
 
         # ── ΔG_gas ─────────────────────────────────────────────────────────
         # ΔG_gas = G(A⁻, gas) + G(H⁺, gas) − G(AH, gas)
-        dG_gas_kcal = (G_gas_base - G_gas_acid) * HARTREE_TO_KCAL + G_HPLUS_GAS
+        G_hp_gas = g_hplus_gas(T)
+        dG_conc  = dg_conc_corr(T)
+        result["G_hplus_gas_kcal"] = G_hp_gas
+        result["dG_conc_kcal"]     = dG_conc
+        dG_gas_kcal = (G_gas_base - G_gas_acid) * HARTREE_TO_KCAL + G_hp_gas
         result["dG_gas_kcal"] = dG_gas_kcal
 
         # ── ΔG_solv por especie ───────────────────────────────────────────
@@ -12749,8 +13264,8 @@ def compute_pka(
         # aq_source es CPCM salvo que use_smd=True para ese estado (ver
         # warning arriba: mezclar SMD con las constantes de Born calibradas
         # para CPCM deja el resultado como uncalibrado/exploratorio).
-        dG_solv_acid = (E_aq_acid - E_gas_acid) * HARTREE_TO_KCAL + DG_CONC_CORR
-        dG_solv_base = (E_aq_base - E_gas_base) * HARTREE_TO_KCAL + DG_CONC_CORR
+        dG_solv_acid = (E_aq_acid - E_gas_acid) * HARTREE_TO_KCAL + dG_conc
+        dG_solv_base = (E_aq_base - E_gas_base) * HARTREE_TO_KCAL + dG_conc
         result["dG_solv_acid_kcal"] = dG_solv_acid
         result["dG_solv_base_kcal"] = dG_solv_base
 
@@ -12763,10 +13278,11 @@ def compute_pka(
             dG_gas_kcal
             + dG_solv_base
             + DG_SOLV_HPLUS
-            + DG_CONC_CORR
+            + dG_conc
             - dG_solv_acid
         )
         result["dG_aq_kcal"] = dG_aq_kcal
+        result["G_hplus_aq_kcal"] = G_hp_gas + dG_conc + DG_SOLV_HPLUS
         result["method"] = "born"
 
     else:
@@ -12776,10 +13292,10 @@ def compute_pka(
         G_total_base = E_aq_base + (G_corr_base if G_corr_base is not None else 0.0)
         result["G_total_acid_Eh"] = G_total_acid
         result["G_total_base_Eh"] = G_total_base
-        result["G_hplus_aq_kcal"] = G_HPLUS_AQ_DIRECT
+        result["G_hplus_aq_kcal"] = g_hplus_aq(T)
 
         # ΔG_aq = G_total(A⁻) − G_total(AH) + G(H⁺, aq)   [aq_source: CPCM o SMD]
-        dG_aq_kcal = (G_total_base - G_total_acid) * HARTREE_TO_KCAL + G_HPLUS_AQ_DIRECT
+        dG_aq_kcal = (G_total_base - G_total_acid) * HARTREE_TO_KCAL + result["G_hplus_aq_kcal"]
         result["dG_aq_kcal"] = dG_aq_kcal
         result["method"] = "direct"
 
@@ -13041,13 +13557,13 @@ def _print_born_cycle(r: dict):
 
     print(f"  {'G_gas(AH)  [Eh]':<40} {r['G_gas_acid_Eh']:>12.8f}")
     print(f"  {'G_gas(A⁻)  [Eh]':<40} {r['G_gas_base_Eh']:>12.8f}")
-    print(f"  {'G(H⁺, gas)  [kcal/mol]':<40} {G_HPLUS_GAS:>12.3f}")
+    print(f"  {'G(H⁺, gas)  [kcal/mol]':<40} {r.get('G_hplus_gas_kcal', G_HPLUS_GAS):>12.3f}")
     print()
     print(f"  {'ΔG_gas  [kcal/mol]':<40} {fmt(r['dG_gas_kcal'])}")
     print(f"  {'ΔG_solv(AH)  [kcal/mol]':<40} {fmt(r['dG_solv_acid_kcal'])}")
     print(f"  {'ΔG_solv(A⁻)  [kcal/mol]':<40} {fmt(r['dG_solv_base_kcal'])}")
     print(f"  {'ΔG_solv(H⁺) [Kelly 2006]  [kcal/mol]':<40} {DG_SOLV_HPLUS:>12.3f}")
-    print(f"  {'δG_conc(H⁺) 1 atm→1 M (Δn=+1) [kcal/mol]':<40} {DG_CONC_CORR:>12.3f}")
+    print(f"  {'δG_conc(H⁺) 1 atm→1 M (Δn=+1) [kcal/mol]':<40} {r.get('dG_conc_kcal', DG_CONC_CORR):>12.3f}")
     print(f"  {'─'*40}  {'─'*12}")
     print(f"  {'ΔG_aq  [kcal/mol]':<40} {fmt(r['dG_aq_kcal'])}")
     print(f"  {'ΔG_aq  [kJ/mol]':<40} {r['dG_aq_kcal']*4.184:>12.3f}" if r['dG_aq_kcal'] else "")
@@ -13056,7 +13572,7 @@ def _print_born_cycle(r: dict):
     print(f"  pKa = ΔG_aq / (RT·ln10)  =  {pka_str}")
     print(f"  (typical uncertainty ±1–2 units; Born/{aq_label_bc}/TZVPD)")
     if r["warnings"]:
-        print(f"\n  Warnings:")
+        print("\n  Warnings:")
         for w in r["warnings"]:
             print(f"    ⚠  {w}")
     print(f"  {sep}\n")
@@ -13088,11 +13604,11 @@ def _print_direct_cycle(r: dict):
     print()
     pka_str = f"{r['pKa']:.2f}" if r['pKa'] is not None else "N/A"
     print(f"  pKa = ΔG_aq / (RT·ln10)  =  {pka_str}")
-    print(f"  (direct method: valid if the solvation error of the theory")
-    print(f"  level is consistent across species; typical uncertainty ±1–2")
-    print(f"  units, similar to the full Born cycle)")
+    print("  (direct method: valid if the solvation error of the theory")
+    print("  level is consistent across species; typical uncertainty ±1–2")
+    print("  units, similar to the full Born cycle)")
     if r["warnings"]:
-        print(f"\n  Warnings:")
+        print("\n  Warnings:")
         for w in r["warnings"]:
             print(f"    ⚠  {w}")
     print(f"  {sep}\n")
@@ -13121,11 +13637,11 @@ def _print_born_cycle_macrostate(r: dict):
     print(f"  SP level (AH)  : {r['theory_sp_acid'] or '—'}")
     print(f"  SP level (A⁻)  : {r['theory_sp_base'] or '—'}")
     print()
-    print(f"  No explicit gas-phase SP is used for the mixture/ensemble — the Born")
+    print("  No explicit gas-phase SP is used for the mixture/ensemble — the Born")
     print(f"  cycle reduces algebraically to the {aq_label_ms}-only energy difference")
-    print(f"  (same E_gas-cancellation already present for a single species")
-    print(f"  in this script; see the derivation note above")
-    print(f"  compute_pka_montecarlo()).")
+    print("  (same E_gas-cancellation already present for a single species")
+    print("  in this script; see the derivation note above")
+    print("  compute_pka_montecarlo()).")
     print()
     print(f"  {'G_total_' + aq_acid_ms + '(AH)  [Eh]':<40} {r['G_total_acid_Eh']:>12.8f}")
     print(f"  {'G_total_' + aq_base_ms + '(A⁻)  [Eh]':<40} {r['G_total_base_Eh']:>12.8f}")
@@ -13140,7 +13656,7 @@ def _print_born_cycle_macrostate(r: dict):
     print(f"  pKa = ΔG_aq / (RT·ln10)  =  {pka_str}")
     print(f"  (typical uncertainty ±1–2 units; Born/{aq_label_ms}/TZVPD)")
     if r["warnings"]:
-        print(f"\n  Warnings:")
+        print("\n  Warnings:")
         for w in r["warnings"]:
             print(f"    ⚠  {w}")
     print(f"  {sep}\n")
@@ -13564,18 +14080,18 @@ def print_mc_summary(chain_mc: Optional[dict], pka_labels: list) -> None:
               f"G(H⁺,aq)=±{sample_mc['sigma_hplus_kcal']:.2f} kcal/mol")
 
     if chain_mc["warnings"]:
-        print(f"\n  ⚠  Advertencias:")
+        print("\n  ⚠  Advertencias:")
         for w in chain_mc["warnings"]:
             print(f"     ⚠  {w}")
 
-    print(f"\n  Nota: G(H⁺,aq) es la misma constante física en los tres pasos")
-    print(f"  de desprotonación, así que su perturbación se comparte entre")
-    print(f"  pKa0/pKa1/pKa2 en cada muestra MC (no se samplea independiente")
-    print(f"  por tramo) — esto correlaciona el sesgo sistemático entre pKa's")
-    print(f"  y evita inflar artificialmente la incertidumbre de cantidades")
-    print(f"  derivadas como Δ(pKa2−pKa1) o la fracción de especie a un pH")
-    print(f"  dado. Las bandas de confianza de la distribución de especies")
-    print(f"  quedan en df_dist_bands (percentiles 2.5/50/97.5).")
+    print("\n  Nota: G(H⁺,aq) es la misma constante física en los tres pasos")
+    print("  de desprotonación, así que su perturbación se comparte entre")
+    print("  pKa0/pKa1/pKa2 en cada muestra MC (no se samplea independiente")
+    print("  por tramo) — esto correlaciona el sesgo sistemático entre pKa's")
+    print("  y evita inflar artificialmente la incertidumbre de cantidades")
+    print("  derivadas como Δ(pKa2−pKa1) o la fracción de especie a un pH")
+    print("  dado. Las bandas de confianza de la distribución de especies")
+    print("  quedan en df_dist_bands (percentiles 2.5/50/97.5).")
     print(f"{sep}\n")
 
 
@@ -13614,7 +14130,7 @@ def print_mol_summary(data: dict, verbose: bool = False):
     print(disp.to_string(index=False, float_format=lambda x: f"{x:.5f}"))
 
     print(f"\n  Confórmero representativo (min G_total @ 298K): {data['best_conf']}")
-    print(f"\n  G_Boltzmann del ensemble (energía libre efectiva, Hartree):")
+    print("\n  G_Boltzmann del ensemble (energía libre efectiva, Hartree):")
     for lbl, G in data["G_boltz"].items():
         if G is not None:
             print(f"    {lbl}: {G:.8f} Eh")
@@ -13637,7 +14153,7 @@ def _print_single_pka(pka: dict, label: str):
             print(f"  ΔG_solv(ácido) = {pka['dG_solv_acid_kcal']:+.3f} kcal/mol")
             print(f"  ΔG_solv(base)  = {pka['dG_solv_base_kcal']:+.3f} kcal/mol")
             print(f"  ΔG_solv(H⁺)   = {DG_SOLV_HPLUS:+.3f} kcal/mol  [Kelly 2006]")
-            print(f"  δG_conc(H⁺)   = {DG_CONC_CORR:+.3f} kcal/mol  [1 atm→1 M, Δn=+1]")
+            print(f"  δG_conc(H⁺)   = {pka.get('dG_conc_kcal', DG_CONC_CORR):+.3f} kcal/mol  [1 atm→1 M, Δn=+1]")
         elif pka["method"] == "born":
             # Macroestado: ciclo de Born resuelto vía la reducción algebraica
             # (sin SP de fase gas para la mezcla) — ver compute_pka().
@@ -13649,7 +14165,7 @@ def _print_single_pka(pka: dict, label: str):
         print(f"  ΔG_aq         = {pka['dG_aq_kcal']:+.3f} kcal/mol")
         print(f"\n  ━━►  {label}  =  {pka['pKa']:.2f}  (T = {pka['T']:.2f} K)")
         if pka["warnings"]:
-            print(f"\n  ⚠  Advertencias (revisar antes de reportar):")
+            print("\n  ⚠  Advertencias (revisar antes de reportar):")
             for w in pka["warnings"]:
                 print(f"     ⚠  {w}")
     else:
@@ -13667,22 +14183,22 @@ def print_pka_summary(pka_list: list):
     """
     sep = "═" * 74
     print(f"\n{sep}")
-    print(f"  RESULTADOS FINALES — CICLOS DE pKa")
+    print("  RESULTADOS FINALES — CICLOS DE pKa")
     print(sep)
 
     for pka, label in pka_list:
         if pka is not None:
             _print_single_pka(pka, label)
 
-    print(f"\n  Nota: incertidumbre típica ±1–2 unidades de pKa para métodos")
-    print(f"  Born/CPCM a nivel ωB97X-D3/def2-TZVPD (Ho & Coote 2010). El método")
-    print(f"  'direct' usa solo energías CPCM (sin SP fase gas) con G(H⁺,aq) de")
-    print(f"  Pliego & Riveros 2002 — esta constante NO es intercambiable con la")
-    print(f"  de Tissandier/Kelly usada en 'born', que está calibrada para SP en")
-    print(f"  fase gas pura. Cada método usa su propia referencia del protón.")
-    print(f"  Los pasos que involucran el macroestado neutro/zwitterión combinado")
-    print(f"  resuelven method='auto' a 'born' (exacto, sin SP fase gas — ver")
-    print(f"  advertencias arriba). Con --method direct explícito usan 'direct'.")
+    print("\n  Nota: incertidumbre típica ±1–2 unidades de pKa para métodos")
+    print("  Born/CPCM a nivel ωB97X-D3/def2-TZVPD (Ho & Coote 2010). El método")
+    print("  'direct' usa solo energías CPCM (sin SP fase gas) con G(H⁺,aq) de")
+    print("  Pliego & Riveros 2002 — esta constante NO es intercambiable con la")
+    print("  de Tissandier/Kelly usada en 'born', que está calibrada para SP en")
+    print("  fase gas pura. Cada método usa su propia referencia del protón.")
+    print("  Los pasos que involucran el macroestado neutro/zwitterión combinado")
+    print("  resuelven method='auto' a 'born' (exacto, sin SP fase gas — ver")
+    print("  advertencias arriba). Con --method direct explícito usan 'direct'.")
     print(f"{sep}\n")
 
 
@@ -13762,7 +14278,7 @@ def _print_ph_scale_diagnostic(diag: dict, label: str = "pKa₂ (B→C)"):
     print(f"  {sep}")
 
     if not diag["ok"]:
-        print(f"  ⚠  No se pudo completar el cross-check:")
+        print("  ⚠  No se pudo completar el cross-check:")
         for w in diag["warnings"]:
             print(f"     {w}")
         print(f"  {sep}\n")
@@ -13774,15 +14290,15 @@ def _print_ph_scale_diagnostic(diag: dict, label: str = "pKa₂ (B→C)"):
     print(f"  {'Delta dG_aq (born - direct)  [kcal/mol]':<40} {diag['delta_dG_kcal']:>+10.2f}")
     print()
     if abs(diag["delta_pKa"]) > 2.0:
-        print(f"  \u26a0  Delta pKa > 2 unidades: born y direct discrepan mas de lo")
-        print(f"     tipicamente esperable entre metodos. Si este resultado se")
-        print(f"     va a combinar con pKa1 (que siempre usa 'direct'), evaluar")
-        print(f"     reportar tambien la version 'direct' de este paso para que")
-        print(f"     toda la cadena comparta la misma referencia de G(H+,aq).")
+        print("  \u26a0  Delta pKa > 2 unidades: born y direct discrepan mas de lo")
+        print("     tipicamente esperable entre metodos. Si este resultado se")
+        print("     va a combinar con pKa1 (que siempre usa 'direct'), evaluar")
+        print("     reportar tambien la version 'direct' de este paso para que")
+        print("     toda la cadena comparta la misma referencia de G(H+,aq).")
     else:
-        print(f"  Delta dentro de lo esperable entre convenciones de G(H+,aq);")
-        print(f"  no invalida el resultado, pero recordar que 'direct' es la")
-        print(f"  escala que comparte el resto de la cadena (pKa0/pKa1).")
+        print("  Delta dentro de lo esperable entre convenciones de G(H+,aq);")
+        print("  no invalida el resultado, pero recordar que 'direct' es la")
+        print("  escala que comparte el resto de la cadena (pKa0/pKa1).")
     print(f"  {sep}\n")
 
 
@@ -13827,7 +14343,7 @@ def _print_pka_temperature_scan(scan: dict, reported_T: float):
 
     sep = "─" * 66
     print(f"\n  {sep}")
-    print(f"  ESCANEO DE TEMPERATURA — pKa(T)")
+    print("  ESCANEO DE TEMPERATURA — pKa(T)")
     print(f"  {sep}")
     print(f"  {'Paso':<18}" + "".join(f"{lbl:>12}" for lbl in TEMP_LABELS))
     print(f"  {'─'*18}" + "".join(f"{'─'*12}" for _ in TEMP_LABELS))
@@ -13845,10 +14361,12 @@ def _print_pka_temperature_scan(scan: dict, reported_T: float):
 
     print(f"\n  * = T reportada en el resto del output (--temp, default "
           f"{T_STD:.2f} K).")
-    print(f"  Nota: el pKa incluye T tanto en G_corr (vía GoodVibes/NumFreq)")
-    print(f"  como en RT·ln10 al final del ciclo; el efecto no es solo el")
-    print(f"  denominador. No confundir con --goodvibes (harmonic vs.")
-    print(f"  quasi-harmonic), que es un eje ortogonal a esta T.")
+    print("  Nota: el pKa incluye T en G_corr (GoodVibes a cada T), en")
+    print("  G(H⁺,gas)(T) y δG_conc(T) (forma cerrada, ver g_hplus_gas) y en")
+    print("  RT·ln10. ΔG_solv(H⁺) se mantiene en el valor de 298 K (Kelly")
+    print("  2006): esa parte de la dependencia en T queda sin modelar.")
+    print("  No confundir con --goodvibes (harmonic vs. quasi-harmonic),")
+    print("  que es un eje ortogonal a esta T.")
     print(f"  {sep}\n")
 
 
@@ -13927,7 +14445,7 @@ def _print_extended_temperature_scan(scan: dict, reported_T: float):
 
     sep = "─" * 66
     print(f"\n  {sep}")
-    print(f"  ESCANEO DE TEMPERATURA — pKa(T) y f_D(T)  (cadena extendida)")
+    print("  ESCANEO DE TEMPERATURA — pKa(T) y f_D(T)  (cadena extendida)")
     print(f"  {sep}")
     print(f"  {'Paso':<18}" + "".join(f"{lbl:>12}" for lbl in TEMP_LABELS))
     print(f"  {'─'*18}" + "".join(f"{'─'*12}" for _ in TEMP_LABELS))
@@ -13951,11 +14469,11 @@ def _print_extended_temperature_scan(scan: dict, reported_T: float):
 
     print(f"\n  * = T reportada en el resto del output (--temp, default "
           f"{T_STD:.2f} K).")
-    print(f"  f_D depende de T (equilibrio R⇌D) y se re-cierra el macroestado")
-    print(f"  neutro/zwitterión en cada T — no es solo re-evaluar RT·ln10 con")
-    print(f"  un G_macro fijo. pKa₂ (B→C) no usa el macroestado y puede diferir")
-    print(f"  en método ('born' vs 'direct') de pKa₀/pKa₁; ver diagnóstico de")
-    print(f"  cross-validación de escala del protón más arriba si aplica.")
+    print("  f_D depende de T (equilibrio R⇌D) y se re-cierra el macroestado")
+    print("  neutro/zwitterión en cada T — no es solo re-evaluar RT·ln10 con")
+    print("  un G_macro fijo. pKa₂ (B→C) no usa el macroestado y puede diferir")
+    print("  en método ('born' vs 'direct') de pKa₀/pKa₁; ver diagnóstico de")
+    print("  cross-validación de escala del protón más arriba si aplica.")
     print(f"  {sep}\n")
 
 
@@ -14002,7 +14520,7 @@ def print_distribution_table(
             print(f"  {pH:6.2f}  {fn:10.4f}  {fa:10.4f}  {dominant}{marker}")
 
     # Puntos de cambio de especie dominante
-    print(f"\n  Punto isoelectrónico (dominancia igual):")
+    print("\n  Punto isoelectrónico (dominancia igual):")
     if pKa1:
         print(f"    AH₂ = AH⁻  →  pH = pKa₁ = {pKa1:.2f}")
     if pKa2:
@@ -14036,7 +14554,6 @@ def print_distribution_table_5(
     has_anion   = "f_anion"   in df_dist.columns
     has_dianion = "f_dianion" in df_dist.columns
 
-    cols   = ["pH"]
     labels = [f"{'pH':>6}"]
     if has_cation:  labels.append(f"{'f(A⁺)':>9}")
     labels.append(f"{'f(R)':>9}")
@@ -14066,8 +14583,8 @@ def print_distribution_table_5(
         marker = " ◀" if (ph_highlight is not None and abs(pH - ph_highlight) < 0.05) else ""
         print(f"  {'  '.join(vals)}  {dominant}{marker}")
 
-    print(f"\n  Nota: f(R) y f(D) son las fracciones DENTRO del macroestado neutro")
-    print(f"  (equilibrio de tautómeros, independiente del pH); f(R)+f(D) = f(neutro/zwitterión total).")
+    print("\n  Nota: f(R) y f(D) son las fracciones DENTRO del macroestado neutro")
+    print("  (equilibrio de tautómeros, independiente del pH); f(R)+f(D) = f(neutro/zwitterión total).")
     if pKa0 is not None and pKa1 is not None:
         pH_PI = (pKa0 + pKa1) / 2
         print(f"\n  pI aproximado ≈ (pKa₀ + pKa₁)/2 = {pH_PI:.2f}")
@@ -15039,16 +15556,16 @@ def _run_classic(args, gcorr_source: str = "harmonic"):
         _print_empirical_correction(corr1, "pKa₁")
         _print_empirical_correction(corr2, "pKa₂")
         if any(c and c.get("ok") for c in (corr1, corr2)):
-            print(f"\n  Nota: la distribución de especies, el pI y los "
-                  f"gráficos de aquí en adelante usan los pKa's CORREGIDOS "
-                  f"EMPÍRICAMENTE donde se pidió corrección (ver arriba). "
-                  f"El escaneo de temperatura (arriba) sigue mostrando "
-                  f"valores CRUDOS Born/CPCM sin corregir: la calibración "
-                  f"empírica solo se ajustó a T=298.15 K. Si además usas "
-                  f"--montecarlo, esa propagación de incertidumbre corre "
-                  f"sobre el ciclo de Born crudo (no conoce la corrección "
-                  f"empírica); súmale el RMSE de calibración reportado "
-                  f"arriba como una fuente de error sistemático aparte.")
+            print("\n  Nota: la distribución de especies, el pI y los "
+                  "gráficos de aquí en adelante usan los pKa's CORREGIDOS "
+                  "EMPÍRICAMENTE donde se pidió corrección (ver arriba). "
+                  "El escaneo de temperatura (arriba) sigue mostrando "
+                  "valores CRUDOS Born/CPCM sin corregir: la calibración "
+                  "empírica solo se ajustó a T=298.15 K. Si además usas "
+                  "--montecarlo, esa propagación de incertidumbre corre "
+                  "sobre el ciclo de Born crudo (no conoce la corrección "
+                  "empírica); súmale el RMSE de calibración reportado "
+                  "arriba como una fuente de error sistemático aparte.")
         for c, pka_result in ((corr1, pka1_result), (corr2, pka2_result)):
             if c and c.get("ok") and pka_result is not None:
                 pka_result["pKa_raw"] = c["pKa_raw"]
@@ -15078,7 +15595,7 @@ def _run_classic(args, gcorr_source: str = "harmonic"):
         df_display = boltzmann_protonation_states(pKa1, pKa2, pH_display_list)
         print_distribution_table(df_display, pKa1, pKa2, ph_highlight=args.ph)
 
-        print(f"\n  ── Fracciones a pH de referencia ──")
+        print("\n  ── Fracciones a pH de referencia ──")
         for pH_ref, label in [
             (args.ph,     f"pH {args.ph} (agua de mar antártica)"),
             (PH_STANDARD, f"pH {PH_STANDARD} (estándar)"),
@@ -15150,6 +15667,13 @@ def _run_classic(args, gcorr_source: str = "harmonic"):
     }
 
 
+class MacrostateError(SystemExit):
+    """El macroestado R/D no se pudo construir. Subclase de SystemExit para
+    conservar el comportamiento histórico (termina el programa si nadie la
+    captura), pero los llamadores que quieren seguir capturan SOLO esto en
+    vez de cualquier SystemExit (que también es Ctrl-C/SIGTERM)."""
+
+
 def _build_neutral_macrostate(data_R: dict, data_D: dict, neutral: str,
                               zwitterion: str, T: float, verbose: bool,
                               gcorr_source: str = "harmonic") -> tuple[dict, dict]:
@@ -15158,7 +15682,7 @@ def _build_neutral_macrostate(data_R: dict, data_D: dict, neutral: str,
     estado intermedio de la cadena A → [R/D] → B → C. Retorna
     (taut_result, data_neutral_macro). Extraído tal cual de _run_extended()
     para que `calibrate` use exactamente la misma construcción. Si ni siquiera
-    R tiene G_total, termina con sys.exit(1) como antes.
+    R tiene G_total, lanza MacrostateError (sale con código 1 si nadie la captura).
     """
     # ── Equilibrio de tautómeros R ⇌ D (sin H⁺) ────────────────────────────
     print(f"\n▸ Calculando equilibrio de tautómeros  ({neutral} ⇌ {zwitterion})  @ T={T:.2f} K")
@@ -15181,7 +15705,7 @@ def _build_neutral_macrostate(data_R: dict, data_D: dict, neutral: str,
         if not gR_fallback.get("ok"):
             print(f"\n  ⚠  Tampoco se pudo obtener G_total para "
                   f"'{neutral}'. Abortando.")
-            sys.exit(1)
+            raise MacrostateError(1)
 
         taut_result = {
             "mol_R": neutral, "mol_D": zwitterion, "T": T,
@@ -15375,16 +15899,16 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
         _print_empirical_correction(corr1, "pKa₁ (R/D→B)")
         _print_empirical_correction(corr2, "pKa₂ (B→C)")
         if any(c and c.get("ok") for c in (corr0, corr1, corr2)):
-            print(f"\n  Nota: la distribución de especies, el pI y los "
-                  f"gráficos de aquí en adelante usan los pKa's CORREGIDOS "
-                  f"EMPÍRICAMENTE donde se pidió corrección (ver arriba). "
-                  f"El escaneo de temperatura (arriba) sigue mostrando "
-                  f"valores CRUDOS Born/CPCM sin corregir: la calibración "
-                  f"empírica solo se ajustó a T=298.15 K. Si además usas "
-                  f"--montecarlo, esa propagación de incertidumbre corre "
-                  f"sobre el ciclo de Born crudo (no conoce la corrección "
-                  f"empírica); súmale el RMSE de calibración reportado "
-                  f"arriba como una fuente de error sistemático aparte.")
+            print("\n  Nota: la distribución de especies, el pI y los "
+                  "gráficos de aquí en adelante usan los pKa's CORREGIDOS "
+                  "EMPÍRICAMENTE donde se pidió corrección (ver arriba). "
+                  "El escaneo de temperatura (arriba) sigue mostrando "
+                  "valores CRUDOS Born/CPCM sin corregir: la calibración "
+                  "empírica solo se ajustó a T=298.15 K. Si además usas "
+                  "--montecarlo, esa propagación de incertidumbre corre "
+                  "sobre el ciclo de Born crudo (no conoce la corrección "
+                  "empírica); súmale el RMSE de calibración reportado "
+                  "arriba como una fuente de error sistemático aparte.")
         for c, pka_result in ((corr0, pka0_result), (corr1, pka1_result), (corr2, pka2_result)):
             if c and c.get("ok") and pka_result is not None:
                 pka_result["pKa_raw"] = c["pKa_raw"]
@@ -15418,7 +15942,7 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
     df_display = boltzmann_5state(pKa0, pKa1, pKa2, f_R, f_D, pH_display_list)
     print_distribution_table_5(df_display, pKa0, pKa1, pKa2, ph_highlight=args.ph)
 
-    print(f"\n  ── Fracciones a pH de referencia ──")
+    print("\n  ── Fracciones a pH de referencia ──")
     for pH_ref, label in [
         (args.ph,     f"pH {args.ph} (agua de mar antártica)"),
         (PH_STANDARD, f"pH {PH_STANDARD} (estándar)"),
@@ -15606,12 +16130,12 @@ def _print_goodvibes_comparison(res_harm: dict, res_gv: dict,
             dps = f"{(fg - fh):+.2f}" if (fh is not None and fg is not None) else "—"
             print(f"  {c:<14} {fhs:>10} {fgs:>10} {dps:>10}")
 
-    print(f"\n  Nota: la aproximación armónica pura sobreestima la entropía de los")
+    print("\n  Nota: la aproximación armónica pura sobreestima la entropía de los")
     print(f"  modos de baja frecuencia (rotores internos, <{args.gv_cutoff:.0f} cm⁻¹) —")
-    print(f"  típicos en las cadenas laterales Gly/Val y grupos OH/NH libres de")
-    print(f"  M-Gly:Val. Diferencias de pKa >0.3-0.5 unidades, o de fracción de")
-    print(f"  especie >5 puntos porcentuales entre ambas columnas, son razón para")
-    print(f"  preferir el valor de GoodVibes (mRRHO) en el paper en vez del RRHO puro.")
+    print("  típicos en las cadenas laterales Gly/Val y grupos OH/NH libres de")
+    print("  M-Gly:Val. Diferencias de pKa >0.3-0.5 unidades, o de fracción de")
+    print("  especie >5 puntos porcentuales entre ambas columnas, son razón para")
+    print("  preferir el valor de GoodVibes (mRRHO) en el paper en vez del RRHO puro.")
     print(f"{sep}\n")
 
 
@@ -15995,11 +16519,8 @@ def process_conformer(
         )
 
     cubes_dir = conf_dir / "cubes"
-    if args.dry_run:
-        cubes_dir_display = str(cubes_dir)
-    else:
+    if not args.dry_run:
         cubes_dir.mkdir(exist_ok=True)
-        cubes_dir_display = str(cubes_dir)
 
     # --- Estado fundamental: HOMO/LUMO ------------------------------------
     if homo_idx is None or lumo_idx is None:
@@ -16021,11 +16542,6 @@ def process_conformer(
         )
     else:
         gbw_target = conf_dir / "tddft.gbw"
-        cube_targets = [
-            conf_dir / f"tddft.mo{homo_idx}a.cube",
-            conf_dir / f"tddft.mo{lumo_idx}a.cube",
-        ]
-        already_exist = all(c.exists() for c in cube_targets)
         final_names = [cubes_dir / "HOMO_mo{}a.cube".format(homo_idx),
                         cubes_dir / "LUMO_mo{}a.cube".format(lumo_idx)]
         final_exist = all(c.exists() for c in final_names)
@@ -16459,7 +16975,7 @@ def _calib_apply_overrides(sets: dict, overrides: list[str]) -> dict:
             mol, role = lhs.split(".", 1)
         except ValueError:
             raise SystemExit(f"--override: formato inválido '{item}' "
-                             f"(se espera MOL.rol=carpeta, p. ej. GLYCINE.neutral=glycine)")
+                             f"(se espera MOL.rol=carpeta, p. ej. GLYCINE.neutral=glycine)") from None
         mol, role = mol.upper(), role.lower()
         if mol not in sets or "chain" not in sets[mol] or role not in sets[mol]["chain"]:
             raise SystemExit(f"--override: '{mol}.{role}' no existe en CALIBRATION_SETS")
@@ -16550,7 +17066,6 @@ def _calib_compute_mol(mol: str, spec: dict, base: Path, T: float,
 
     ch = spec["chain"]
     D = {role: load(name) for role, name in ch.items()}
-    bad = [f"{ch[r]}" for r, d in D.items() if not d.get("ok")]
 
     macro = None
     if D["neutral"].get("ok") and D["zwitterion"].get("ok"):
@@ -16558,7 +17073,7 @@ def _calib_compute_mol(mol: str, spec: dict, base: Path, T: float,
             _taut, macro = _build_neutral_macrostate(
                 D["neutral"], D["zwitterion"], ch["neutral"], ch["zwitterion"],
                 T, verbose=False, gcorr_source=gcorr_source)
-        except SystemExit:
+        except MacrostateError:
             macro = None
 
     def need(*roles) -> Optional[str]:
@@ -16700,6 +17215,8 @@ Ejemplos:
                 res = _calib_compute_mol(mol, spec, base, args.temp, args.method, gsrc,
                                          use_smd=args.spsmd)
             except SystemExit as exc:
+                if exc.code == 130:      # Ctrl-C / SIGTERM: no seguir con la cola
+                    raise
                 res = {t["slot"]: _calib_failed(f"abortado (SystemExit {exc.code})")
                        for t in spec["transitions"]}
             for slot, r in res.items():
@@ -16772,7 +17289,7 @@ Ejemplos:
         "EMPIRICAL_CALIBRATION": cal,
     }
     outp = Path(args.out).expanduser()
-    outp.write_text(json.dumps(blob, indent=2, ensure_ascii=False), encoding="utf-8")
+    atomic_write(outp, json.dumps(blob, indent=2, ensure_ascii=False))
     print(f"\n  → {outp.resolve()}")
     if args.csv:
         with open(args.csv, "w", newline="", encoding="utf-8") as fh:
