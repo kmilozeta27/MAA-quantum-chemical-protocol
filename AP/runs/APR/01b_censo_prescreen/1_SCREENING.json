@@ -1,0 +1,21 @@
+{
+    "part_name": "screening",
+    "data": {
+        "CONF1": {
+            "energy": -303.573244967083,
+            "gsolv": -0.015978614241021205,
+            "grrho": 0.071819200184,
+            "gtot": -303.51740438114
+        }
+    },
+    "settings": {
+        "prog": "orca",
+        "func": "r2scan-3c",
+        "basis": "def2-mtzvpp",
+        "sm": "cpcm",
+        "gfnv": "gfn2",
+        "threshold": 3.5,
+        "gsolv_included": false,
+        "template": false
+    }
+}

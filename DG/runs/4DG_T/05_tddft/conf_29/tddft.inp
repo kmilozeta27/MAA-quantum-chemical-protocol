@@ -1,0 +1,22 @@
+! wB97X-D3 def2-TZVPD def2-TZVPD/C CPCM(water) RIJCOSX TightSCF
+%pal
+  nprocs 6
+end
+%maxcore 1568
+%scf
+  MaxIter 300
+  MOInp "sp.gbw"
+end
+%tddft
+  NRoots    15
+  MaxDim    150
+  ETol      1e-6
+  RTol      1e-6
+  TDA       false
+  Triplets  false
+  PrintLevel 3
+  DoCD      true
+  DoNTO     true
+end
+
+* xyzfile 0 1 sp_opt.xyz

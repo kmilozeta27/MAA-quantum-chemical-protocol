@@ -1,0 +1,16 @@
+! ADC2 def2-SVP def2-SVP/C RIJCOSX TightSCF
+%scf
+  MaxIter 500
+end
+%maxcore 6589
+%pal
+  nprocs 4
+end
+%mdci
+  nroots 1
+  trafotype trafo_ri
+  maxiter 50
+  MaxCore 6589
+end
+
+* xyzfile -1 1 adc2_geom.xyz

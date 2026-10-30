@@ -1,0 +1,735 @@
+20:37:19  INFO      ============================================================
+20:37:19  INFO      PIPELINE ORCA  —  molécula: B
+20:37:19  INFO      Carga: -1   Mult: 1
+20:37:19  INFO      Flujo: CREST → CENSO (prescreen) → OPT (nconf auto) → NumFreq → SP → TDDFT → ADC2
+20:37:19  INFO      Inicio desde etapa: CREST
+20:37:19  INFO      ORCA: /home/kmilozeta/orca_6_1_1_avx2/orca
+20:37:19  INFO      Temperatura CENSO      : 298.15 K
+20:37:19  INFO      Recursos CREST/CENSO   : 12 cores  (xTB --T, escala lineal)
+20:37:19  INFO      Recursos OPT           : 3×4 cores / 2196 MB  → 8.6 GB/job
+20:37:19  INFO      Recursos SP            : 3×4 cores / 2196 MB  → 8.6 GB/job
+20:37:19  INFO      Recursos TDDFT         : 2×6 cores / 1568 MB  → 9.2 GB/job  (NRoots 15)
+20:37:19  INFO      Recursos NumFreq       : 1×12 cores / 2196 MB  → 25.7 GB
+20:37:19  INFO      ============================================================
+20:37:19  INFO      [CREST] lanzando sobre B.xyz  (carga=-1)
+21:47:46  INFO      [CREST] 245 confórmeros generados en 70.5 min
+21:47:46  DEBUG     [CENSO-RECOVER]  diagnóstico 01b_censo_prescreen: 0 CONF dirs | sp_ok=0 | gsolv_ok=0 | full=0 | can_recover=False
+21:47:46  INFO      [CENSO]  ▶  lanzando pre-screening sobre crest_conformers.xyz (carga=-1, T=298.15 K)
+21:47:46  ERROR     [CENSO]  ✗  no se encontró el ejecutable (censo) — ¿'conda activate sciencebitch'? Usando ensemble CREST sin filtrar
+21:47:46  DEBUG     [NCONF-BOLTZMANN] 1_SCREENING.out no disponible en runs/B/01b_censo_prescreen — usando select_nconf_auto
+21:47:46  INFO      [NCONF-AUTO] 245 confórmeros disponibles — spread=5.99 kcal/mol > 5.0 (rugoso) → nconf=20 (límites: [3, 20])
+21:47:46  INFO      [OPT] optimizando 20 confórmeros (seleccionados automáticamente)
+21:47:46  INFO      [OPT] 20 confórmeros disponibles — batch 3×4 cores
+21:47:46  INFO      [OPT] ── Lote 1/7: ['conf_001', 'conf_002', 'conf_003']  (cores: ['0,1,2,3', '4,5,6,7', '8,9,10,11'])
+21:47:46  INFO        ▶  lanzando ORCA: opt.inp  (cores 4,5,6,7)
+21:47:46  INFO        ▶  lanzando ORCA: opt.inp  (cores 8,9,10,11)
+21:47:46  INFO        ▶  lanzando ORCA: opt.inp  (cores 0,1,2,3)
+22:06:16  DEBUG       últimas líneas de opt.out:
+        2    -1220.4471974352732104    -7.96e-03  5.48e-04  9.87e-03  5.89e-02  0.700  29.4
+                                   ***Turning on AO-DIIS***
+        3    -1220.4536443562342356    -6.45e-03  4.95e-04  9.10e-03  4.58e-02  0.700  28.2
+        4    -1220.4586319932082006    -4.99e-03  1.31e-03  2.43e-02  3.37e-02  0.000  28.0
+                                  *** Initializing SOSCF ***
+    ---------------------------------------S-O-S-C-F--------------------------------------
+    Iteration    Energy (Eh)           Delta-E    RMSDP     MaxDP     MaxGrad    Time(sec)
+    --------------------------------------------------------------------------------------
+        5    -1220.4726929187163478    -1.41e-02  1.30e-04  2.33e-03  2.16e-03    31.5
+                   *** Restarting incremental Fock matrix formation ***
+22:06:16  DEBUG       últimas líneas de opt.out:
+    
+    ----------------------------------------D-I-I-S--------------------------------------------
+    Iteration    Energy (Eh)           Delta-E    RMSDP     MaxDP     DIISErr   Damp  Time(sec)
+    -------------------------------------------------------------------------------------------
+                   ***  Starting incremental Fock matrix formation  ***
+        1    -1220.4526790635350153     0.00e+00  5.16e-04  8.11e-03  5.86e-02  0.700  64.5
+        2    -1220.4576757698732763    -5.00e-03  4.64e-04  7.22e-03  4.69e-02  0.700  30.9
+                                   ***Turning on AO-DIIS***
+        3    -1220.4617351605315889    -4.06e-03  4.16e-04  6.53e-03  3.63e-02  0.700  30.3
+        4    -1220.4648836978872168    -3.15e-03  1.10e-03  1.84e-02  2.66e-02  0.000  29.1
+22:06:16  ERROR       ✗  opt.inp FALLÓ (returncode=-15, 18.5 min) — revisa runs/B/02_opt/conf_003/opt.out
+22:06:16  DEBUG       últimas líneas de opt.out:
+    
+    ----------------------------------------D-I-I-S--------------------------------------------
+    Iteration    Energy (Eh)           Delta-E    RMSDP     MaxDP     DIISErr   Damp  Time(sec)
+    -------------------------------------------------------------------------------------------
+                   ***  Starting incremental Fock matrix formation  ***
+        1    -1220.4556062540741550     0.00e+00  4.47e-04  8.01e-03  4.06e-02  0.700  65.8
+        2    -1220.4603448105003736    -4.74e-03  4.08e-04  7.37e-03  3.27e-02  0.700  29.6
+                                   ***Turning on AO-DIIS***
+        3    -1220.4642211469790709    -3.88e-03  3.70e-04  6.82e-03  2.55e-02  0.700  27.8
+        4    -1220.4672460932397371    -3.02e-03  9.86e-04  1.80e-02  1.89e-02  0.000  30.0
+22:06:16  ERROR       ✗  opt.inp FALLÓ (returncode=-15, 18.5 min) — revisa runs/B/02_opt/conf_001/opt.out
+22:06:16  ERROR       ✗  opt.inp FALLÓ (returncode=-15, 18.5 min) — revisa runs/B/02_opt/conf_002/opt.out
+23:40:36  INFO      ============================================================
+23:40:36  INFO      PIPELINE ORCA  —  molécula: B
+23:40:36  INFO      Carga: -1   Mult: 1
+23:40:36  INFO      Flujo: CREST → CENSO (prescreen) → OPT (nconf auto) → NumFreq → SP → TDDFT → ADC2
+23:40:36  INFO      Inicio desde etapa: CREST
+23:40:36  INFO      ORCA: /home/kmilozeta/orca_6_1_1_avx2/orca
+23:40:36  INFO      Temperatura CENSO      : 298.15 K
+23:40:36  INFO      Recursos CREST/CENSO   : 12 cores  (xTB --T, escala lineal)
+23:40:36  INFO      Recursos OPT           : 3×4 cores / 2196 MB  → 8.6 GB/job
+23:40:36  INFO      Recursos SP            : 3×4 cores / 2196 MB  → 8.6 GB/job
+23:40:36  INFO      Recursos TDDFT         : 2×6 cores / 1568 MB  → 9.2 GB/job  (NRoots 15)
+23:40:36  INFO      Recursos NumFreq       : 1×12 cores / 2196 MB  → 25.7 GB
+23:40:36  INFO      ============================================================
+23:40:36  DEBUG     [CHECK-BIN] CREST → /home/kmilozeta/miniforge3/bin/crest
+23:40:36  DEBUG     [CHECK-BIN] CENSO → /home/kmilozeta/miniforge3/envs/sciencebitch/bin/censo
+23:40:36  INFO      [CREST] ya existe runs/B/01_crest/crest_conformers.xyz — saltando
+23:40:36  DEBUG     [CENSO-RECOVER]  diagnóstico 01b_censo_prescreen: 0 CONF dirs | sp_ok=0 | gsolv_ok=0 | full=0 | can_recover=False
+23:40:36  INFO      [CENSO]  ▶  lanzando pre-screening sobre crest_conformers.xyz (carga=-1, T=298.15 K)
+01:34:01  INFO      [CENSO]  ✓  pre-screening terminó en 113.4 min — 45 confórmero(s) sobreviven (0_PRESCREENING.xyz)
+01:34:01  DEBUG     [NCONF-BOLTZMANN] 1_SCREENING.out no disponible en runs/B/01b_censo_prescreen — usando select_nconf_auto
+01:34:01  WARNING   [NCONF-AUTO] 45 confórmeros disponibles — energías no legibles; usando heurística de tamaño → nconf=17
+01:34:01  INFO      [OPT] optimizando 17 confórmeros (seleccionados automáticamente)
+01:34:01  INFO      [OPT] 17 confórmeros disponibles — batch 3×4 cores
+01:34:01  INFO      [OPT] ── Lote 1/6: ['conf_001', 'conf_002', 'conf_003']  (cores: ['0,1,2,3', '4,5,6,7', '8,9,10,11'])
+01:34:01  INFO        ▶  lanzando ORCA: opt.inp  (cores 0,1,2,3)
+01:34:01  INFO        ▶  lanzando ORCA: opt.inp  (cores 4,5,6,7)
+01:34:01  INFO        ▶  lanzando ORCA: opt.inp  (cores 8,9,10,11)
+04:32:12  INFO        ✓  opt.inp terminó en 178.2 min
+04:32:12  INFO      [OPT]   ✓ conf_003  (178.2 min)
+04:41:59  INFO        ✓  opt.inp terminó en 188.0 min
+04:41:59  INFO      [OPT]   ✓ conf_001  (188.0 min)
+05:05:36  INFO        ✓  opt.inp terminó en 211.6 min
+05:05:36  INFO      [OPT]   ✓ conf_002  (211.6 min)
+05:05:36  INFO      [OPT] ── Lote 2/6: ['conf_004', 'conf_005', 'conf_006']  (cores: ['0,1,2,3', '4,5,6,7', '8,9,10,11'])
+05:05:36  INFO        ▶  lanzando ORCA: opt.inp  (cores 8,9,10,11)
+05:05:36  INFO        ▶  lanzando ORCA: opt.inp  (cores 4,5,6,7)
+05:05:36  INFO        ▶  lanzando ORCA: opt.inp  (cores 0,1,2,3)
+08:01:31  INFO        ✓  opt.inp terminó en 175.9 min
+08:01:31  INFO      [OPT]   ✓ conf_006  (175.9 min)
+08:14:18  INFO        ✓  opt.inp terminó en 188.7 min
+08:14:18  INFO      [OPT]   ✓ conf_005  (188.7 min)
+08:37:49  INFO        ✓  opt.inp terminó en 212.2 min
+08:37:49  INFO      [OPT]   ✓ conf_004  (212.2 min)
+08:37:49  INFO      [OPT] ── Lote 3/6: ['conf_007', 'conf_008', 'conf_009']  (cores: ['0,1,2,3', '4,5,6,7', '8,9,10,11'])
+08:37:49  INFO        ▶  lanzando ORCA: opt.inp  (cores 8,9,10,11)
+08:37:49  INFO        ▶  lanzando ORCA: opt.inp  (cores 4,5,6,7)
+08:37:49  INFO        ▶  lanzando ORCA: opt.inp  (cores 0,1,2,3)
+11:33:23  INFO        ✓  opt.inp terminó en 175.6 min
+11:33:23  INFO      [OPT]   ✓ conf_008  (175.6 min)
+11:36:47  INFO        ✓  opt.inp terminó en 179.0 min
+11:36:47  INFO      [OPT]   ✓ conf_009  (179.0 min)
+11:42:50  INFO        ✓  opt.inp terminó en 185.0 min
+11:42:50  INFO      [OPT]   ✓ conf_007  (185.0 min)
+11:42:50  INFO      [OPT] ── Lote 4/6: ['conf_010', 'conf_011', 'conf_012']  (cores: ['0,1,2,3', '4,5,6,7', '8,9,10,11'])
+11:42:50  INFO        ▶  lanzando ORCA: opt.inp  (cores 4,5,6,7)
+11:42:50  INFO        ▶  lanzando ORCA: opt.inp  (cores 0,1,2,3)
+11:42:50  INFO        ▶  lanzando ORCA: opt.inp  (cores 8,9,10,11)
+11:57:24  DEBUG       últimas líneas de opt.out:
+    Cavity Surface-area                               ...    1307.8958
+    Calculating surface distance matrix               ...        done! (  0.2s)
+    Performing Cholesky decomposition & store         ...        done! (  1.9s)
+    Overall time for CPCM initialization              ...                 2.2s
+    
+    ----------------------------------------D-I-I-S--------------------------------------------
+    Iteration    Energy (Eh)           Delta-E    RMSDP     MaxDP     DIISErr   Damp  Time(sec)
+    -------------------------------------------------------------------------------------------
+                   ***  Starting incremental Fock matrix formation  ***
+        1    -1220.4645136326571446     0.00e+00  4.05e-04  9.08e-03  2.59e-02  0.700  57.3
+11:57:24  ERROR       ✗  opt.inp FALLÓ (returncode=-15, 14.6 min) — revisa runs/B/02_opt/conf_011/opt.out
+11:57:24  DEBUG       últimas líneas de opt.out:
+    Cavity Volume                                     ...    2625.7703
+    Cavity Surface-area                               ...    1293.8974
+    Calculating surface distance matrix               ...        done! (  0.3s)
+    Performing Cholesky decomposition & store         ...        done! (  1.7s)
+    Overall time for CPCM initialization              ...                 2.0s
+    
+    ----------------------------------------D-I-I-S--------------------------------------------
+    Iteration    Energy (Eh)           Delta-E    RMSDP     MaxDP     DIISErr   Damp  Time(sec)
+    -------------------------------------------------------------------------------------------
+                   ***  Starting incremental Fock matrix formation  ***
+11:57:24  ERROR       ✗  opt.inp FALLÓ (returncode=-15, 14.6 min) — revisa runs/B/02_opt/conf_012/opt.out
+11:57:24  DEBUG       últimas líneas de opt.out:
+    Cavity Surface-area                               ...    1329.5552
+    Calculating surface distance matrix               ...        done! (  0.3s)
+    Performing Cholesky decomposition & store         ...        done! (  1.8s)
+    Overall time for CPCM initialization              ...                 2.1s
+    
+    ----------------------------------------D-I-I-S--------------------------------------------
+    Iteration    Energy (Eh)           Delta-E    RMSDP     MaxDP     DIISErr   Damp  Time(sec)
+    -------------------------------------------------------------------------------------------
+                   ***  Starting incremental Fock matrix formation  ***
+        1    -1220.4398253586336978     0.00e+00  5.90e-04  1.07e-02  6.49e-02  0.700  57.0
+11:57:24  ERROR       ✗  opt.inp FALLÓ (returncode=-15, 14.6 min) — revisa runs/B/02_opt/conf_010/opt.out
+12:05:12  INFO      ============================================================
+12:05:12  INFO      PIPELINE ORCA  —  molécula: B
+12:05:12  INFO      Carga: -1   Mult: 1
+12:05:12  INFO      Flujo: CREST → CENSO (prescreen) → OPT (nconf auto) → NumFreq → SP → TDDFT → ADC2
+12:05:12  INFO      Inicio desde etapa: CREST
+12:05:12  INFO      ORCA: /home/kmilozeta/orca_6_1_1_avx2/orca
+12:05:12  INFO      Temperatura CENSO      : 298.15 K
+12:05:12  INFO      Recursos CREST/CENSO   : 12 cores  (xTB --T, escala lineal)
+12:05:12  INFO      Recursos OPT           : 3×4 cores / 2196 MB  → 8.6 GB/job
+12:05:12  INFO      Recursos SP            : 3×4 cores / 2196 MB  → 8.6 GB/job
+12:05:12  INFO      Recursos TDDFT         : 2×6 cores / 1568 MB  → 9.2 GB/job  (NRoots 15)
+12:05:12  INFO      Recursos NumFreq       : 1×12 cores / 2196 MB  → 25.7 GB
+12:05:12  INFO      ============================================================
+12:05:12  DEBUG     [CHECK-BIN] CREST → /home/kmilozeta/miniforge3/bin/crest
+12:05:12  DEBUG     [CHECK-BIN] CENSO → /home/kmilozeta/miniforge3/envs/sciencebitch/bin/censo
+12:05:12  INFO      [CREST] ya existe runs/B/01_crest/crest_conformers.xyz — saltando
+12:05:12  INFO      [CENSO]  ↩  pre-screening ya completado — saltando (censo_ensemble_sorted.xyz)
+12:05:12  DEBUG     [NCONF-BOLTZMANN] 1_SCREENING.out no disponible en runs/B/01b_censo_prescreen — usando select_nconf_auto
+12:05:12  WARNING   [NCONF-AUTO] 45 confórmeros disponibles — energías no legibles; usando heurística de tamaño → nconf=17
+12:05:12  INFO      [OPT] optimizando 17 confórmeros (seleccionados automáticamente)
+12:05:12  INFO      [OPT] 17 confórmeros disponibles — batch 3×4 cores
+12:05:12  INFO      [OPT] ── Lote 1/6: ['conf_001', 'conf_002', 'conf_003']  (cores: ['0,1,2,3', '4,5,6,7', '8,9,10,11'])
+12:05:12  INFO        ▶  lanzando ORCA: opt.inp  (cores 0,1,2,3)
+12:05:12  INFO        ▶  lanzando ORCA: opt.inp  (cores 4,5,6,7)
+12:05:12  INFO        ▶  lanzando ORCA: opt.inp  (cores 8,9,10,11)
+12:05:18  DEBUG       últimas líneas de opt.out:
+    General Integration Accuracy     IntAcc      ... 4.670
+    Radial Grid Type                 RadialGrid  ... Gauss-Chebyshev
+    Angular Grid (max. ang.)         AngularGrid ... 4 (Lebedev-302)
+    Angular grid pruning method      GridPruning ... 3 (G Style)
+    Weight generation scheme         WeightScheme... Becke
+    Basis function cutoff            BFCut       ... 1.0000e-11
+    Integration weight cutoff        WCut        ... 1.0000e-14
+    Partially contracted basis set               ... off
+    Rotationally invariant grid construction     ... off
+    Angular grids for H and He will be reduced by one unit
+12:05:18  DEBUG       últimas líneas de opt.out:
+    General Integration Accuracy     IntAcc      ... 4.670
+    Radial Grid Type                 RadialGrid  ... Gauss-Chebyshev
+    Angular Grid (max. ang.)         AngularGrid ... 4 (Lebedev-302)
+    Angular grid pruning method      GridPruning ... 3 (G Style)
+    Weight generation scheme         WeightScheme... Becke
+    Basis function cutoff            BFCut       ... 1.0000e-11
+    Integration weight cutoff        WCut        ... 1.0000e-14
+    Partially contracted basis set               ... off
+    Rotationally invariant grid construction     ... off
+    Angular grids for H and He will be reduced by one unit
+12:05:18  ERROR       ✗  opt.inp FALLÓ (returncode=-15, 0.1 min) — revisa runs/B/02_opt/conf_002/opt.out
+12:05:18  ERROR       ✗  opt.inp FALLÓ (returncode=-15, 0.1 min) — revisa runs/B/02_opt/conf_003/opt.out
+12:05:18  DEBUG       últimas líneas de opt.out:
+    General Integration Accuracy     IntAcc      ... 4.670
+    Radial Grid Type                 RadialGrid  ... Gauss-Chebyshev
+    Angular Grid (max. ang.)         AngularGrid ... 4 (Lebedev-302)
+    Angular grid pruning method      GridPruning ... 3 (G Style)
+    Weight generation scheme         WeightScheme... Becke
+    Basis function cutoff            BFCut       ... 1.0000e-11
+    Integration weight cutoff        WCut        ... 1.0000e-14
+    Partially contracted basis set               ... off
+    Rotationally invariant grid construction     ... off
+    Angular grids for H and He will be reduced by one unit
+12:05:18  ERROR       ✗  opt.inp FALLÓ (returncode=-15, 0.1 min) — revisa runs/B/02_opt/conf_001/opt.out
+12:07:50  INFO      ============================================================
+12:07:50  INFO      PIPELINE ORCA  —  molécula: B
+12:07:50  INFO      Carga: -1   Mult: 1
+12:07:50  INFO      Flujo: CREST → CENSO (prescreen) → OPT (nconf auto) → NumFreq → SP → TDDFT → ADC2
+12:07:50  INFO      Inicio desde etapa: CREST
+12:07:50  INFO      ORCA: /home/kmilozeta/orca_6_1_1_avx2/orca
+12:07:50  INFO      Temperatura CENSO      : 298.15 K
+12:07:50  INFO      Recursos CREST/CENSO   : 12 cores  (xTB --T, escala lineal)
+12:07:50  INFO      Recursos OPT           : 3×4 cores / 2196 MB  → 8.6 GB/job
+12:07:50  INFO      Recursos SP            : 3×4 cores / 2196 MB  → 8.6 GB/job
+12:07:50  INFO      Recursos TDDFT         : 2×6 cores / 1568 MB  → 9.2 GB/job  (NRoots 15)
+12:07:50  INFO      Recursos NumFreq       : 1×12 cores / 2196 MB  → 25.7 GB
+12:07:50  INFO      ============================================================
+12:07:50  DEBUG     [CHECK-BIN] CREST → /home/kmilozeta/miniforge3/bin/crest
+12:07:50  DEBUG     [CHECK-BIN] CENSO → /home/kmilozeta/miniforge3/envs/sciencebitch/bin/censo
+12:07:50  INFO      [CREST] ya existe runs/B/01_crest/crest_conformers.xyz — saltando
+12:07:50  DEBUG     [CENSO-RECOVER]  diagnóstico 01b_censo_prescreen: 0 CONF dirs | sp_ok=0 | gsolv_ok=0 | full=0 | can_recover=False
+12:07:50  INFO      [CENSO]  ▶  lanzando pre-screening sobre crest_conformers.xyz (carga=-1, T=298.15 K)
+12:09:56  INFO      ============================================================
+12:09:56  INFO      PIPELINE ORCA  —  molécula: B
+12:09:56  INFO      Carga: -1   Mult: 1
+12:09:56  INFO      Flujo: CREST → CENSO (prescreen) → OPT (nconf auto) → NumFreq → SP → TDDFT → ADC2
+12:09:56  INFO      Inicio desde etapa: CREST
+12:09:56  INFO      ORCA: /home/kmilozeta/orca_6_1_1_avx2/orca
+12:09:56  INFO      Temperatura CENSO      : 298.15 K
+12:09:56  INFO      Recursos CREST/CENSO   : 12 cores  (xTB --T, escala lineal)
+12:09:56  INFO      Recursos OPT           : 3×4 cores / 2196 MB  → 8.6 GB/job
+12:09:56  INFO      Recursos SP            : 3×4 cores / 2196 MB  → 8.6 GB/job
+12:09:56  INFO      Recursos TDDFT         : 2×6 cores / 1568 MB  → 9.2 GB/job  (NRoots 15)
+12:09:56  INFO      Recursos NumFreq       : 1×12 cores / 2196 MB  → 25.7 GB
+12:09:56  INFO      ============================================================
+12:09:56  DEBUG     [CHECK-BIN] CREST → /home/kmilozeta/miniforge3/bin/crest
+12:09:56  DEBUG     [CHECK-BIN] CENSO → /home/kmilozeta/miniforge3/envs/sciencebitch/bin/censo
+12:09:56  INFO      [CREST] ya existe runs/B/01_crest/crest_conformers.xyz — saltando
+12:09:56  DEBUG     [CENSO-RECOVER]  diagnóstico 01b_censo_prescreen: 245 CONF dirs | sp_ok=245 | gsolv_ok=243 | full=243 | can_recover=False
+12:09:56  INFO      [CENSO]  ⚙  carpeta previa detectada con 245 CONF dirs (sp_ok=245, gsolv_ok=243, completos=243)
+12:09:56  WARNING   [CENSO]  🗑  eliminando 245 subcarpetas CONF* corruptas/incompletas en 01b_censo_prescreen/ para relanzar CENSO desde cero
+12:09:56  DEBUG     [CENSO]  rm -rf CONF1
+12:09:56  DEBUG     [CENSO]  rm -rf CONF2
+12:09:56  DEBUG     [CENSO]  rm -rf CONF3
+12:09:56  DEBUG     [CENSO]  rm -rf CONF4
+12:09:56  DEBUG     [CENSO]  rm -rf CONF5
+12:09:56  DEBUG     [CENSO]  rm -rf CONF6
+12:09:56  DEBUG     [CENSO]  rm -rf CONF7
+12:09:56  DEBUG     [CENSO]  rm -rf CONF8
+12:09:56  DEBUG     [CENSO]  rm -rf CONF9
+12:09:56  DEBUG     [CENSO]  rm -rf CONF10
+12:09:56  DEBUG     [CENSO]  rm -rf CONF11
+12:09:56  DEBUG     [CENSO]  rm -rf CONF12
+12:09:56  DEBUG     [CENSO]  rm -rf CONF13
+12:09:56  DEBUG     [CENSO]  rm -rf CONF14
+12:09:56  DEBUG     [CENSO]  rm -rf CONF15
+12:09:56  DEBUG     [CENSO]  rm -rf CONF16
+12:09:56  DEBUG     [CENSO]  rm -rf CONF17
+12:09:56  DEBUG     [CENSO]  rm -rf CONF18
+12:09:56  DEBUG     [CENSO]  rm -rf CONF19
+12:09:56  DEBUG     [CENSO]  rm -rf CONF20
+12:09:56  DEBUG     [CENSO]  rm -rf CONF21
+12:09:56  DEBUG     [CENSO]  rm -rf CONF22
+12:09:56  DEBUG     [CENSO]  rm -rf CONF23
+12:09:56  DEBUG     [CENSO]  rm -rf CONF24
+12:09:56  DEBUG     [CENSO]  rm -rf CONF25
+12:09:56  DEBUG     [CENSO]  rm -rf CONF26
+12:09:56  DEBUG     [CENSO]  rm -rf CONF27
+12:09:56  DEBUG     [CENSO]  rm -rf CONF28
+12:09:56  DEBUG     [CENSO]  rm -rf CONF29
+12:09:56  DEBUG     [CENSO]  rm -rf CONF30
+12:09:56  DEBUG     [CENSO]  rm -rf CONF31
+12:09:56  DEBUG     [CENSO]  rm -rf CONF32
+12:09:56  DEBUG     [CENSO]  rm -rf CONF33
+12:09:56  DEBUG     [CENSO]  rm -rf CONF34
+12:09:56  DEBUG     [CENSO]  rm -rf CONF35
+12:09:56  DEBUG     [CENSO]  rm -rf CONF36
+12:09:56  DEBUG     [CENSO]  rm -rf CONF37
+12:09:56  DEBUG     [CENSO]  rm -rf CONF38
+12:09:56  DEBUG     [CENSO]  rm -rf CONF39
+12:09:56  DEBUG     [CENSO]  rm -rf CONF40
+12:09:56  DEBUG     [CENSO]  rm -rf CONF41
+12:09:56  DEBUG     [CENSO]  rm -rf CONF42
+12:09:56  DEBUG     [CENSO]  rm -rf CONF43
+12:09:56  DEBUG     [CENSO]  rm -rf CONF44
+12:09:56  DEBUG     [CENSO]  rm -rf CONF45
+12:09:56  DEBUG     [CENSO]  rm -rf CONF46
+12:09:56  DEBUG     [CENSO]  rm -rf CONF47
+12:09:56  DEBUG     [CENSO]  rm -rf CONF48
+12:09:56  DEBUG     [CENSO]  rm -rf CONF49
+12:09:56  DEBUG     [CENSO]  rm -rf CONF50
+12:09:56  DEBUG     [CENSO]  rm -rf CONF51
+12:09:56  DEBUG     [CENSO]  rm -rf CONF52
+12:09:56  DEBUG     [CENSO]  rm -rf CONF53
+12:09:56  DEBUG     [CENSO]  rm -rf CONF54
+12:09:56  DEBUG     [CENSO]  rm -rf CONF55
+12:09:56  DEBUG     [CENSO]  rm -rf CONF56
+12:09:56  DEBUG     [CENSO]  rm -rf CONF57
+12:09:56  DEBUG     [CENSO]  rm -rf CONF58
+12:09:56  DEBUG     [CENSO]  rm -rf CONF59
+12:09:56  DEBUG     [CENSO]  rm -rf CONF60
+12:09:56  DEBUG     [CENSO]  rm -rf CONF61
+12:09:56  DEBUG     [CENSO]  rm -rf CONF62
+12:09:56  DEBUG     [CENSO]  rm -rf CONF63
+12:09:56  DEBUG     [CENSO]  rm -rf CONF64
+12:09:56  DEBUG     [CENSO]  rm -rf CONF65
+12:09:56  DEBUG     [CENSO]  rm -rf CONF66
+12:09:56  DEBUG     [CENSO]  rm -rf CONF67
+12:09:56  DEBUG     [CENSO]  rm -rf CONF68
+12:09:56  DEBUG     [CENSO]  rm -rf CONF69
+12:09:56  DEBUG     [CENSO]  rm -rf CONF70
+12:09:56  DEBUG     [CENSO]  rm -rf CONF71
+12:09:56  DEBUG     [CENSO]  rm -rf CONF72
+12:09:56  DEBUG     [CENSO]  rm -rf CONF73
+12:09:56  DEBUG     [CENSO]  rm -rf CONF74
+12:09:56  DEBUG     [CENSO]  rm -rf CONF75
+12:09:56  DEBUG     [CENSO]  rm -rf CONF76
+12:09:56  DEBUG     [CENSO]  rm -rf CONF77
+12:09:56  DEBUG     [CENSO]  rm -rf CONF78
+12:09:56  DEBUG     [CENSO]  rm -rf CONF79
+12:09:56  DEBUG     [CENSO]  rm -rf CONF80
+12:09:56  DEBUG     [CENSO]  rm -rf CONF81
+12:09:56  DEBUG     [CENSO]  rm -rf CONF82
+12:09:56  DEBUG     [CENSO]  rm -rf CONF83
+12:09:56  DEBUG     [CENSO]  rm -rf CONF84
+12:09:56  DEBUG     [CENSO]  rm -rf CONF85
+12:09:56  DEBUG     [CENSO]  rm -rf CONF86
+12:09:56  DEBUG     [CENSO]  rm -rf CONF87
+12:09:56  DEBUG     [CENSO]  rm -rf CONF88
+12:09:56  DEBUG     [CENSO]  rm -rf CONF89
+12:09:56  DEBUG     [CENSO]  rm -rf CONF90
+12:09:56  DEBUG     [CENSO]  rm -rf CONF91
+12:09:56  DEBUG     [CENSO]  rm -rf CONF92
+12:09:56  DEBUG     [CENSO]  rm -rf CONF93
+12:09:56  DEBUG     [CENSO]  rm -rf CONF94
+12:09:56  DEBUG     [CENSO]  rm -rf CONF95
+12:09:56  DEBUG     [CENSO]  rm -rf CONF96
+12:09:56  DEBUG     [CENSO]  rm -rf CONF97
+12:09:56  DEBUG     [CENSO]  rm -rf CONF98
+12:09:56  DEBUG     [CENSO]  rm -rf CONF99
+12:09:56  DEBUG     [CENSO]  rm -rf CONF100
+12:09:56  DEBUG     [CENSO]  rm -rf CONF101
+12:09:56  DEBUG     [CENSO]  rm -rf CONF102
+12:09:56  DEBUG     [CENSO]  rm -rf CONF103
+12:09:56  DEBUG     [CENSO]  rm -rf CONF104
+12:09:56  DEBUG     [CENSO]  rm -rf CONF105
+12:09:56  DEBUG     [CENSO]  rm -rf CONF106
+12:09:56  DEBUG     [CENSO]  rm -rf CONF107
+12:09:56  DEBUG     [CENSO]  rm -rf CONF108
+12:09:56  DEBUG     [CENSO]  rm -rf CONF109
+12:09:56  DEBUG     [CENSO]  rm -rf CONF110
+12:09:56  DEBUG     [CENSO]  rm -rf CONF111
+12:09:56  DEBUG     [CENSO]  rm -rf CONF112
+12:09:56  DEBUG     [CENSO]  rm -rf CONF113
+12:09:56  DEBUG     [CENSO]  rm -rf CONF114
+12:09:56  DEBUG     [CENSO]  rm -rf CONF115
+12:09:56  DEBUG     [CENSO]  rm -rf CONF116
+12:09:56  DEBUG     [CENSO]  rm -rf CONF117
+12:09:56  DEBUG     [CENSO]  rm -rf CONF118
+12:09:56  DEBUG     [CENSO]  rm -rf CONF119
+12:09:56  DEBUG     [CENSO]  rm -rf CONF120
+12:09:56  DEBUG     [CENSO]  rm -rf CONF121
+12:09:56  DEBUG     [CENSO]  rm -rf CONF122
+12:09:56  DEBUG     [CENSO]  rm -rf CONF123
+12:09:56  DEBUG     [CENSO]  rm -rf CONF124
+12:09:56  DEBUG     [CENSO]  rm -rf CONF125
+12:09:56  DEBUG     [CENSO]  rm -rf CONF126
+12:09:56  DEBUG     [CENSO]  rm -rf CONF127
+12:09:56  DEBUG     [CENSO]  rm -rf CONF128
+12:09:56  DEBUG     [CENSO]  rm -rf CONF129
+12:09:56  DEBUG     [CENSO]  rm -rf CONF130
+12:09:56  DEBUG     [CENSO]  rm -rf CONF131
+12:09:56  DEBUG     [CENSO]  rm -rf CONF132
+12:09:56  DEBUG     [CENSO]  rm -rf CONF133
+12:09:56  DEBUG     [CENSO]  rm -rf CONF134
+12:09:56  DEBUG     [CENSO]  rm -rf CONF135
+12:09:56  DEBUG     [CENSO]  rm -rf CONF136
+12:09:56  DEBUG     [CENSO]  rm -rf CONF137
+12:09:56  DEBUG     [CENSO]  rm -rf CONF138
+12:09:56  DEBUG     [CENSO]  rm -rf CONF139
+12:09:56  DEBUG     [CENSO]  rm -rf CONF140
+12:09:56  DEBUG     [CENSO]  rm -rf CONF141
+12:09:56  DEBUG     [CENSO]  rm -rf CONF142
+12:09:56  DEBUG     [CENSO]  rm -rf CONF143
+12:09:56  DEBUG     [CENSO]  rm -rf CONF144
+12:09:56  DEBUG     [CENSO]  rm -rf CONF145
+12:09:56  DEBUG     [CENSO]  rm -rf CONF146
+12:09:56  DEBUG     [CENSO]  rm -rf CONF147
+12:09:56  DEBUG     [CENSO]  rm -rf CONF148
+12:09:56  DEBUG     [CENSO]  rm -rf CONF149
+12:09:56  DEBUG     [CENSO]  rm -rf CONF150
+12:09:56  DEBUG     [CENSO]  rm -rf CONF151
+12:09:56  DEBUG     [CENSO]  rm -rf CONF152
+12:09:56  DEBUG     [CENSO]  rm -rf CONF153
+12:09:56  DEBUG     [CENSO]  rm -rf CONF154
+12:09:56  DEBUG     [CENSO]  rm -rf CONF155
+12:09:56  DEBUG     [CENSO]  rm -rf CONF156
+12:09:56  DEBUG     [CENSO]  rm -rf CONF157
+12:09:56  DEBUG     [CENSO]  rm -rf CONF158
+12:09:56  DEBUG     [CENSO]  rm -rf CONF159
+12:09:56  DEBUG     [CENSO]  rm -rf CONF160
+12:09:56  DEBUG     [CENSO]  rm -rf CONF161
+12:09:56  DEBUG     [CENSO]  rm -rf CONF162
+12:09:56  DEBUG     [CENSO]  rm -rf CONF163
+12:09:56  DEBUG     [CENSO]  rm -rf CONF164
+12:09:56  DEBUG     [CENSO]  rm -rf CONF165
+12:09:56  DEBUG     [CENSO]  rm -rf CONF166
+12:09:56  DEBUG     [CENSO]  rm -rf CONF167
+12:09:56  DEBUG     [CENSO]  rm -rf CONF168
+12:09:56  DEBUG     [CENSO]  rm -rf CONF169
+12:09:56  DEBUG     [CENSO]  rm -rf CONF170
+12:09:56  DEBUG     [CENSO]  rm -rf CONF171
+12:09:56  DEBUG     [CENSO]  rm -rf CONF172
+12:09:56  DEBUG     [CENSO]  rm -rf CONF173
+12:09:56  DEBUG     [CENSO]  rm -rf CONF174
+12:09:56  DEBUG     [CENSO]  rm -rf CONF175
+12:09:56  DEBUG     [CENSO]  rm -rf CONF176
+12:09:56  DEBUG     [CENSO]  rm -rf CONF177
+12:09:56  DEBUG     [CENSO]  rm -rf CONF178
+12:09:56  DEBUG     [CENSO]  rm -rf CONF179
+12:09:56  DEBUG     [CENSO]  rm -rf CONF180
+12:09:56  DEBUG     [CENSO]  rm -rf CONF181
+12:09:56  DEBUG     [CENSO]  rm -rf CONF182
+12:09:56  DEBUG     [CENSO]  rm -rf CONF183
+12:09:56  DEBUG     [CENSO]  rm -rf CONF184
+12:09:56  DEBUG     [CENSO]  rm -rf CONF185
+12:09:56  DEBUG     [CENSO]  rm -rf CONF186
+12:09:56  DEBUG     [CENSO]  rm -rf CONF187
+12:09:56  DEBUG     [CENSO]  rm -rf CONF188
+12:09:56  DEBUG     [CENSO]  rm -rf CONF189
+12:09:56  DEBUG     [CENSO]  rm -rf CONF190
+12:09:56  DEBUG     [CENSO]  rm -rf CONF191
+12:09:56  DEBUG     [CENSO]  rm -rf CONF192
+12:09:56  DEBUG     [CENSO]  rm -rf CONF193
+12:09:56  DEBUG     [CENSO]  rm -rf CONF194
+12:09:56  DEBUG     [CENSO]  rm -rf CONF195
+12:09:56  DEBUG     [CENSO]  rm -rf CONF196
+12:09:56  DEBUG     [CENSO]  rm -rf CONF197
+12:09:56  DEBUG     [CENSO]  rm -rf CONF198
+12:09:56  DEBUG     [CENSO]  rm -rf CONF199
+12:09:56  DEBUG     [CENSO]  rm -rf CONF200
+12:09:56  DEBUG     [CENSO]  rm -rf CONF201
+12:09:56  DEBUG     [CENSO]  rm -rf CONF202
+12:09:56  DEBUG     [CENSO]  rm -rf CONF203
+12:09:56  DEBUG     [CENSO]  rm -rf CONF204
+12:09:56  DEBUG     [CENSO]  rm -rf CONF205
+12:09:56  DEBUG     [CENSO]  rm -rf CONF206
+12:09:56  DEBUG     [CENSO]  rm -rf CONF207
+12:09:56  DEBUG     [CENSO]  rm -rf CONF208
+12:09:56  DEBUG     [CENSO]  rm -rf CONF209
+12:09:56  DEBUG     [CENSO]  rm -rf CONF210
+12:09:56  DEBUG     [CENSO]  rm -rf CONF211
+12:09:56  DEBUG     [CENSO]  rm -rf CONF212
+12:09:56  DEBUG     [CENSO]  rm -rf CONF213
+12:09:56  DEBUG     [CENSO]  rm -rf CONF214
+12:09:56  DEBUG     [CENSO]  rm -rf CONF215
+12:09:56  DEBUG     [CENSO]  rm -rf CONF216
+12:09:56  DEBUG     [CENSO]  rm -rf CONF217
+12:09:56  DEBUG     [CENSO]  rm -rf CONF218
+12:09:56  DEBUG     [CENSO]  rm -rf CONF219
+12:09:56  DEBUG     [CENSO]  rm -rf CONF220
+12:09:56  DEBUG     [CENSO]  rm -rf CONF221
+12:09:56  DEBUG     [CENSO]  rm -rf CONF222
+12:09:56  DEBUG     [CENSO]  rm -rf CONF223
+12:09:56  DEBUG     [CENSO]  rm -rf CONF224
+12:09:56  DEBUG     [CENSO]  rm -rf CONF225
+12:09:56  DEBUG     [CENSO]  rm -rf CONF226
+12:09:56  DEBUG     [CENSO]  rm -rf CONF227
+12:09:56  DEBUG     [CENSO]  rm -rf CONF228
+12:09:56  DEBUG     [CENSO]  rm -rf CONF229
+12:09:56  DEBUG     [CENSO]  rm -rf CONF230
+12:09:56  DEBUG     [CENSO]  rm -rf CONF231
+12:09:56  DEBUG     [CENSO]  rm -rf CONF232
+12:09:56  DEBUG     [CENSO]  rm -rf CONF233
+12:09:56  DEBUG     [CENSO]  rm -rf CONF234
+12:09:56  DEBUG     [CENSO]  rm -rf CONF235
+12:09:56  DEBUG     [CENSO]  rm -rf CONF236
+12:09:56  DEBUG     [CENSO]  rm -rf CONF237
+12:09:56  DEBUG     [CENSO]  rm -rf CONF238
+12:09:56  DEBUG     [CENSO]  rm -rf CONF239
+12:09:56  DEBUG     [CENSO]  rm -rf CONF240
+12:09:56  DEBUG     [CENSO]  rm -rf CONF241
+12:09:56  DEBUG     [CENSO]  rm -rf CONF242
+12:09:56  DEBUG     [CENSO]  rm -rf CONF243
+12:09:56  DEBUG     [CENSO]  rm -rf CONF244
+12:09:56  DEBUG     [CENSO]  rm -rf CONF245
+12:09:56  INFO      [CENSO]  ✓  limpieza completada — relanzando CENSO limpio
+12:09:56  INFO      [CENSO]  ▶  lanzando pre-screening sobre crest_conformers.xyz (carga=-1, T=298.15 K)
+16:20:18  WARNING   [CENSO]  ⚠  33 conf(s) del screening no encontrados en crest_conformers.xyz: ['CONF39', 'CONF29', 'CONF30', 'CONF104', 'CONF24']…
+16:20:18  INFO      [CENSO]  ✓  pre-screening terminó en 250.4 min — 33 confórmero(s) sobreviven, ensemble reconstruido desde 1_SCREENING.out (geometrías: 1_SCREENING.xyz, ordenado por Gtot)
+16:20:18  INFO      [NCONF-BOLTZMANN] umbral=5.0% → 6 conf(s) seleccionados: CONF39(22.3%), CONF29(21.7%), CONF30(16.6%), CONF104(14.9%), CONF24(12.2%), CONF12(5.1%)
+16:20:18  INFO      [NCONF-BOLTZMANN] 27 conf(s) por debajo del umbral (mayor: CONF6 2.40%) — descartados
+16:20:18  INFO      [NCONF-BOLTZMANN] → nconf=6 (nconf_min=3)
+16:20:18  INFO      [OPT] optimizando 6 confórmeros (Boltzmann (6 conf(s): CONF39, CONF29, CONF30, CONF104, CONF24, CONF12))
+16:20:18  INFO      [OPT] 6 confórmeros disponibles — batch 3×4 cores
+16:20:18  INFO      [OPT] ── Lote 1/2: ['conf_001', 'conf_002', 'conf_003']  (cores: ['0,1,2,3', '4,5,6,7', '8,9,10,11'])
+16:20:18  INFO        ▶  lanzando ORCA: opt.inp  (cores 4,5,6,7)
+16:20:18  INFO        ▶  lanzando ORCA: opt.inp  (cores 0,1,2,3)
+16:20:18  INFO        ▶  lanzando ORCA: opt.inp  (cores 8,9,10,11)
+23:05:10  INFO        ✓  opt.inp terminó en 404.9 min
+23:05:10  INFO      [OPT]   ✓ conf_002  (404.9 min)
+23:06:13  INFO        ✓  opt.inp terminó en 405.9 min
+23:06:13  INFO      [OPT]   ✓ conf_003  (405.9 min)
+23:10:47  INFO        ✓  opt.inp terminó en 410.5 min
+23:10:47  INFO      [OPT]   ✓ conf_001  (410.5 min)
+23:10:47  INFO      [OPT] ── Lote 2/2: ['conf_004', 'conf_005', 'conf_006']  (cores: ['0,1,2,3', '4,5,6,7', '8,9,10,11'])
+23:10:47  INFO        ▶  lanzando ORCA: opt.inp  (cores 4,5,6,7)
+23:10:47  INFO        ▶  lanzando ORCA: opt.inp  (cores 0,1,2,3)
+23:10:47  INFO        ▶  lanzando ORCA: opt.inp  (cores 8,9,10,11)
+02:33:53  INFO        ✓  opt.inp terminó en 203.1 min
+02:33:53  INFO      [OPT]   ✓ conf_006  (203.1 min)
+02:35:30  INFO        ✓  opt.inp terminó en 204.7 min
+02:35:31  INFO      [OPT]   ✓ conf_004  (204.7 min)
+02:37:59  INFO        ✓  opt.inp terminó en 207.2 min
+02:37:59  INFO      [OPT]   ✓ conf_005  (207.2 min)
+02:37:59  INFO      [OPT] 6/6 confórmeros optimizados
+02:37:59  INFO      [NUMFREQ] calculando frecuencias para 6 confórmeros
+02:37:59  INFO        ▶  lanzando ORCA: freq.inp
+07:54:58  INFO        ✓  freq.inp terminó en 317.0 min
+07:54:58  INFO      [NUMFREQ] conf_002: sin frecuencias imaginarias ✓
+07:54:58  INFO        ▶  lanzando ORCA: freq.inp
+13:13:02  INFO        ✓  freq.inp terminó en 318.1 min
+13:13:02  INFO      [NUMFREQ] conf_003: sin frecuencias imaginarias ✓
+13:13:02  INFO        ▶  lanzando ORCA: freq.inp
+18:31:36  INFO        ✓  freq.inp terminó en 318.6 min
+18:31:36  INFO      [NUMFREQ] conf_001: sin frecuencias imaginarias ✓
+18:31:36  INFO        ▶  lanzando ORCA: freq.inp
+00:05:08  INFO        ✓  freq.inp terminó en 333.5 min
+00:05:08  INFO      [NUMFREQ] conf_006: sin frecuencias imaginarias ✓
+00:05:08  INFO        ▶  lanzando ORCA: freq.inp
+05:22:54  INFO        ✓  freq.inp terminó en 317.8 min
+05:22:54  WARNING   [NUMFREQ] conf_004: frecuencias imaginarias detectadas — incluido de todos modos (revisar manualmente)
+05:22:54  INFO        ▶  lanzando ORCA: freq.inp
+10:41:32  INFO        ✓  freq.inp terminó en 318.6 min
+10:41:32  WARNING   [NUMFREQ] conf_005: frecuencias imaginarias detectadas — incluido de todos modos (revisar manualmente)
+10:41:32  INFO      [NUMFREQ] 6/6 completados
+10:41:32  INFO      [SP] single point para 6 confórmeros (batch=3, 4 cores/job)
+10:41:32  INFO      [SP] 6 SPs en 2 lote(s) de ≤3 (CPUs activos/lote: 12)
+10:41:32  INFO      [SP] ── Lote 1/2: ['conf_002', 'conf_003', 'conf_001']  (cores: ['0,1,2,3', '4,5,6,7', '8,9,10,11'])
+10:41:32  INFO        ▶  lanzando ORCA: sp.inp  (cores 0,1,2,3)
+10:41:32  INFO        ▶  lanzando ORCA: sp.inp  (cores 8,9,10,11)
+10:41:32  INFO        ▶  lanzando ORCA: sp.inp  (cores 4,5,6,7)
+13:10:19  INFO        ✓  sp.inp terminó en 148.8 min
+13:10:19  INFO      [SP]   ✓ conf_002  (148.8 min)
+13:10:57  INFO        ✓  sp.inp terminó en 149.4 min
+13:10:57  INFO      [SP]   ✓ conf_001  (149.4 min)
+13:11:13  INFO        ✓  sp.inp terminó en 149.7 min
+13:11:13  INFO      [SP]   ✓ conf_003  (149.7 min)
+13:11:13  INFO      [SP] ── Lote 2/2: ['conf_006', 'conf_004', 'conf_005']  (cores: ['0,1,2,3', '4,5,6,7', '8,9,10,11'])
+13:11:13  INFO        ▶  lanzando ORCA: sp.inp  (cores 0,1,2,3)
+13:11:13  INFO        ▶  lanzando ORCA: sp.inp  (cores 8,9,10,11)
+13:11:13  INFO        ▶  lanzando ORCA: sp.inp  (cores 4,5,6,7)
+15:41:48  INFO        ✓  sp.inp terminó en 150.6 min
+15:41:48  INFO      [SP]   ✓ conf_004  (150.6 min)
+15:47:45  INFO        ✓  sp.inp terminó en 156.5 min
+15:47:45  INFO      [SP]   ✓ conf_005  (156.5 min)
+15:51:55  INFO        ✓  sp.inp terminó en 160.7 min
+15:51:55  INFO      [SP]   ✓ conf_006  (160.7 min)
+15:51:55  INFO      [SP] 6/6 completados
+15:51:55  INFO      [TDDFT] calculando espectros para 6 confórmeros — batch 2×6 cores (NRoots 15)
+15:51:55  INFO      [TDDFT] ── Lote 1/3: ['conf_002', 'conf_001']  (cores: ['0,1,2,3,4,5', '6,7,8,9,10,11'])
+15:51:55  INFO        ▶  lanzando ORCA: tddft.inp  (cores 0,1,2,3,4,5)
+15:51:55  INFO        ▶  lanzando ORCA: tddft.inp  (cores 6,7,8,9,10,11)
+17:47:59  INFO        ✓  tddft.inp terminó en 116.1 min
+17:47:59  INFO      [TDDFT]   ✓ conf_002  (116.1 min)
+17:48:17  INFO        ✓  tddft.inp terminó en 116.4 min
+17:48:17  INFO      [TDDFT]   ✓ conf_001  (116.4 min)
+17:48:17  INFO      [TDDFT] ── Lote 2/3: ['conf_003', 'conf_004']  (cores: ['0,1,2,3,4,5', '6,7,8,9,10,11'])
+17:48:17  INFO        ▶  lanzando ORCA: tddft.inp  (cores 0,1,2,3,4,5)
+17:48:17  INFO        ▶  lanzando ORCA: tddft.inp  (cores 6,7,8,9,10,11)
+20:05:14  INFO        ✓  tddft.inp terminó en 136.9 min
+20:05:14  INFO      [TDDFT]   ✓ conf_003  (136.9 min)
+20:05:21  INFO        ✓  tddft.inp terminó en 137.1 min
+20:05:21  INFO      [TDDFT]   ✓ conf_004  (137.1 min)
+20:05:21  INFO      [TDDFT] ── Lote 3/3: ['conf_005', 'conf_006']  (cores: ['0,1,2,3,4,5', '6,7,8,9,10,11'])
+20:05:21  INFO        ▶  lanzando ORCA: tddft.inp  (cores 0,1,2,3,4,5)
+20:05:21  INFO        ▶  lanzando ORCA: tddft.inp  (cores 6,7,8,9,10,11)
+22:09:45  DEBUG       últimas líneas de tddft.out:
+    --------------------------------------------------------------------------
+     
+    ORCA finished by error termination in CIS
+    Calling Command: mpirun -np 6  /home/kmilozeta/orca_6_1_1_avx2/orca_cis_mpi /home/kmilozeta/MGLYVAL/runs/B/05_tddft/conf_005/tddft.cisinp.tmp /home/kmilozeta/MGLYVAL/runs/B/05_tddft/conf_005/tddft 
+    [file orca_tools/qcmsg.cpp, line 394]: 
+      .... aborting the run
+    
+    [file orca_tools/qcmsg.cpp, line 394]: 
+      .... aborting the run
+    
+22:09:45  ERROR       ✗  tddft.inp FALLÓ (returncode=0, 124.4 min) — revisa runs/B/05_tddft/conf_005/tddft.out
+22:09:45  INFO      [TDDFT]   ✗ conf_005  (124.4 min)
+22:09:45  WARNING   [TDDFT] conf_005 falló
+14:05:21  DEBUG       últimas líneas de tddft.out:
+    -------------------------   --------------------
+    FINAL SINGLE POINT ENERGY     -1221.743858602515
+    -------------------------   --------------------
+    
+    
+    
+               ************************************************************
+               *        Program running with 6 parallel MPI-processes     *
+               *              working on a common directory               *
+               ************************************************************
+14:05:21  ERROR       ✗  tddft.inp FALLÓ (returncode=-15, 1080.0 min) — revisa runs/B/05_tddft/conf_006/tddft.out
+14:09:14  INFO      ============================================================
+14:09:14  INFO      PIPELINE ORCA  —  molécula: B
+14:09:14  INFO      Carga: 0   Mult: 1
+14:09:14  INFO      Flujo: CREST → CENSO (prescreen) → OPT (nconf auto) → NumFreq → SP → TDDFT → ADC2
+14:09:14  INFO      Inicio desde etapa: ADC2
+14:09:14  INFO      ORCA: /home/kmilozeta/orca_6_1_1_avx2/orca
+14:09:14  INFO      Temperatura CENSO      : 298.15 K
+14:09:14  INFO      Recursos CREST/CENSO   : 12 cores  (xTB --T, escala lineal)
+14:09:14  INFO      Recursos OPT           : 3×4 cores / 2196 MB  → 8.6 GB/job
+14:09:14  INFO      Recursos SP            : 3×4 cores / 2196 MB  → 8.6 GB/job
+14:09:14  INFO      Recursos TDDFT         : 2×6 cores / 1568 MB  → 9.2 GB/job  (NRoots 15)
+14:09:14  INFO      Recursos NumFreq       : 1×12 cores / 2196 MB  → 25.7 GB
+14:09:14  INFO      ============================================================
+14:09:14  DEBUG     [CHECK-BIN] CREST → /home/kmilozeta/miniforge3/bin/crest
+14:09:14  DEBUG     [CHECK-BIN] CENSO → /home/kmilozeta/miniforge3/envs/sciencebitch/bin/censo
+14:09:14  INFO      [CREST] saltado (--start indica etapa posterior)
+14:09:14  INFO      [OPT] saltado — encontrados 6 directorios previos
+14:09:14  INFO      [NUMFREQ] saltado — encontrados 6 directorios previos
+14:09:14  INFO      [SP] saltado — encontrados 6 directorios previos
+14:09:14  INFO      [TDDFT] no incluido en esta ejecución
+14:09:14  INFO      [ADC2] 6 conf(s) SP disponibles — confórmero dominante: conf_006 (E_SP = -1221.8982918476 Ha)
+14:09:14  INFO      [ADC2] siguiente más estable: conf_004 (ΔE = +1.7668 kcal/mol respecto al dominante)
+14:09:14  INFO        ▶  lanzando ORCA: adc2.inp  [nohup]
+14:09:14  DEBUG       últimas líneas de adc2.out:
+    
+    ================================================================================
+                                            WARNINGS
+                           Please study these warnings very carefully!
+    ================================================================================
+    
+    [file orca_main/main_util_tools.cpp, line 749]: Error : multiplicity (1) is odd and number of electrons (183) is odd -> impossible
+    
+    [file orca_main/main_util_tools.cpp, line 749]: Error : multiplicity (1) is odd and number of electrons (183) is odd -> impossible
+    
+14:09:14  ERROR       ✗  adc2.inp FALLÓ (returncode=55, 0.0 min) — revisa runs/B/07_adc2/conf_006/adc2.out
+14:09:14  ERROR     [ADC2] conf_006 falló.
+14:09:14  WARNING   [ADC2] No se pudo completar la validación ADC2.
+14:09:14  INFO      ============================================================
+14:09:14  INFO      PIPELINE FINALIZADO
+14:09:14  INFO      Resultados en: /home/kmilozeta/MGLYVAL/runs/B
+14:09:14  INFO      ============================================================
+14:10:27  INFO      ============================================================
+14:10:27  INFO      PIPELINE ORCA  —  molécula: B
+14:10:27  INFO      Carga: -1   Mult: 1
+14:10:27  INFO      Flujo: CREST → CENSO (prescreen) → OPT (nconf auto) → NumFreq → SP → TDDFT → ADC2
+14:10:27  INFO      Inicio desde etapa: ADC2
+14:10:27  INFO      ORCA: /home/kmilozeta/orca_6_1_1_avx2/orca
+14:10:27  INFO      Temperatura CENSO      : 298.15 K
+14:10:27  INFO      Recursos CREST/CENSO   : 12 cores  (xTB --T, escala lineal)
+14:10:27  INFO      Recursos OPT           : 3×4 cores / 2196 MB  → 8.6 GB/job
+14:10:27  INFO      Recursos SP            : 3×4 cores / 2196 MB  → 8.6 GB/job
+14:10:27  INFO      Recursos TDDFT         : 2×6 cores / 1568 MB  → 9.2 GB/job  (NRoots 15)
+14:10:27  INFO      Recursos NumFreq       : 1×12 cores / 2196 MB  → 25.7 GB
+14:10:27  INFO      ============================================================
+14:10:27  DEBUG     [CHECK-BIN] CREST → /home/kmilozeta/miniforge3/bin/crest
+14:10:27  DEBUG     [CHECK-BIN] CENSO → /home/kmilozeta/miniforge3/envs/sciencebitch/bin/censo
+14:10:27  INFO      [CREST] saltado (--start indica etapa posterior)
+14:10:27  INFO      [OPT] saltado — encontrados 6 directorios previos
+14:10:27  INFO      [NUMFREQ] saltado — encontrados 6 directorios previos
+14:10:27  INFO      [SP] saltado — encontrados 6 directorios previos
+14:10:27  INFO      [TDDFT] no incluido en esta ejecución
+14:10:27  INFO      [ADC2] 6 conf(s) SP disponibles — confórmero dominante: conf_006 (E_SP = -1221.8982918476 Ha)
+14:10:27  INFO      [ADC2] siguiente más estable: conf_004 (ΔE = +1.7668 kcal/mol respecto al dominante)
+14:10:27  INFO        ▶  lanzando ORCA: adc2.inp  [nohup]
+15:02:14  DEBUG       últimas líneas de adc2.out:
+    --------------------------------------------------------------------------
+     
+    ORCA finished by error termination in MDCI
+    Calling Command: mpirun -np 4  /home/kmilozeta/orca_6_1_1_avx2/orca_mdci_mpi /home/kmilozeta/MGLYVAL/runs/B/07_adc2/conf_006/adc2.mdciinp.tmp /home/kmilozeta/MGLYVAL/runs/B/07_adc2/conf_006/adc2 
+    [file orca_tools/qcmsg.cpp, line 394]: 
+      .... aborting the run
+    
+    [file orca_tools/qcmsg.cpp, line 394]: 
+      .... aborting the run
+    
+15:02:14  ERROR       ✗  adc2.inp FALLÓ (returncode=0, 51.8 min) — revisa runs/B/07_adc2/conf_006/adc2.out
+15:02:14  ERROR     [ADC2] conf_006 falló.
+15:02:14  WARNING   [ADC2] No se pudo completar la validación ADC2.
+15:02:14  INFO      ============================================================
+15:02:14  INFO      PIPELINE FINALIZADO
+15:02:14  INFO      Resultados en: /home/kmilozeta/MGLYVAL/runs/B
+15:02:14  INFO      ============================================================
+08:46:24  INFO      ============================================================
+08:46:24  INFO      PIPELINE ORCA  —  molécula: B
+08:46:24  INFO      Carga: -1   Mult: 1
+08:46:24  INFO      Flujo: CREST → CENSO (prescreen) → OPT (nconf auto) → NumFreq → SP → TDDFT → ADC2
+08:46:24  INFO      Inicio desde etapa: ADC2
+08:46:24  INFO      ORCA: /home/kmilozeta/orca_6_1_1_avx2/orca
+08:46:24  INFO      Temperatura CENSO      : 298.15 K
+08:46:24  INFO      Recursos CREST/CENSO   : 12 cores  (xTB --T, escala lineal)
+08:46:24  INFO      Recursos OPT           : 3×4 cores / 2196 MB  → 8.6 GB/job
+08:46:24  INFO      Recursos SP            : 3×4 cores / 2196 MB  → 8.6 GB/job
+08:46:24  INFO      Recursos TDDFT         : 2×6 cores / 1568 MB  → 9.2 GB/job  (NRoots 15)
+08:46:24  INFO      Recursos NumFreq       : 1×12 cores / 2196 MB  → 25.7 GB
+08:46:24  INFO      ============================================================
+08:46:24  DEBUG     [CHECK-BIN] CREST → /home/kmilozeta/miniforge3/bin/crest
+08:46:24  DEBUG     [CHECK-BIN] CENSO → /home/kmilozeta/miniforge3/envs/sciencebitch/bin/censo
+08:54:33  INFO      ============================================================
+08:54:33  INFO      PIPELINE ORCA  —  molécula: B
+08:54:33  INFO      Carga: -1   Mult: 1
+08:54:33  INFO      Flujo: CREST → CENSO (prescreen) → OPT (nconf auto) → NumFreq → SP → TDDFT → ADC2
+08:54:33  INFO      Inicio desde etapa: ADC2
+08:54:33  INFO      ORCA: /home/kmilozeta/orca_6_1_1_avx2/orca
+08:54:33  INFO      Temperatura CENSO      : 298.15 K
+08:54:33  INFO      Recursos CREST/CENSO   : 12 cores  (xTB --T, escala lineal)
+08:54:33  INFO      Recursos OPT           : 3×4 cores / 2196 MB  → 8.6 GB/job
+08:54:33  INFO      Recursos SP            : 3×4 cores / 2196 MB  → 8.6 GB/job
+08:54:33  INFO      Recursos TDDFT         : 2×6 cores / 1568 MB  → 9.2 GB/job  (NRoots 15)
+08:54:33  INFO      Recursos NumFreq       : 1×12 cores / 2196 MB  → 25.7 GB
+08:54:33  INFO      ============================================================
+08:54:33  DEBUG     [CHECK-BIN] CREST → /home/kmilozeta/miniforge3/bin/crest
+08:54:33  DEBUG     [CHECK-BIN] CENSO → /home/kmilozeta/miniforge3/envs/sciencebitch/bin/censo
+08:54:33  INFO      MODO: ADC2 standalone (--start adc2)
+08:54:33  INFO      [ADC2] saltando CREST/CENSO/OPT/NUMFREQ/TDDFT — solo se usa 04_sp/ (confórmero de menor energía)
+08:54:33  INFO      [ADC2] 6 conf(s) SP disponibles — confórmero dominante: conf_006 (E_SP = -1221.8982918476 Ha)
+08:54:33  INFO      [ADC2] siguiente más estable: conf_004 (ΔE = +1.7668 kcal/mol respecto al dominante)
+08:54:33  INFO        ▶  lanzando ORCA: adc2.inp  [nohup]
+08:54:33  ERROR       ✗  adc2.inp TIMEOUT (24.0 h)
+08:54:33  ERROR     [ADC2] conf_006 falló.
+08:54:33  ERROR     [ADC2] No se pudo completar la validación ADC2.

@@ -26,12 +26,33 @@ Five-stage pipeline, orchestrated in Python:
  
 ```
 .
-├── pipeline.py              # Orchestrator script (CREST → CENSO → OPT → NumFreq → SP → TDDFT → ACD2)
-├── protonation_cycle.py     # Theoretical pKa calculations and determination of the relevant protonation state
-├── results_collector.py     # Collection and consolidation of results across all explored states
-├── CALIBRATIONS/            # Molecules used for pKa cycle calibration and ADC2 cross-check
-├── MGLYVAL/                 # Work directory for the subject of study (M-Gly:Val)
-└── runs/                    # Relevant Files (.inp, .out, .xyz)
+├── maaqc.py                 # Unified executable (pipeline + pKa cycle + calibration + TDDFT extraction)
+├── pipeline.py              # Legacy orchestrator (superseded by maaqc.py)
+├── protonation_cycle.py     # Legacy pKa cycle (superseded by `maaqc.py pka`)
+├── calibration/             # calibration*.json/csv (pKa empirical correction) and raw pKa logs
+├── CALIBRATIONS/<AA>/molecules/   # Amino acids used for pKa cycle calibration
+├── tools/                   # archive_molecule.sh / restore_molecule.sh (storage workflow)
+└── <MOL>/                   # One folder per molecule (MGLYVAL, AP, DG, SHINORINE, GADUSOL, ...)
+    ├── molecules/*.xyz      # Input geometries (one per protonation state)
+    └── runs/<state>/0X_step/   # CREST → CENSO → OPT → NumFreq → SP → TDDFT → ADC2
+```
+
+## Data storage
+
+Only the **scientific record** is versioned: `.inp`, `.out`, `.xyz`, `.json`, `.csv`,
+`.hess`, `.txt`, `.energies`, `pipeline.log`, and CENSO/CREST summaries. Heavy ORCA/CREST
+binaries and scratch (`.gbw`, `.densities`, `.tmp`, `.nto`, `.cis`, `.cpcm`, `.0–.9`,
+CENSO per-conformer folders, ...) are ignored by git and kept only on two external drives.
+
+The local checkout uses `git sparse-checkout`: finished molecules stay on GitHub but are
+not present on the laptop.
+
+```bash
+git sparse-checkout list                                   # molecules present locally
+tools/archive_molecule.sh DG /media/$USER/DISK1/PAPER1 /media/$USER/DISK2/PAPER1
+                                                           # backup → commit/push → remove locally
+tools/restore_molecule.sh DG                               # bring back text results from GitHub
+tools/restore_molecule.sh DG /media/$USER/DISK1/PAPER1     # ... plus binaries from the drive
 ```
 ## Why this design
 The pipeline is built the way production quantum-chemistry software is built, not the way a one-off calculation is run: each stage is a discrete, resumable unit with a defined input/output contract, so a failure at NumFreq or a stalled TD-DFT job doesn't require re-running CREST from scratch. This mirrors the orchestration logic of tools like CREST/CENSO/ORCA themselves

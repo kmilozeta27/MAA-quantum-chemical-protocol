@@ -1,0 +1,128 @@
+14:04:40  INFO      ============================================================
+14:04:40  INFO      PIPELINE ORCA  —  molécula: APA
+14:04:40  INFO      Carga: 1   Mult: 1
+14:04:40  INFO      Flujo: CREST → CENSO (prescreen) → OPT (nconf auto) → NumFreq → SP → TDDFT → ADC2
+14:04:40  INFO      Inicio desde etapa: CREST
+14:04:40  INFO      ORCA: /home/kmilozeta/orca_6_1_1_avx2/orca
+14:04:40  INFO      Temperatura CENSO      : 298.15 K
+14:04:40  INFO      Recursos CREST/CENSO   : 12 cores  (xTB --T, escala lineal)
+14:04:40  INFO      Recursos OPT           : 3×4 cores / 2196 MB  → 8.6 GB/job
+14:04:40  INFO      Recursos SP            : 3×4 cores / 2196 MB  → 8.6 GB/job
+14:04:40  INFO      Recursos TDDFT         : 2×6 cores / 1568 MB  → 9.2 GB/job  (NRoots 15)
+14:04:40  INFO      Recursos NumFreq       : 1×12 cores / 2196 MB  → 25.7 GB
+14:04:40  INFO      ============================================================
+14:04:40  DEBUG     [CHECK-BIN] CREST → /home/kmilozeta/miniforge3/bin/crest
+14:04:40  DEBUG     [CHECK-BIN] CENSO → /home/kmilozeta/miniforge3/envs/sciencebitch/bin/censo
+14:04:40  INFO      [CREST] lanzando sobre APA.xyz  (carga=1)  [nohup]
+14:06:27  INFO      [CREST] 1 confórmeros generados en 1.8 min
+14:06:27  DEBUG     [CENSO-RECOVER]  diagnóstico 01b_censo_prescreen: 0 CONF dirs | sp_ok=0 | gsolv_ok=0 | full=0 | can_recover=False
+14:06:27  INFO      [CENSO]  ▶  lanzando pre-screening sobre crest_conformers.xyz (carga=1, T=298.15 K)  [nohup]
+14:06:59  WARNING   [CENSO]  ⚠  1 conf(s) del screening no encontrados en crest_conformers.xyz: ['CONF1']
+14:06:59  INFO      [CENSO]  ✓  pre-screening terminó en 0.5 min — 1 confórmero(s) sobreviven, ensemble reconstruido desde 1_SCREENING.out (geometrías: 1_SCREENING.xyz, ordenado por Gtot)
+14:06:59  WARNING   [NCONF-BOLTZMANN] solo 1 conf(s) ≥ 5.0% — añadiendo 0 conf(s) extra para garantizar nconf_min=3: []
+14:06:59  INFO      [NCONF-BOLTZMANN] umbral=5.0% → 1 conf(s) seleccionados: CONF1(100.0%)
+14:06:59  INFO      [NCONF-BOLTZMANN] → nconf=1 (nconf_min=3)
+14:06:59  INFO      [OPT] optimizando 1 confórmeros (Boltzmann (1 conf(s): CONF1))
+14:06:59  INFO      [OPT] 1 confórmeros disponibles — batch 3x4 cores
+14:06:59  INFO      [OPT] IDs CREST → dirs: CONF1→conf_1
+14:06:59  INFO      [OPT] ── Lote 1/~1: ['conf_1']  (cores: ['4,5,6,7'])
+14:06:59  INFO        ▶  lanzando ORCA: opt.inp  (cores 4,5,6,7)  [nohup]
+14:09:08  INFO        ✓  opt.inp terminó en 2.2 min
+14:09:08  INFO      [OPT]   ✓ conf_1  (2.2 min)
+14:09:08  INFO      [OPT] 1/1 confórmeros optimizados
+14:09:08  INFO      [NUMFREQ] calculando frecuencias para 1 confórmeros
+14:09:08  INFO        ▶  lanzando ORCA: freq.inp  [nohup]
+14:17:27  INFO        ✓  freq.inp terminó en 8.3 min
+14:17:27  INFO      [NUMFREQ] conf_1: sin frecuencias imaginarias ✓
+14:17:27  INFO      [NUMFREQ] 1/1 completados
+14:17:27  INFO      [SP] single point para 1 confórmeros (batch=3, 4 cores/job)
+14:17:27  INFO      [SP] 1 SPs en 1 lote(s) de ≤3 (CPUs activos/lote: 12)
+14:17:27  INFO      [SP] ── Lote 1/~1: ['conf_1']  (cores: ['4,5,6,7'])
+14:17:27  INFO        ▶  lanzando ORCA: sp.inp  (cores 4,5,6,7)  [nohup]
+14:19:46  INFO        ✓  sp.inp terminó en 2.3 min
+14:19:46  INFO      [SP]   ✓ conf_1  (2.3 min)
+14:19:46  INFO      [SP] 1/1 completados
+14:19:46  INFO      [SP_GAS] no incluido en esta ejecución (opcional — usa --spgas)
+14:19:46  INFO      [SP_SMD] no incluido en esta ejecución (opcional — usa --spsmd)
+14:19:46  INFO      [TDDFT] calculando espectros para 1 confórmeros — batch 2×6 cores (NRoots 15)
+14:19:46  INFO      [TDDFT] ── Lote 1/~1: ['conf_1']  (cores: ['4,5,6,7,8,9'])
+14:19:46  INFO        ▶  lanzando ORCA: tddft.inp  (cores 4,5,6,7,8,9)  [nohup]
+14:21:33  INFO        ✓  tddft.inp terminó en 1.8 min
+14:21:33  INFO      [TDDFT]   ✓ conf_1  (1.8 min)
+14:21:33  INFO      [TDDFT] 1/1 completados
+14:21:33  INFO      [TDDFT] 1 espectros calculados ✓
+14:21:33  INFO      [ADC2] no incluido en esta ejecución (opcional — usa --adc2 para activarla)
+14:21:33  INFO      ============================================================
+14:21:33  INFO      PIPELINE FINALIZADO  (requisito obligatorio SP fase-gas: OK)
+14:21:33  INFO      Resultados en: /home/kmilozeta/PAPER1/AP/runs/APA
+14:21:33  INFO      ============================================================
+14:30:31  INFO      ============================================================
+14:30:31  INFO      PIPELINE ORCA  —  molécula: APA
+14:30:31  INFO      Carga: 1   Mult: 1
+14:30:31  INFO      Flujo: CREST → CENSO (prescreen) → OPT (nconf auto) → NumFreq → SP → TDDFT → ADC2
+14:30:31  INFO      Inicio desde etapa: CREST
+14:30:31  INFO      ORCA: /home/kmilozeta/orca_6_1_1_avx2/orca
+14:30:31  INFO      Temperatura CENSO      : 298.15 K
+14:30:31  INFO      Recursos CREST/CENSO   : 12 cores  (xTB --T, escala lineal)
+14:30:31  INFO      Recursos OPT           : 3×4 cores / 2196 MB  → 8.6 GB/job
+14:30:31  INFO      Recursos SP            : 3×4 cores / 2196 MB  → 8.6 GB/job
+14:30:31  INFO      Recursos TDDFT         : 2×6 cores / 1568 MB  → 9.2 GB/job  (NRoots 15)
+14:30:31  INFO      Recursos NumFreq       : 1×12 cores / 2196 MB  → 25.7 GB
+14:30:31  INFO      ============================================================
+14:30:31  DEBUG     [CHECK-BIN] CREST → /home/kmilozeta/miniforge3/bin/crest
+14:30:31  DEBUG     [CHECK-BIN] CENSO → /home/kmilozeta/miniforge3/envs/sciencebitch/bin/censo
+14:30:31  INFO      [CREST] ya existe /home/kmilozeta/PAPER1/AP/runs/APA/01_crest/crest_conformers.xyz — saltando
+14:30:31  WARNING   [CENSO]  ⚠  1 conf(s) del screening no encontrados en crest_conformers.xyz: ['CONF1']
+14:30:31  DEBUG     [CENSO]  fuente crest_conformers.xyz no contiene los CONF# de 1_SCREENING.out — probando siguiente fuente de geometrías
+14:30:31  INFO      [CENSO]  ✓  screening ya completo en disco (1_SCREENING.out) — 1 confórmero(s), ensemble reconstruido SIN invocar CENSO (geometrías: 1_SCREENING.xyz) → censo_ensemble_sorted.xyz
+14:30:31  WARNING   [NCONF-BOLTZMANN] solo 1 conf(s) ≥ 5.0% — añadiendo 0 conf(s) extra para garantizar nconf_min=3: []
+14:30:31  INFO      [NCONF-BOLTZMANN] umbral=5.0% → 1 conf(s) seleccionados: CONF1(100.0%)
+14:30:31  INFO      [NCONF-BOLTZMANN] → nconf=1 (nconf_min=3)
+14:30:31  INFO      [OPT] optimizando 1 confórmeros (Boltzmann (1 conf(s): CONF1))
+14:30:31  INFO      [OPT] 1 confórmeros disponibles — batch 3x4 cores
+14:30:31  INFO      [OPT] IDs CREST → dirs: CONF1→conf_1
+14:30:31  INFO      [OPT] ── Lote 1/~1: ['conf_1']  (cores: ['4,5,6,7'])
+14:30:31  INFO        ↩  ya completado: opt.out — saltando
+14:30:31  INFO      [OPT]   ✓ conf_1  (0.0 min)
+14:30:31  INFO      [OPT] 1/1 confórmeros optimizados
+14:30:31  INFO      [NUMFREQ] calculando frecuencias para 1 confórmeros
+14:30:31  INFO        ↩  ya completado: freq.out — saltando
+14:30:31  INFO      [NUMFREQ] conf_1: sin frecuencias imaginarias ✓
+14:30:31  INFO      [NUMFREQ] 1/1 completados
+14:30:31  INFO      [SP] single point para 1 confórmeros (batch=3, 4 cores/job)
+14:30:31  INFO      [SP] 1 SPs en 1 lote(s) de ≤3 (CPUs activos/lote: 12)
+14:30:31  INFO      [SP] ── Lote 1/~1: ['conf_1']  (cores: ['4,5,6,7'])
+14:30:31  INFO        ↩  ya completado: sp.out — saltando
+14:30:31  INFO      [SP]   ✓ conf_1  (0.0 min)
+14:30:31  INFO      [SP] 1/1 completados
+14:30:31  INFO      [SP_GAS] calculando SP fase-gas (sin CPCM) para 1 confórmeros de 04_sp/
+14:30:31  INFO      [SP_GAS] single point fase-gas para 1 confórmeros (batch=3, 4 cores/job)
+14:30:31  INFO      [SP_GAS] 1 SPs fase-gas en 1 lote(s) de ≤3 (CPUs activos/lote: 12)
+14:30:31  INFO      [SP_GAS] ── Lote 1/~1: ['conf_1']  (cores: ['4,5,6,7'])
+14:30:31  INFO        ▶  lanzando ORCA: sp_gas.inp  (cores 4,5,6,7)  [nohup]
+14:32:46  INFO        ✓  sp_gas.inp terminó en 2.2 min
+14:32:46  INFO      [SP_GAS]   ✓ conf_1  (2.2 min)
+14:32:46  INFO      [SP_GAS] 1/1 completados
+14:32:46  INFO      [SP_GAS] 1/1 completados ✓
+14:32:46  INFO      [SP_SMD] calculando SP con SMD(water) para 1 confórmeros de 04_sp/ (filtro Boltzmann > 20.0%)
+14:32:46  INFO      [SP_SMD-BOLTZMANN] pesos Boltzmann desde energías SP preexistentes (T=298.15 K), 1 conf(s): conf_1(100.0%)
+14:32:46  INFO      [SP_SMD] filtro Boltzmann (SP, energías preexistentes) >20.0%: 1/1 seleccionados: conf_1(100.0%)
+14:32:46  INFO      [SP_SMD] single point SMD(water) para 1 confórmero(s) de APA
+14:32:46  INFO      [SP_SMD] 1 SPs SMD en cola, 1 lote(s) de ≤3 (CPUs activos/lote: 12)
+14:32:46  INFO      [SP_SMD] ── Lote 1/~1: ['APA/conf_1']  (cores: ['4,5,6,7'])
+14:32:46  INFO        ▶  lanzando ORCA: sp_smd.inp  (cores 4,5,6,7)  [nohup]
+14:35:11  INFO        ✓  sp_smd.inp terminó en 2.4 min
+14:35:11  INFO      [SP_SMD]   ✓ APA/conf_1  (2.4 min)
+14:35:11  INFO      [SP_SMD] 1/1 completados
+14:35:11  INFO      [SP_SMD] 1/1 completados ✓
+14:35:11  INFO      [TDDFT] calculando espectros para 1 confórmeros — batch 2×6 cores (NRoots 15)
+14:35:11  INFO      [TDDFT] ── Lote 1/~1: ['conf_1']  (cores: ['4,5,6,7,8,9'])
+14:35:11  INFO        ↩  ya completado: tddft.out — saltando
+14:35:11  INFO      [TDDFT]   ✓ conf_1  (0.0 min)
+14:35:11  INFO      [TDDFT] 1/1 completados
+14:35:11  INFO      [TDDFT] 1 espectros calculados ✓
+14:35:11  INFO      [ADC2] no incluido en esta ejecución (opcional — usa --adc2 para activarla)
+14:35:11  INFO      ============================================================
+14:35:11  INFO      PIPELINE FINALIZADO  (requisito obligatorio SP fase-gas: OK)
+14:35:11  INFO      Resultados en: /home/kmilozeta/PAPER1/AP/runs/APA
+14:35:11  INFO      ============================================================

@@ -1,0 +1,32 @@
+# =====================================================================
+# GOLD STANDARD 2/3  -  STEOM-DLPNO-CCSD / def2-TZVP, TightPNO
+# Cross-check del bt-PNO-EOM (mismo modelo, misma geometria, fase gas)
+# Criterio de aceptacion: % caracter activo >= 96 % en la raiz de interes
+# (manual ORCA para la version DLPNO; el 98 % es del STEOM canonico)
+# =====================================================================
+! STEOM-DLPNO-CCSD def2-TZVP def2-TZVP/C def2/J TightSCF TightPNO
+
+%pal
+  nprocs 4
+end
+
+%maxcore 3000
+
+%scf
+  MaxIter 300
+  STABPerform true
+end
+
+%mdci
+  NRoots 6
+  MaxIter 200          # faltaba en el run 2
+  OThresh 1e-3         # umbrales del run 3; bajar de 1e-3 mete IP profundos y satelites
+  VThresh 1e-3
+  # Si el % activo queda < 96 %: endurecer OThresh, VThresh y TCutPNOSingles
+  # (mira el default de TCutPNOSingles en el .out antes de tocarlo).
+  # Si una raiz de alta energia tiene % activo bajo, bajar NRoots ayuda a las demas.
+end
+
+# Modelo cationico: la raiz EA parte de un radical neutro, deberia quedar ligada
+# (en el anion de 47 atomos el EA-EOM caia al pseudocontinuo)
+* xyzfile 1 1 cromoforo_31at.xyz

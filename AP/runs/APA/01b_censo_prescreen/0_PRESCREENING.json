@@ -1,0 +1,19 @@
+{
+    "part_name": "prescreening",
+    "data": {
+        "CONF1": {
+            "energy": -303.546681831039,
+            "gsolv": -0.08100951337599938,
+            "grrho": 0.0,
+            "gtot": -303.627691344415
+        }
+    },
+    "settings": {
+        "prog": "orca",
+        "func": "b97-d3",
+        "basis": "def2-sv(p)",
+        "gfnv": "gfn2",
+        "threshold": 4.0,
+        "template": false
+    }
+}

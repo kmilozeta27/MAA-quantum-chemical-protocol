@@ -1,0 +1,14 @@
+! RHF def2-SVPD def2-SVPD/C RIJCOSX def2/J TightSCF
+
+%pal 
+  nprocs 4 
+end
+
+%maxcore 6500
+
+%cpcm
+  smd true
+  smdsolvent "water"
+end
+
+* xyzfile -1 1 opt_opt.xyz *

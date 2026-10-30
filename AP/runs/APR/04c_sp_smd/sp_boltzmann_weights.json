@@ -1,0 +1,11 @@
+{
+  "temperature_K": 298.15,
+  "source": "04_sp/<conf_id>/sp.out (FINAL SINGLE POINT ENERGY)",
+  "threshold_pct": 20.0,
+  "weights_pct": {
+    "conf_1": 100.0
+  },
+  "selected_conf_ids": [
+    "conf_1"
+  ]
+}

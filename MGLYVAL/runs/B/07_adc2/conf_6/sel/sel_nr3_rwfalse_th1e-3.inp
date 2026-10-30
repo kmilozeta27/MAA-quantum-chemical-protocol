@@ -1,0 +1,20 @@
+! STEOM-DLPNO-CCSD ma-def2-SVP AutoAux def2/J TightSCF TightPNO CPCM(water)
+%pal
+ nprocs 3
+end
+%maxcore 5000
+%mdci
+ NRoots 3
+ DoRootWise false
+ OThresh 1e-3
+ VThresh 1e-3
+ TCutPNOSingles 1e-11
+ NDAV 400
+ DoStoreSTEOM true
+ DoSimpleDens false
+ AddL2Term true
+ DTol 1e-5
+ DoCISNAT true
+ DoSolv true
+end
+* xyzfile -1 1 opt_opt.xyz

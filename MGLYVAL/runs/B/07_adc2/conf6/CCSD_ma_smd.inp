@@ -1,0 +1,29 @@
+! STEOM-DLPNO-CCSD ma-def2-SVP AutoAux def2/J TightSCF TightPNO SMD(water)
+
+%scf
+  MaxIter 500
+end
+
+%maxcore 2500
+
+%pal
+  nprocs 3
+end
+
+%mdci
+  NRoots 3
+  DoRootWise false
+  OThresh 0.001
+  VThresh 0.001
+  TCutPNOSingles 1e-11
+  NDAV 400
+  DoStoreSTEOM true
+  DoSimpleDens false
+  AddL2Term true
+  DTol 1e-5
+  DoCISNAT true
+  DoSolv true
+  MaxIter 60
+end
+
+* xyzfile -1 1 opt_opt.xyz

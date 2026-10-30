@@ -1,0 +1,144 @@
+
+               ______________________________________________________________
+              |                                                              |
+              |                                                              |
+              |                   CENSO - Commandline ENSO                   |
+              |                         v 3.0.9.dev1                         |
+              |          energetic sorting of Conformer Rotamer Ensembles    |
+              |                    University of Bonn, MCTC                  |
+              |                           Oct 2024                           |
+              |                 based on ENSO version 2.0.1                  |
+              |             L. M. Seidler, F. Bohle and S. Grimme            |
+              |                                                              |
+              |______________________________________________________________|
+
+              Please cite:
+              (TBA)
+              S. Grimme, F. Bohle, A. Hansen, P. Pracht, S. Spicher, and M. Stahn
+              J. Phys. Chem. A 2021, 125, 19, 4039-4054.
+              DOI: https://doi.org/10.1021/acs.jpca.1c00971
+
+              This program is distributed in the hope that it will be useful,
+              but WITHOUT ANY WARRANTY; without even the implied warranty of
+              MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+
+CALL: /home/kmilozeta/miniforge3/envs/sciencebitch/bin/censo --prescreening --screening -i crest_conformers.xyz -c 1 -u 0 --solvent water --maxcores 12 --omp-min 4 -T 298.15
+Reading configuration file from /home/kmilozeta/.censo2rc.
+Read 1 conformers.
+
+
+Setting working directory to /home/kmilozeta/PAPER1/AP/runs/APA/01b_censo_prescreen
+
+----------------------------------------------------------------------------------------------------
+                                              General                                               
+----------------------------------------------------------------------------------------------------
+    
+                                         sm_rrho : gbsa
+                                   evaluate_rrho : True
+                                       gas_phase : False
+                                         copy_mo : True
+                                         balance : True
+                                   ignore_failed : False
+                                     temperature : 298.15
+                                         imagthr : -100.0
+                                            sthr : 50.0
+                                         solvent : water
+
+----------------------------------------------------------------------------------------------------
+                                            Prescreening                                            
+----------------------------------------------------------------------------------------------------
+    
+                                            gfnv : gfn2
+                                            prog : orca
+                                        template : False
+                                       threshold : 4.0
+                                            func : b97-d3
+                                           basis : def2-sv(p)
+
+----------------------------------------------------------------------------------------------------
+                                             Screening                                              
+----------------------------------------------------------------------------------------------------
+    
+                                            gfnv : gfn2
+                                              sm : cpcm
+                                            prog : orca
+                                  gsolv_included : False
+                                        template : False
+                                       threshold : 3.5
+                                            func : r2scan-3c
+                                           basis : def2-mtzvpp
+
+----------------------------------------------------------------------------------------------------
+                                     PATHS of External Programs                                     
+----------------------------------------------------------------------------------------------------
+    
+                                            orca : /home/kmilozeta/orca_6_1_1_avx2/orca
+                                              tm : 
+                                             xtb : /home/kmilozeta/miniforge3/envs/sciencebitch/bin/xtb
+                                      cosmotherm : 
+                                    cosmorssetup : 
+
+----------------------------------------------------------------------------------------------------
+
+
+----------------------------------------------------------------------------------------------------
+                                            PRESCREENING                                            
+----------------------------------------------------------------------------------------------------
+    
+Running xtb_gsolv calculation for CONF1 using xtb.
+Running sp calculation for CONF1 using orca.
+
+-------------------------------- PRESCREENING SINGLE-POINT RESULTS ---------------------------------
+
+CONF#      E (DFT)      ΔE (DFT)     ΔGsolv (xTB)      Gtot         ΔGtot       Boltzmann weight
+            [Eh]       [kcal/mol]     [kcal/mol]       [Eh]       [kcal/mol]     % at 298.15 K
+-------  -----------  ------------  --------------  -----------  ------------  ------------------
+CONF1    -303.546682      0.00        -50.834237    -303.627691      0.00            100.00
+
+Boltzmann averaged free energy/enthalpy of ensemble on input geometries (not DFT optimized):
+temperature /K:   avE(T) /a.u.   avG(T) /a.u.
+    298.15        -303.5466818    -303.6276913     <<==part0==
+----------------------------------------------------------------------------------------------------
+Ran prescreening in 4.99 seconds!
+
+----------------------------------------------------------------------------------------------------
+                                             SCREENING                                              
+----------------------------------------------------------------------------------------------------
+    
+Running gsolv calculation for CONF1 using orca.
+Running xtb_rrho calculation for CONF1 using xtb.
+
+----------------------------- SCREENING SINGLE-POINT (+ mRRHO) RESULTS -----------------------------
+
+CONF#      E (DFT)       ΔGsolv      GmRRHO      Gtot         ΔGtot       Boltzmann weight
+            [Eh]       [kcal/mol]     [Eh]       [Eh]       [kcal/mol]     % at 298.15 K
+-------  -----------  ------------  --------  -----------  ------------  ------------------
+CONF1    -303.963576   -57.246861   0.085622  -303.969183      0.00            100.00
+
+Boltzmann averaged free energy/enthalpy of ensemble on input geometries (not DFT optimized):
+temperature /K:   avE(T) /a.u.   avG(T) /a.u.
+    298.15        -303.9635759    -303.9691830     <<==part1==
+----------------------------------------------------------------------------------------------------
+Ran screening in 19.34 seconds!
+
+Finished ensemble optimization
+
+
+------------------------------------- FINAL RANKING COMPARISON -------------------------------------
+
+ CONF#    ΔGtot Prescreening    ΔGtot Screening
+              [kcal/mol]          [kcal/mol]
+-------  --------------------  -----------------
+ CONF1           0.00                0.00
+----------------------------------------------------------------------------------------------------
+
+
+Timings:
+       Prescreening: 00:00:04  ( 20.5 %)
+          Screening: 00:00:19  ( 79.5 %)
+========================================
+
+Total CENSO runtime: 00:00:24
+
+CENSO all done!

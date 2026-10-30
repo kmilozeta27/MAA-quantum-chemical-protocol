@@ -1,0 +1,21 @@
+! STEOM-DLPNO-CCSD def2-SVPD def2-SVPD/C def2/J TightSCF
+
+%pal
+nprocs 2
+end
+
+%maxcore 4000
+
+%mdci
+NRoots 3
+DoRootWise false
+TCutPNOSingles 1e-9
+NDAV 400
+DoStoreSTEOM true
+DoSimpleDens false
+AddL2Term true
+DTol 1e-5
+DoCISNAT true
+end
+
+* xyzfile -1 1 opt_opt.xyz *

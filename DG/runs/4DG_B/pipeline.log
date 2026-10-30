@@ -1,0 +1,80 @@
+17:36:21  INFO      ============================================================
+17:36:21  INFO      PIPELINE ORCA  —  molécula: 4DG_B
+17:36:21  INFO      Carga: -1   Mult: 1
+17:36:21  INFO      Flujo: CREST → CENSO (prescreen) → OPT (nconf auto) → NumFreq → SP → TDDFT → ADC2
+17:36:21  INFO      Inicio desde etapa: CREST
+17:36:21  INFO      ORCA: /home/kmilozeta/orca_6_1_1_avx2/orca
+17:36:21  INFO      Temperatura CENSO      : 298.15 K
+17:36:21  INFO      Recursos CREST/CENSO   : 12 cores  (xTB --T, escala lineal)
+17:36:21  INFO      Recursos OPT           : 3×4 cores / 2196 MB  → 8.6 GB/job
+17:36:21  INFO      Recursos SP            : 3×4 cores / 2196 MB  → 8.6 GB/job
+17:36:21  INFO      Recursos TDDFT         : 2×6 cores / 1568 MB  → 9.2 GB/job  (NRoots 15)
+17:36:21  INFO      Recursos NumFreq       : 1×12 cores / 2196 MB  → 25.7 GB
+17:36:21  INFO      ============================================================
+17:36:21  DEBUG     [CHECK-BIN] CREST → /home/kmilozeta/miniforge3/bin/crest
+17:36:21  DEBUG     [CHECK-BIN] CENSO → /home/kmilozeta/miniforge3/envs/sciencebitch/bin/censo
+17:36:21  INFO      [CREST] lanzando sobre 4DG_B.xyz  (carga=-1)  [nohup]
+11:42:19  INFO      ============================================================
+11:42:19  INFO      PIPELINE ORCA  —  molécula: 4DG_B
+11:42:19  INFO      Carga: -1   Mult: 1
+11:42:19  INFO      Flujo: CREST → CENSO (prescreen) → OPT (nconf auto) → NumFreq → SP → TDDFT → ADC2
+11:42:19  INFO      Inicio desde etapa: CREST
+11:42:19  INFO      ORCA: /home/kmilozeta/orca_6_1_1_avx2/orca
+11:42:19  INFO      Temperatura CENSO      : 298.15 K
+11:42:19  INFO      Recursos CREST/CENSO   : 12 cores  (xTB --T, escala lineal)
+11:42:19  INFO      Recursos OPT           : 3×4 cores / 2196 MB  → 8.6 GB/job
+11:42:19  INFO      Recursos SP            : 3×4 cores / 2196 MB  → 8.6 GB/job
+11:42:19  INFO      Recursos TDDFT         : 2×6 cores / 1568 MB  → 9.2 GB/job  (NRoots 15)
+11:42:19  INFO      Recursos NumFreq       : 1×12 cores / 2196 MB  → 25.7 GB
+11:42:19  INFO      ============================================================
+11:42:19  DEBUG     [CHECK-BIN] CREST → /home/kmilozeta/miniforge3/bin/crest
+11:42:19  DEBUG     [CHECK-BIN] CENSO → /home/kmilozeta/miniforge3/envs/sciencebitch/bin/censo
+11:42:19  INFO      [CREST] lanzando sobre 4DG_B.xyz  (carga=-1)  [nohup]
+11:45:26  INFO      [CREST] 50 confórmeros generados en 3.1 min
+11:45:26  DEBUG     [CENSO-RECOVER]  diagnóstico 01b_censo_prescreen: 0 CONF dirs | sp_ok=0 | gsolv_ok=0 | full=0 | can_recover=False
+11:45:26  INFO      [CENSO]  ▶  lanzando pre-screening sobre crest_conformers.xyz (carga=-1, T=298.15 K)  [nohup]
+12:36:27  WARNING   [CENSO]  ⚠  25 conf(s) del screening no encontrados en crest_conformers.xyz: ['CONF3', 'CONF1', 'CONF46', 'CONF37', 'CONF23']…
+12:36:27  INFO      [CENSO]  ✓  pre-screening terminó en 51.0 min — 25 confórmero(s) sobreviven, ensemble reconstruido desde 1_SCREENING.out (geometrías: 1_SCREENING.xyz, ordenado por Gtot)
+12:36:27  INFO      [NCONF-BOLTZMANN] umbral=5.0% → 7 conf(s) seleccionados: CONF3(16.3%), CONF1(12.9%), CONF46(6.9%), CONF37(6.1%), CONF23(5.7%), CONF35(5.6%), CONF38(5.5%)
+12:36:27  INFO      [NCONF-BOLTZMANN] 18 conf(s) por debajo del umbral (mayor: CONF16 4.46%) — descartados
+12:36:27  INFO      [NCONF-BOLTZMANN] → nconf=7 (nconf_min=3)
+12:36:27  INFO      [OPT] optimizando 7 confórmeros (Boltzmann (7 conf(s): CONF3, CONF1, CONF46, CONF37, CONF23, CONF35, CONF38))
+12:36:27  INFO      [OPT] 7 confórmeros disponibles — batch 3x4 cores
+12:36:27  INFO      [OPT] IDs CREST → dirs: CONF3→conf_3  CONF1→conf_1  CONF46→conf_46  CONF37→conf_37  CONF23→conf_23  CONF35→conf_35  CONF38→conf_38
+12:36:27  INFO      [OPT] ── Lote 1/~3: ['conf_3', 'conf_1']  (cores: ['4,5,6,7', '8,9,10,11'])
+12:36:27  INFO        ▶  lanzando ORCA: opt.inp  (cores 8,9,10,11)  [nohup]
+12:36:27  INFO        ▶  lanzando ORCA: opt.inp  (cores 4,5,6,7)  [nohup]
+12:48:56  INFO        ✓  opt.inp terminó en 12.5 min
+12:48:56  INFO      [OPT]   ✓ conf_1  (12.5 min)
+12:50:11  INFO        ✓  opt.inp terminó en 13.7 min
+12:50:11  INFO      [OPT]   ✓ conf_3  (13.7 min)
+12:50:11  INFO      [OPT] ── Lote 2/~3: ['conf_46', 'conf_37']  (cores: ['4,5,6,7', '8,9,10,11'])
+12:50:11  INFO        ▶  lanzando ORCA: opt.inp  (cores 4,5,6,7)  [nohup]
+12:50:11  INFO        ▶  lanzando ORCA: opt.inp  (cores 8,9,10,11)  [nohup]
+13:02:25  INFO        ✓  opt.inp terminó en 12.2 min
+13:02:25  INFO      [OPT]   ✓ conf_37  (12.2 min)
+13:02:48  INFO        ✓  opt.inp terminó en 12.6 min
+13:02:48  INFO      [OPT]   ✓ conf_46  (12.6 min)
+13:02:48  INFO      [OPT] ── Lote 3/~3: ['conf_23', 'conf_35']  (cores: ['4,5,6,7', '8,9,10,11'])
+13:02:48  INFO        ▶  lanzando ORCA: opt.inp  (cores 8,9,10,11)  [nohup]
+13:02:48  INFO        ▶  lanzando ORCA: opt.inp  (cores 4,5,6,7)  [nohup]
+13:14:08  INFO        ✓  opt.inp terminó en 11.3 min
+13:14:08  INFO      [OPT]   ✓ conf_23  (11.3 min)
+13:17:18  INFO        ✓  opt.inp terminó en 14.5 min
+13:17:18  INFO      [OPT]   ✓ conf_35  (14.5 min)
+13:17:18  INFO      [OPT] ── Lote 4/~3: ['conf_38']  (cores: ['4,5,6,7'])
+13:17:18  INFO        ▶  lanzando ORCA: opt.inp  (cores 4,5,6,7)  [nohup]
+13:29:17  INFO        ✓  opt.inp terminó en 12.0 min
+13:29:17  INFO      [OPT]   ✓ conf_38  (12.0 min)
+13:29:17  INFO      [OPT] 7/7 confórmeros optimizados
+13:29:17  INFO      [NUMFREQ] calculando frecuencias para 7 confórmeros
+13:29:17  INFO        ▶  lanzando ORCA: freq.inp  [nohup]
+14:12:45  INFO        ✓  freq.inp terminó en 43.5 min
+14:12:45  INFO      [NUMFREQ] conf_1: sin frecuencias imaginarias ✓
+14:12:45  INFO        ▶  lanzando ORCA: freq.inp  [nohup]
+14:57:13  INFO        ✓  freq.inp terminó en 44.5 min
+14:57:13  INFO      [NUMFREQ] conf_3: sin frecuencias imaginarias ✓
+14:57:13  INFO        ▶  lanzando ORCA: freq.inp  [nohup]
+15:46:31  INFO        ✓  freq.inp terminó en 49.3 min
+15:46:31  INFO      [NUMFREQ] conf_37: sin frecuencias imaginarias ✓
+15:46:31  INFO        ▶  lanzando ORCA: freq.inp  [nohup]

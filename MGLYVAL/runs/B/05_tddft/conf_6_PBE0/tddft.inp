@@ -1,0 +1,25 @@
+! PBE0 def2-TZVPD def2-TZVPD/C CPCM(water) RIJCOSX TightSCF
+
+%maxcore 2000
+
+%pal
+  nprocs 12
+end
+
+%scf
+  MaxIter 300
+end
+
+%tddft
+  NRoots    15
+  MaxDim    150
+  ETol      1e-6
+  RTol      1e-6
+  TDA       false
+  Triplets  false
+  PrintLevel 3
+  DoCD      true
+  DoNTO     true
+end
+
+* xyzfile -1 1 sp_opt.xyz

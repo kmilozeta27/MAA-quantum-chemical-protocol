@@ -1,8 +1,52 @@
+# =============================================================================
+#  MAA-quantum-chemical-protocol — .gitignore
+#
+#  Idea: GitHub guarda el REGISTRO CIENTÍFICO (inputs, outputs de texto,
+#  geometrías, energías, JSON/CSV de resultados). Los binarios/temporales
+#  pesados de ORCA/CREST/CENSO (gbw, densities, tmp, nto, cis, scratch ADC2…)
+#  viven SOLO en los discos externos (ver tools/archive_molecule.sh).
+# =============================================================================
+
+# === ruido general de Python / entorno ===
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+*.egg-info/
+.vscode/
+.obsidian/
+.DS_Store
+*.log
+!**/pipeline.log
+!calibration/*.log
+
+# === binarios / temporales de química cuántica (en cualquier carpeta) ===
+*.gbw
+*.gbw[0-9]
+*.densities
+*.tmp
+*.tmp.*
+*.nto
+*.cis
+*.ges
+*.hostnames
+*.bas[0-9]
+*.loc
+*.lpnoeom
+*.cube
+*.cub
+*.dvi
+*.zip
+*.input
+*.[0-9]
+*.[0-9][0-9]
+
 # === runs/: ignorar todo por defecto, permitir solo lo esencial ===
-**/runs/**/*
+**/runs/**
 # permitir navegar los directorios
 !**/runs/**/
-# permitir archivos de texto que SON el registro científico
+# archivos de texto que SON el registro científico
 !**/runs/**/*.inp
 !**/runs/**/*.out
 !**/runs/**/*.xyz
@@ -10,23 +54,18 @@
 !**/runs/**/*.json
 !**/runs/**/*.toml
 !**/runs/**/*.energies
-# excluir archivos ORCA temporales (re-ignorar después del wildcard)
+!**/runs/**/*.hess
+!**/runs/**/*.txt
+!**/runs/**/*.xlsx
+!**/runs/**/pipeline.log
+!**/runs/**/censo.log
+!**/runs/**/crest.log
+# re-excluir lo que pesa y no aporta
 **/runs/**/*_trj.xyz
 **/runs/**/*.scfgrad.inp
-# === Obsidian ===
-.obsidian/
-**/.obsidian/
-# === ruido general de Python / entorno ===
-__pycache__/
-*.pyc
-.ipynb_checkpoints/
-.venv/
-*.egg-info/
-# === sistema ===
-.DS_Store
-*.log
-**/runs/
-*.out
-*.gbw
-*.densities
-*.hess
+**/runs/**/*.tmp.*
+**/runs/**/confcross.xyz
+**/runs/**/crest_rotamers.xyz
+# CENSO: guardar solo el resumen (json/out/xyz/log de la carpeta raíz),
+# no los miles de subcálculos por confórmero (0_PRESCREENING/CONF*/…)
+**/runs/**/01b_censo*/*/

@@ -1,0 +1,834 @@
+
+               ______________________________________________________________
+              |                                                              |
+              |                                                              |
+              |                   CENSO - Commandline ENSO                   |
+              |                         v 3.0.9.dev1                         |
+              |          energetic sorting of Conformer Rotamer Ensembles    |
+              |                    University of Bonn, MCTC                  |
+              |                           Oct 2024                           |
+              |                 based on ENSO version 2.0.1                  |
+              |             L. M. Seidler, F. Bohle and S. Grimme            |
+              |                                                              |
+              |______________________________________________________________|
+
+              Please cite:
+              (TBA)
+              S. Grimme, F. Bohle, A. Hansen, P. Pracht, S. Spicher, and M. Stahn
+              J. Phys. Chem. A 2021, 125, 19, 4039-4054.
+              DOI: https://doi.org/10.1021/acs.jpca.1c00971
+
+              This program is distributed in the hope that it will be useful,
+              but WITHOUT ANY WARRANTY; without even the implied warranty of
+              MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+
+CALL: /home/kmilozeta/miniforge3/envs/sciencebitch/bin/censo --prescreening --screening -i crest_conformers.xyz -c 0 -u 0 --solvent water --maxcores 12 --omp-min 4 -T 298.15
+Reading configuration file from /home/kmilozeta/.censo2rc.
+Read 88 conformers.
+
+
+Setting working directory to /home/kmilozeta/PAPER1/DG/runs/4DG_A/01b_censo_prescreen
+
+----------------------------------------------------------------------------------------------------
+                                              General                                               
+----------------------------------------------------------------------------------------------------
+    
+                                         sm_rrho : gbsa
+                                   evaluate_rrho : True
+                                       gas_phase : False
+                                         copy_mo : True
+                                         balance : True
+                                   ignore_failed : False
+                                     temperature : 298.15
+                                         imagthr : -100.0
+                                            sthr : 50.0
+                                         solvent : water
+
+----------------------------------------------------------------------------------------------------
+                                            Prescreening                                            
+----------------------------------------------------------------------------------------------------
+    
+                                            gfnv : gfn2
+                                            prog : orca
+                                        template : False
+                                       threshold : 4.0
+                                            func : b97-d3
+                                           basis : def2-sv(p)
+
+----------------------------------------------------------------------------------------------------
+                                             Screening                                              
+----------------------------------------------------------------------------------------------------
+    
+                                            gfnv : gfn2
+                                              sm : cpcm
+                                            prog : orca
+                                  gsolv_included : False
+                                        template : False
+                                       threshold : 3.5
+                                            func : r2scan-3c
+                                           basis : def2-mtzvpp
+
+----------------------------------------------------------------------------------------------------
+                                     PATHS of External Programs                                     
+----------------------------------------------------------------------------------------------------
+    
+                                            orca : /home/kmilozeta/orca_6_1_1_avx2/orca
+                                              tm : 
+                                             xtb : /home/kmilozeta/miniforge3/envs/sciencebitch/bin/xtb
+                                      cosmotherm : 
+                                    cosmorssetup : 
+
+----------------------------------------------------------------------------------------------------
+
+
+----------------------------------------------------------------------------------------------------
+                                            PRESCREENING                                            
+----------------------------------------------------------------------------------------------------
+    
+Running xtb_gsolv calculation for CONF1 using xtb.
+Running xtb_gsolv calculation for CONF2 using xtb.
+Running xtb_gsolv calculation for CONF3 using xtb.
+Running xtb_gsolv calculation for CONF48 using xtb.
+Running xtb_gsolv calculation for CONF47 using xtb.
+Running xtb_gsolv calculation for CONF46 using xtb.
+Running xtb_gsolv calculation for CONF45 using xtb.
+Running xtb_gsolv calculation for CONF44 using xtb.
+Running xtb_gsolv calculation for CONF43 using xtb.
+Running xtb_gsolv calculation for CONF42 using xtb.
+Running xtb_gsolv calculation for CONF41 using xtb.
+Running xtb_gsolv calculation for CONF40 using xtb.
+Running xtb_gsolv calculation for CONF39 using xtb.
+Running xtb_gsolv calculation for CONF38 using xtb.
+Running xtb_gsolv calculation for CONF37 using xtb.
+Running xtb_gsolv calculation for CONF36 using xtb.
+Running xtb_gsolv calculation for CONF35 using xtb.
+Running xtb_gsolv calculation for CONF34 using xtb.
+Running xtb_gsolv calculation for CONF33 using xtb.
+Running xtb_gsolv calculation for CONF32 using xtb.
+Running xtb_gsolv calculation for CONF31 using xtb.
+Running xtb_gsolv calculation for CONF30 using xtb.
+Running xtb_gsolv calculation for CONF29 using xtb.
+Running xtb_gsolv calculation for CONF28 using xtb.
+Running xtb_gsolv calculation for CONF27 using xtb.
+Running xtb_gsolv calculation for CONF26 using xtb.
+Running xtb_gsolv calculation for CONF25 using xtb.
+Running xtb_gsolv calculation for CONF24 using xtb.
+Running xtb_gsolv calculation for CONF23 using xtb.
+Running xtb_gsolv calculation for CONF22 using xtb.
+Running xtb_gsolv calculation for CONF21 using xtb.
+Running xtb_gsolv calculation for CONF20 using xtb.
+Running xtb_gsolv calculation for CONF19 using xtb.
+Running xtb_gsolv calculation for CONF18 using xtb.
+Running xtb_gsolv calculation for CONF17 using xtb.
+Running xtb_gsolv calculation for CONF16 using xtb.
+Running xtb_gsolv calculation for CONF15 using xtb.
+Running xtb_gsolv calculation for CONF14 using xtb.
+Running xtb_gsolv calculation for CONF13 using xtb.
+Running xtb_gsolv calculation for CONF12 using xtb.
+Running xtb_gsolv calculation for CONF11 using xtb.
+Running xtb_gsolv calculation for CONF10 using xtb.
+Running xtb_gsolv calculation for CONF9 using xtb.
+Running xtb_gsolv calculation for CONF8 using xtb.
+Running xtb_gsolv calculation for CONF7 using xtb.
+Running xtb_gsolv calculation for CONF6 using xtb.
+Running xtb_gsolv calculation for CONF5 using xtb.
+Running xtb_gsolv calculation for CONF4 using xtb.
+Running xtb_gsolv calculation for CONF88 using xtb.
+Running xtb_gsolv calculation for CONF87 using xtb.
+Running xtb_gsolv calculation for CONF86 using xtb.
+Running xtb_gsolv calculation for CONF85 using xtb.
+Running xtb_gsolv calculation for CONF84 using xtb.
+Running xtb_gsolv calculation for CONF83 using xtb.
+Running xtb_gsolv calculation for CONF82 using xtb.
+Running xtb_gsolv calculation for CONF81 using xtb.
+Running xtb_gsolv calculation for CONF80 using xtb.
+Running xtb_gsolv calculation for CONF79 using xtb.
+Running xtb_gsolv calculation for CONF78 using xtb.
+Running xtb_gsolv calculation for CONF77 using xtb.
+Running xtb_gsolv calculation for CONF76 using xtb.
+Running xtb_gsolv calculation for CONF75 using xtb.
+Running xtb_gsolv calculation for CONF74 using xtb.
+Running xtb_gsolv calculation for CONF73 using xtb.
+Running xtb_gsolv calculation for CONF72 using xtb.
+Running xtb_gsolv calculation for CONF71 using xtb.
+Running xtb_gsolv calculation for CONF70 using xtb.
+Running xtb_gsolv calculation for CONF69 using xtb.
+Running xtb_gsolv calculation for CONF68 using xtb.
+Running xtb_gsolv calculation for CONF67 using xtb.
+Running xtb_gsolv calculation for CONF66 using xtb.
+Running xtb_gsolv calculation for CONF65 using xtb.
+Running xtb_gsolv calculation for CONF64 using xtb.
+Running xtb_gsolv calculation for CONF63 using xtb.
+Running xtb_gsolv calculation for CONF62 using xtb.
+Running xtb_gsolv calculation for CONF61 using xtb.
+Running xtb_gsolv calculation for CONF60 using xtb.
+Running xtb_gsolv calculation for CONF59 using xtb.
+Running xtb_gsolv calculation for CONF58 using xtb.
+Running xtb_gsolv calculation for CONF57 using xtb.
+Running xtb_gsolv calculation for CONF56 using xtb.
+Running xtb_gsolv calculation for CONF55 using xtb.
+Running xtb_gsolv calculation for CONF54 using xtb.
+Running xtb_gsolv calculation for CONF53 using xtb.
+Running xtb_gsolv calculation for CONF52 using xtb.
+Running xtb_gsolv calculation for CONF51 using xtb.
+Running xtb_gsolv calculation for CONF50 using xtb.
+Running xtb_gsolv calculation for CONF49 using xtb.
+Running sp calculation for CONF1 using orca.
+Running sp calculation for CONF3 using orca.
+Running sp calculation for CONF2 using orca.
+Running sp calculation for CONF25 using orca.
+Running sp calculation for CONF24 using orca.
+Running sp calculation for CONF23 using orca.
+Running sp calculation for CONF22 using orca.
+Running sp calculation for CONF21 using orca.
+Running sp calculation for CONF20 using orca.
+Running sp calculation for CONF19 using orca.
+Running sp calculation for CONF18 using orca.
+Running sp calculation for CONF17 using orca.
+Running sp calculation for CONF16 using orca.
+Running sp calculation for CONF15 using orca.
+Running sp calculation for CONF14 using orca.
+Running sp calculation for CONF13 using orca.
+Running sp calculation for CONF12 using orca.
+Running sp calculation for CONF11 using orca.
+Running sp calculation for CONF10 using orca.
+Running sp calculation for CONF9 using orca.
+Running sp calculation for CONF8 using orca.
+Running sp calculation for CONF7 using orca.
+Running sp calculation for CONF6 using orca.
+Running sp calculation for CONF5 using orca.
+Running sp calculation for CONF4 using orca.
+Running sp calculation for CONF88 using orca.
+Running sp calculation for CONF87 using orca.
+Running sp calculation for CONF86 using orca.
+Running sp calculation for CONF85 using orca.
+Running sp calculation for CONF84 using orca.
+Running sp calculation for CONF83 using orca.
+Running sp calculation for CONF82 using orca.
+Running sp calculation for CONF81 using orca.
+Running sp calculation for CONF80 using orca.
+Running sp calculation for CONF79 using orca.
+Running sp calculation for CONF78 using orca.
+Running sp calculation for CONF77 using orca.
+Running sp calculation for CONF76 using orca.
+Running sp calculation for CONF75 using orca.
+Running sp calculation for CONF74 using orca.
+Running sp calculation for CONF73 using orca.
+Running sp calculation for CONF72 using orca.
+Running sp calculation for CONF71 using orca.
+Running sp calculation for CONF70 using orca.
+Running sp calculation for CONF69 using orca.
+Running sp calculation for CONF68 using orca.
+Running sp calculation for CONF67 using orca.
+Running sp calculation for CONF66 using orca.
+Running sp calculation for CONF65 using orca.
+Running sp calculation for CONF64 using orca.
+Running sp calculation for CONF63 using orca.
+Running sp calculation for CONF62 using orca.
+Running sp calculation for CONF61 using orca.
+Running sp calculation for CONF60 using orca.
+Running sp calculation for CONF59 using orca.
+Running sp calculation for CONF58 using orca.
+Running sp calculation for CONF57 using orca.
+Running sp calculation for CONF56 using orca.
+Running sp calculation for CONF55 using orca.
+Running sp calculation for CONF54 using orca.
+Running sp calculation for CONF53 using orca.
+Running sp calculation for CONF52 using orca.
+Running sp calculation for CONF51 using orca.
+Running sp calculation for CONF50 using orca.
+Running sp calculation for CONF49 using orca.
+Running sp calculation for CONF48 using orca.
+Running sp calculation for CONF47 using orca.
+Running sp calculation for CONF46 using orca.
+Running sp calculation for CONF45 using orca.
+Running sp calculation for CONF44 using orca.
+Running sp calculation for CONF43 using orca.
+Running sp calculation for CONF42 using orca.
+Running sp calculation for CONF41 using orca.
+Running sp calculation for CONF40 using orca.
+Running sp calculation for CONF39 using orca.
+Running sp calculation for CONF38 using orca.
+Running sp calculation for CONF37 using orca.
+Running sp calculation for CONF36 using orca.
+Running sp calculation for CONF35 using orca.
+Running sp calculation for CONF34 using orca.
+Running sp calculation for CONF33 using orca.
+Running sp calculation for CONF32 using orca.
+Running sp calculation for CONF31 using orca.
+Running sp calculation for CONF30 using orca.
+Running sp calculation for CONF29 using orca.
+Running sp calculation for CONF28 using orca.
+Running sp calculation for CONF27 using orca.
+Running sp calculation for CONF26 using orca.
+
+-------------------------------- PRESCREENING SINGLE-POINT RESULTS ---------------------------------
+
+CONF#      E (DFT)      ΔE (DFT)     ΔGsolv (xTB)      Gtot         ΔGtot       Boltzmann weight
+            [Eh]       [kcal/mol]     [kcal/mol]       [Eh]       [kcal/mol]     % at 298.15 K
+-------  -----------  ------------  --------------  -----------  ------------  ------------------
+CONF1    -687.069085      3.01        -12.104362    -687.088375      1.20             0.76
+CONF2    -687.070430      2.17        -11.194449    -687.088270      1.27             0.68
+CONF3    -687.068033      3.67        -12.517754    -687.087981      1.45             0.50
+CONF4    -687.069312      2.87        -12.101913    -687.088597      1.07             0.96
+CONF5    -687.072034      1.16        -11.001967    -687.089566      0.46             2.68
+CONF6    -687.070938      1.85        -12.097753    -687.090217      0.05             5.33
+CONF7    -687.071564      1.46        -11.135440    -687.089309      0.62             2.04
+CONF8    -687.068173      3.59        -12.724916    -687.088451      1.16             0.82
+CONF9    -687.072321      0.98        -10.998025    -687.089847      0.28             3.60
+CONF10   -687.070499      2.13        -12.030597    -687.089671      0.39             2.99
+CONF11   -687.072246      1.03        -10.781312    -687.089427      0.54             2.31
+CONF12   -687.071393      1.57        -11.110050    -687.089098      0.75             1.63
+CONF13   -687.071757      1.34        -11.153564    -687.089531      0.48             2.58
+CONF14   -687.070572      2.08        -12.376282    -687.090295      0.00             5.79
+CONF15   -687.070049      2.41        -11.268979    -687.088007      1.44             0.51
+CONF16   -687.070522      2.11        -12.255514    -687.090053      0.15             4.48
+CONF17   -687.072244      1.03        -10.920960    -687.089648      0.41             2.92
+CONF18   -687.072938      0.60        -10.757108    -687.090081      0.13             4.61
+CONF19   -687.065298      5.39        -12.228514    -687.084785      3.46             0.02
+CONF20   -687.071297      1.63        -11.343357    -687.089374      0.58             2.18
+CONF21   -687.073888      0.00        -10.165553    -687.090088      0.13             4.65
+CONF22   -687.070738      1.98        -11.618073    -687.089253      0.65             1.92
+CONF23   -687.073567      0.20        -10.327941    -687.090025      0.17             4.35
+CONF24   -687.071052      1.78        -11.273745    -687.089018      0.80             1.50
+CONF25   -687.069260      2.90        -11.710438    -687.087921      1.49             0.47
+CONF26   -687.070498      2.13        -11.554383    -687.088911      0.87             1.34
+CONF27   -687.072475      0.89        -10.879843    -687.089813      0.30             3.47
+CONF28   -687.066414      4.69        -12.089181    -687.085680      2.90             0.04
+CONF29   -687.071027      1.80        -11.787059    -687.089811      0.30             3.47
+CONF30   -687.072992      0.56        -9.887949     -687.088749      0.97             1.13
+CONF31   -687.071389      1.57        -11.423444    -687.089593      0.44             2.75
+CONF32   -687.069280      2.89        -11.961772    -687.088342      1.23             0.73
+CONF33   -687.065663      5.16        -12.389150    -687.085407      3.07             0.03
+CONF36   -687.070625      2.05        -11.692573    -687.089258      0.65             1.93
+CONF37   -687.065325      5.37        -12.192770    -687.084756      3.48             0.02
+CONF38   -687.069938      2.48        -11.415807    -687.088131      1.36             0.58
+CONF39   -687.070900      1.88        -11.371367    -687.089021      0.80             1.50
+CONF40   -687.071187      1.69        -10.528381    -687.087965      1.46             0.49
+CONF41   -687.069891      2.51        -11.486804    -687.088196      1.32             0.63
+CONF42   -687.069911      2.50        -11.493038    -687.088226      1.30             0.65
+CONF43   -687.071772      1.33        -10.446860    -687.088420      1.18             0.79
+CONF44   -687.070677      2.02        -12.077713    -687.089924      0.23             3.91
+CONF45   -687.073535      0.22        -10.237298    -687.089850      0.28             3.61
+CONF46   -687.064768      5.72        -12.459617    -687.084623      3.56             0.01
+CONF47   -687.069168      2.96        -11.711409    -687.087831      1.55             0.43
+CONF48   -687.071307      1.62        -11.695783    -687.089946      0.22             4.00
+CONF49   -687.072932      0.60        -10.374059    -687.089465      0.52             2.40
+CONF50   -687.067431      4.05        -12.195756    -687.086866      2.15             0.15
+CONF51   -687.072546      0.84        -10.133192    -687.088694      1.00             1.06
+CONF52   -687.071757      1.34        -10.553174    -687.088575      1.08             0.94
+CONF53   -687.070097      2.38        -10.926392    -687.087509      1.75             0.30
+CONF54   -687.067596      3.95        -12.479067    -687.087482      1.76             0.29
+CONF55   -687.069816      2.56        -10.884769    -687.087161      1.97             0.21
+CONF56   -687.070977      1.83        -10.536606    -687.087768      1.59             0.40
+CONF58   -687.069206      2.94        -11.362703    -687.087314      1.87             0.25
+CONF59   -687.067281      4.15        -10.445054    -687.083926      4.00             0.01
+CONF60   -687.069599      2.69        -11.102691    -687.087292      1.88             0.24
+CONF61   -687.069001      3.07        -10.330596    -687.085464      3.03             0.03
+CONF62   -687.066581      4.58        -11.059499    -687.084206      3.82             0.01
+CONF63   -687.067401      4.07        -11.156456    -687.085180      3.21             0.03
+CONF64   -687.070126      2.36        -11.076471    -687.087777      1.58             0.40
+CONF65   -687.069754      2.59        -10.906787    -687.087135      1.98             0.20
+CONF66   -687.070054      2.41        -10.926502    -687.087466      1.78             0.29
+CONF68   -687.069598      2.69        -10.075376    -687.085654      2.91             0.04
+CONF69   -687.068048      3.66        -10.431354    -687.084671      3.53             0.01
+CONF70   -687.069244      2.91        -11.533572    -687.087624      1.68             0.34
+CONF71   -687.069386      2.83        -11.123310    -687.087112      2.00             0.20
+CONF72   -687.068215      3.56        -10.106100    -687.084320      3.75             0.01
+CONF73   -687.069534      2.73        -11.047557    -687.087140      1.98             0.20
+CONF74   -687.065680      5.15        -11.567353    -687.084114      3.88             0.01
+CONF75   -687.066717      4.50        -11.535197    -687.085099      3.26             0.02
+CONF76   -687.066178      4.84        -11.382684    -687.084318      3.75             0.01
+CONF77   -687.066585      4.58        -11.527867    -687.084956      3.35             0.02
+CONF78   -687.065772      5.09        -12.480656    -687.085661      2.91             0.04
+CONF79   -687.065315      5.38        -12.002659    -687.084443      3.67             0.01
+CONF80   -687.066725      4.49        -11.711807    -687.085389      3.08             0.03
+CONF81   -687.064194      6.08        -13.098710    -687.085068      3.28             0.02
+CONF82   -687.064415      5.94        -12.435232    -687.084232      3.80             0.01
+CONF83   -687.064493      5.90        -12.311236    -687.084112      3.88             0.01
+CONF84   -687.066693      4.52        -10.825216    -687.083944      3.99             0.01
+CONF88   -687.066750      4.48        -11.213921    -687.084620      3.56             0.01
+
+Boltzmann averaged free energy/enthalpy of ensemble on input geometries (not DFT optimized):
+temperature /K:   avE(T) /a.u.   avG(T) /a.u.
+    298.15        -687.0714921    -687.0895025     <<==part0==
+----------------------------------------------------------------------------------------------------
+Ran prescreening in 1486.40 seconds!
+
+----------------------------------------------------------------------------------------------------
+                                             SCREENING                                              
+----------------------------------------------------------------------------------------------------
+    
+Running gsolv calculation for CONF1 using orca.
+Running gsolv calculation for CONF2 using orca.
+Running gsolv calculation for CONF3 using orca.
+Running gsolv calculation for CONF72 using orca.
+Running gsolv calculation for CONF71 using orca.
+Running gsolv calculation for CONF70 using orca.
+Running gsolv calculation for CONF69 using orca.
+Running gsolv calculation for CONF68 using orca.
+Running gsolv calculation for CONF66 using orca.
+Running gsolv calculation for CONF65 using orca.
+Running gsolv calculation for CONF64 using orca.
+Running gsolv calculation for CONF63 using orca.
+Running gsolv calculation for CONF62 using orca.
+Running gsolv calculation for CONF61 using orca.
+Running gsolv calculation for CONF60 using orca.
+Running gsolv calculation for CONF59 using orca.
+Running gsolv calculation for CONF58 using orca.
+Running gsolv calculation for CONF56 using orca.
+Running gsolv calculation for CONF55 using orca.
+Running gsolv calculation for CONF54 using orca.
+Running gsolv calculation for CONF53 using orca.
+Running gsolv calculation for CONF52 using orca.
+Running gsolv calculation for CONF51 using orca.
+Running gsolv calculation for CONF50 using orca.
+Running gsolv calculation for CONF49 using orca.
+Running gsolv calculation for CONF48 using orca.
+Running gsolv calculation for CONF47 using orca.
+Running gsolv calculation for CONF46 using orca.
+Running gsolv calculation for CONF45 using orca.
+Running gsolv calculation for CONF44 using orca.
+Running gsolv calculation for CONF43 using orca.
+Running gsolv calculation for CONF42 using orca.
+Running gsolv calculation for CONF41 using orca.
+Running gsolv calculation for CONF40 using orca.
+Running gsolv calculation for CONF39 using orca.
+Running gsolv calculation for CONF38 using orca.
+Running gsolv calculation for CONF37 using orca.
+Running gsolv calculation for CONF36 using orca.
+Running gsolv calculation for CONF33 using orca.
+Running gsolv calculation for CONF32 using orca.
+Running gsolv calculation for CONF31 using orca.
+Running gsolv calculation for CONF30 using orca.
+Running gsolv calculation for CONF29 using orca.
+Running gsolv calculation for CONF28 using orca.
+Running gsolv calculation for CONF27 using orca.
+Running gsolv calculation for CONF26 using orca.
+Running gsolv calculation for CONF25 using orca.
+Running gsolv calculation for CONF24 using orca.
+Running gsolv calculation for CONF23 using orca.
+Running gsolv calculation for CONF22 using orca.
+Running gsolv calculation for CONF21 using orca.
+Running gsolv calculation for CONF20 using orca.
+Running gsolv calculation for CONF19 using orca.
+Running gsolv calculation for CONF18 using orca.
+Running gsolv calculation for CONF17 using orca.
+Running gsolv calculation for CONF16 using orca.
+Running gsolv calculation for CONF15 using orca.
+Running gsolv calculation for CONF14 using orca.
+Running gsolv calculation for CONF13 using orca.
+Running gsolv calculation for CONF12 using orca.
+Running gsolv calculation for CONF11 using orca.
+Running gsolv calculation for CONF10 using orca.
+Running gsolv calculation for CONF9 using orca.
+Running gsolv calculation for CONF8 using orca.
+Running gsolv calculation for CONF7 using orca.
+Running gsolv calculation for CONF6 using orca.
+Running gsolv calculation for CONF5 using orca.
+Running gsolv calculation for CONF4 using orca.
+Running gsolv calculation for CONF88 using orca.
+Running gsolv calculation for CONF84 using orca.
+Running gsolv calculation for CONF82 using orca.
+Running gsolv calculation for CONF83 using orca.
+Running gsolv calculation for CONF81 using orca.
+Running gsolv calculation for CONF80 using orca.
+Running gsolv calculation for CONF79 using orca.
+Running gsolv calculation for CONF78 using orca.
+Running gsolv calculation for CONF77 using orca.
+Running gsolv calculation for CONF76 using orca.
+Running gsolv calculation for CONF75 using orca.
+Running gsolv calculation for CONF74 using orca.
+Running gsolv calculation for CONF73 using orca.
+Running xtb_rrho calculation for CONF1 using xtb.
+Running xtb_rrho calculation for CONF2 using xtb.
+Running xtb_rrho calculation for CONF3 using xtb.
+Running xtb_rrho calculation for CONF62 using xtb.
+Running xtb_rrho calculation for CONF61 using xtb.
+Running xtb_rrho calculation for CONF60 using xtb.
+Running xtb_rrho calculation for CONF59 using xtb.
+Running xtb_rrho calculation for CONF58 using xtb.
+Running xtb_rrho calculation for CONF56 using xtb.
+Running xtb_rrho calculation for CONF55 using xtb.
+Running xtb_rrho calculation for CONF54 using xtb.
+Running xtb_rrho calculation for CONF53 using xtb.
+Running xtb_rrho calculation for CONF52 using xtb.
+Running xtb_rrho calculation for CONF51 using xtb.
+Running xtb_rrho calculation for CONF50 using xtb.
+Running xtb_rrho calculation for CONF49 using xtb.
+Running xtb_rrho calculation for CONF48 using xtb.
+Running xtb_rrho calculation for CONF47 using xtb.
+Running xtb_rrho calculation for CONF46 using xtb.
+Running xtb_rrho calculation for CONF45 using xtb.
+Running xtb_rrho calculation for CONF44 using xtb.
+Running xtb_rrho calculation for CONF43 using xtb.
+Running xtb_rrho calculation for CONF42 using xtb.
+Running xtb_rrho calculation for CONF41 using xtb.
+Running xtb_rrho calculation for CONF40 using xtb.
+Running xtb_rrho calculation for CONF39 using xtb.
+Running xtb_rrho calculation for CONF38 using xtb.
+Running xtb_rrho calculation for CONF37 using xtb.
+Running xtb_rrho calculation for CONF36 using xtb.
+Running xtb_rrho calculation for CONF33 using xtb.
+Running xtb_rrho calculation for CONF32 using xtb.
+Running xtb_rrho calculation for CONF31 using xtb.
+Running xtb_rrho calculation for CONF30 using xtb.
+Running xtb_rrho calculation for CONF29 using xtb.
+Running xtb_rrho calculation for CONF28 using xtb.
+Running xtb_rrho calculation for CONF27 using xtb.
+Running xtb_rrho calculation for CONF26 using xtb.
+Running xtb_rrho calculation for CONF25 using xtb.
+Running xtb_rrho calculation for CONF24 using xtb.
+Running xtb_rrho calculation for CONF23 using xtb.
+Running xtb_rrho calculation for CONF22 using xtb.
+Running xtb_rrho calculation for CONF21 using xtb.
+Running xtb_rrho calculation for CONF20 using xtb.
+Running xtb_rrho calculation for CONF19 using xtb.
+Running xtb_rrho calculation for CONF18 using xtb.
+Running xtb_rrho calculation for CONF17 using xtb.
+Running xtb_rrho calculation for CONF16 using xtb.
+Running xtb_rrho calculation for CONF15 using xtb.
+Running xtb_rrho calculation for CONF14 using xtb.
+Running xtb_rrho calculation for CONF13 using xtb.
+Running xtb_rrho calculation for CONF12 using xtb.
+Running xtb_rrho calculation for CONF11 using xtb.
+Running xtb_rrho calculation for CONF10 using xtb.
+Running xtb_rrho calculation for CONF9 using xtb.
+Running xtb_rrho calculation for CONF8 using xtb.
+Running xtb_rrho calculation for CONF7 using xtb.
+Running xtb_rrho calculation for CONF6 using xtb.
+Running xtb_rrho calculation for CONF5 using xtb.
+Running xtb_rrho calculation for CONF4 using xtb.
+Running xtb_rrho calculation for CONF88 using xtb.
+Running xtb_rrho calculation for CONF83 using xtb.
+Running xtb_rrho calculation for CONF82 using xtb.
+Running xtb_rrho calculation for CONF84 using xtb.
+Running xtb_rrho calculation for CONF81 using xtb.
+Running xtb_rrho calculation for CONF80 using xtb.
+Running xtb_rrho calculation for CONF79 using xtb.
+Running xtb_rrho calculation for CONF78 using xtb.
+Running xtb_rrho calculation for CONF77 using xtb.
+Running xtb_rrho calculation for CONF76 using xtb.
+Running xtb_rrho calculation for CONF75 using xtb.
+Running xtb_rrho calculation for CONF74 using xtb.
+Running xtb_rrho calculation for CONF73 using xtb.
+Running xtb_rrho calculation for CONF72 using xtb.
+Running xtb_rrho calculation for CONF71 using xtb.
+Running xtb_rrho calculation for CONF70 using xtb.
+Running xtb_rrho calculation for CONF69 using xtb.
+Running xtb_rrho calculation for CONF68 using xtb.
+Running xtb_rrho calculation for CONF66 using xtb.
+Running xtb_rrho calculation for CONF65 using xtb.
+Running xtb_rrho calculation for CONF64 using xtb.
+Running xtb_rrho calculation for CONF63 using xtb.
+Updated fuzzy threshold: 3.68 kcal/mol.
+
+----------------------------- SCREENING SINGLE-POINT (+ mRRHO) RESULTS -----------------------------
+
+CONF#      E (DFT)       ΔGsolv      GmRRHO      Gtot         ΔGtot       Boltzmann weight
+            [Eh]       [kcal/mol]     [Eh]       [Eh]       [kcal/mol]     % at 298.15 K
+-------  -----------  ------------  --------  -----------  ------------  ------------------
+CONF1    -688.060763   -14.960853   0.152916  -687.931689      1.06             1.16
+CONF2    -688.062332   -13.386187   0.153002  -687.930663      1.70             0.39
+CONF3    -688.059648   -15.356133   0.152791  -687.931328      1.28             0.79
+CONF4    -688.060729   -14.809449   0.152949  -687.931380      1.25             0.84
+CONF5    -688.063808   -12.982082   0.153357  -687.931139      1.40             0.65
+CONF6    -688.062371   -14.554041   0.153100  -687.932464      0.57             2.64
+CONF7    -688.062386   -13.894101   0.153538  -687.930990      1.50             0.55
+CONF8    -688.059484   -15.492179   0.152891  -687.931282      1.31             0.75
+CONF9    -688.062831   -14.101957   0.153403  -687.931900      0.92             1.45
+CONF10   -688.061690   -14.559159   0.153091  -687.931800      0.99             1.31
+CONF11   -688.062892   -13.619965   0.153362  -687.931235      1.34             0.72
+CONF12   -688.062984   -13.320506   0.153304  -687.930907      1.55             0.51
+CONF13   -688.063316   -13.311358   0.153170  -687.931360      1.26             0.82
+CONF14   -688.061685   -14.680864   0.153123  -687.931958      0.89             1.54
+CONF15   -688.061991   -13.486249   0.152711  -687.930771      1.63             0.44
+CONF16   -688.061381   -14.648028   0.153151  -687.931573      1.13             1.03
+CONF17   -688.063083   -14.740061   0.153199  -687.933374      0.00             6.92
+CONF18   -688.063358   -13.878876   0.153239  -687.932237      0.71             2.07
+CONF20   -688.061663   -14.583728   0.153250  -687.931654      1.08             1.12
+CONF21   -688.064935   -13.045656   0.153314  -687.932411      0.60             2.49
+CONF22   -688.061315   -14.627973   0.153432  -687.931194      1.37             0.69
+CONF23   -688.064337   -13.305565   0.153371  -687.932170      0.76             1.93
+CONF24   -688.062437   -13.600997   0.153097  -687.931015      1.48             0.57
+CONF25   -688.059726   -15.684443   0.152999  -687.931723      1.04             1.20
+CONF26   -688.060971   -15.386643   0.153097  -687.932395      0.61             2.45
+CONF27   -688.063027   -14.481048   0.153190  -687.932914      0.29             4.25
+CONF29   -688.062045   -15.240072   0.153070  -687.933262      0.07             6.15
+CONF30   -688.064411   -12.871263   0.153499  -687.931424      1.22             0.88
+CONF31   -688.062108   -14.834840   0.153108  -687.932641      0.46             3.18
+CONF32   -688.059551   -15.832031   0.153093  -687.931687      1.06             1.16
+CONF36   -688.060761   -15.454843   0.153241  -687.932149      0.77             1.89
+CONF38   -688.060673   -15.485751   0.152987  -687.932364      0.63             2.37
+CONF39   -688.061249   -14.714742   0.153068  -687.931630      1.09             1.09
+CONF40   -688.062308   -13.855402   0.153003  -687.931386      1.25             0.84
+CONF41   -688.060432   -15.345936   0.153053  -687.931835      0.97             1.36
+CONF42   -688.060448   -15.357453   0.153054  -687.931868      0.95             1.40
+CONF43   -688.062973   -13.601283   0.153373  -687.931274      1.32             0.75
+CONF44   -688.061302   -15.359774   0.153164  -687.932616      0.48             3.10
+CONF45   -688.064889   -13.206891   0.153054  -687.932882      0.31             4.11
+CONF47   -688.059547   -15.660528   0.152842  -687.931662      1.07             1.13
+CONF48   -688.061647   -14.988582   0.153147  -687.932386      0.62             2.43
+CONF49   -688.063958   -13.422271   0.153013  -687.932335      0.65             2.30
+CONF50   -688.058131   -16.377198   0.152829  -687.931401      1.24             0.86
+CONF51   -688.063495   -13.397637   0.153251  -687.931595      1.12             1.05
+CONF52   -688.062837   -13.951763   0.153172  -687.931898      0.93             1.45
+CONF53   -688.061265   -14.250058   0.152717  -687.931257      1.33             0.74
+CONF54   -688.058039   -16.530772   0.152755  -687.931628      1.10             1.09
+CONF55   -688.061677   -14.034020   0.152905  -687.931137      1.40             0.65
+CONF56   -688.062087   -13.920001   0.152760  -687.931510      1.17             0.96
+CONF58   -688.061228   -15.274181   0.152680  -687.932889      0.30             4.14
+CONF60   -688.061302   -15.066772   0.152841  -687.932472      0.57             2.66
+CONF61   -688.058622   -13.954639   0.153316  -687.927543      3.66             0.01
+CONF63   -688.056808   -15.278749   0.153356  -687.927801      3.50             0.02
+CONF64   -688.061502   -14.900051   0.152827  -687.932420      0.60             2.52
+CONF65   -688.060960   -14.400059   0.152580  -687.931328      1.28             0.79
+CONF66   -688.061776   -14.372724   0.152744  -687.931936      0.90             1.51
+CONF68   -688.059329   -13.714103   0.153304  -687.927880      3.45             0.02
+CONF70   -688.060794   -15.387628   0.152752  -687.932564      0.51             2.93
+CONF71   -688.061173   -14.378322   0.152796  -687.931291      1.31             0.76
+CONF73   -688.061225   -14.470263   0.152648  -687.931637      1.09             1.10
+CONF75   -688.058651   -15.015140   0.152577  -687.930002      2.12             0.19
+CONF77   -688.056127   -15.639272   0.153160  -687.927890      3.44             0.02
+CONF78   -688.057482   -16.453322   0.152170  -687.931532      1.16             0.98
+CONF79   -688.057440   -15.446912   0.152926  -687.929130      2.66             0.08
+CONF80   -688.058600   -15.474480   0.152440  -687.930821      1.60             0.46
+CONF81   -688.055635   -17.058749   0.151700  -687.931120      1.41             0.64
+CONF82   -688.056195   -16.318661   0.152772  -687.929428      2.48             0.11
+CONF83   -688.056137   -16.219934   0.152576  -687.929409      2.49             0.10
+CONF84   -688.058177   -15.178262   0.153456  -687.928909      2.80             0.06
+CONF88   -688.058106   -16.013999   0.152444  -687.931182      1.38             0.68
+
+Boltzmann averaged free energy/enthalpy of ensemble on input geometries (not DFT optimized):
+temperature /K:   avE(T) /a.u.   avG(T) /a.u.
+    298.15        -688.0618615    -687.9322320     <<==part1==
+----------------------------------------------------------------------------------------------------
+Ran screening in 6990.34 seconds!
+
+Finished ensemble optimization
+
+
+------------------------------------- FINAL RANKING COMPARISON -------------------------------------
+
+ CONF#    ΔGtot Prescreening    ΔGtot Screening
+              [kcal/mol]          [kcal/mol]
+-------  --------------------  -----------------
+ CONF1           1.20                1.06
+ CONF2           1.27                1.70
+ CONF3           1.45                1.28
+ CONF4           1.07                1.25
+ CONF5           0.46                1.40
+ CONF6           0.05                0.57
+ CONF7           0.62                1.50
+ CONF8           1.16                1.31
+ CONF9           0.28                0.92
+CONF10           0.39                0.99
+CONF11           0.54                1.34
+CONF12           0.75                1.55
+CONF13           0.48                1.26
+CONF14           0.00                0.89
+CONF15           1.44                1.63
+CONF16           0.15                1.13
+CONF17           0.41                0.00
+CONF18           0.13                0.71
+CONF20           0.58                1.08
+CONF21           0.13                0.60
+CONF22           0.65                1.37
+CONF23           0.17                0.76
+CONF24           0.80                1.48
+CONF25           1.49                1.04
+CONF26           0.87                0.61
+CONF27           0.30                0.29
+CONF29           0.30                0.07
+CONF30           0.97                1.22
+CONF31           0.44                0.46
+CONF32           1.23                1.06
+CONF36           0.65                0.77
+CONF38           1.36                0.63
+CONF39           0.80                1.09
+CONF40           1.46                1.25
+CONF41           1.32                0.97
+CONF42           1.30                0.95
+CONF43           1.18                1.32
+CONF44           0.23                0.48
+CONF45           0.28                0.31
+CONF47           1.55                1.07
+CONF48           0.22                0.62
+CONF49           0.52                0.65
+CONF50           2.15                1.24
+CONF51           1.00                1.12
+CONF52           1.08                0.93
+CONF53           1.75                1.33
+CONF54           1.76                1.10
+CONF55           1.97                1.40
+CONF56           1.59                1.17
+CONF58           1.87                0.30
+CONF60           1.88                0.57
+CONF61           3.03                3.66
+CONF63           3.21                3.50
+CONF64           1.58                0.60
+CONF65           1.98                1.28
+CONF66           1.78                0.90
+CONF68           2.91                3.45
+CONF70           1.68                0.51
+CONF71           2.00                1.31
+CONF73           1.98                1.09
+CONF75           3.26                2.12
+CONF77           3.35                3.44
+CONF78           2.91                1.16
+CONF79           3.67                2.66
+CONF80           3.08                1.60
+CONF81           3.28                1.41
+CONF82           3.80                2.48
+CONF83           3.88                2.49
+CONF84           3.99                2.80
+CONF88           3.56                1.38
+----------------------------------------------------------------------------------------------------
+
+
+Timings:
+       Prescreening: 00:24:46  ( 17.5 %)
+          Screening: 01:56:30  ( 82.5 %)
+========================================
+
+Total CENSO runtime: 02:21:16
+
+CENSO all done!
+g OrcaProc in 1_SCREENING/CONF46/gsolv on 4 cores using orca.
+2026-10-05 00:09:59,858 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF45/gsolv on 4 cores using orca.
+2026-10-05 00:10:00,929 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF44/gsolv on 4 cores using orca.
+2026-10-05 00:13:53,427 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF43/gsolv on 4 cores using orca.
+2026-10-05 00:14:26,283 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF42/gsolv on 4 cores using orca.
+2026-10-05 00:14:26,838 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF41/gsolv on 4 cores using orca.
+2026-10-05 00:18:00,891 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF40/gsolv on 4 cores using orca.
+2026-10-05 00:18:46,139 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF39/gsolv on 4 cores using orca.
+2026-10-05 00:18:46,669 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF38/gsolv on 4 cores using orca.
+2026-10-05 00:22:14,839 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF37/gsolv on 4 cores using orca.
+2026-10-05 00:23:02,499 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF36/gsolv on 4 cores using orca.
+2026-10-05 00:23:08,881 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF33/gsolv on 4 cores using orca.
+2026-10-05 00:26:25,941 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF32/gsolv on 4 cores using orca.
+2026-10-05 00:27:12,450 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF31/gsolv on 4 cores using orca.
+2026-10-05 00:27:12,659 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF30/gsolv on 4 cores using orca.
+2026-10-05 00:30:48,422 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF29/gsolv on 4 cores using orca.
+2026-10-05 00:31:32,858 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF28/gsolv on 4 cores using orca.
+2026-10-05 00:31:33,292 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF27/gsolv on 4 cores using orca.
+2026-10-05 00:35:03,270 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF26/gsolv on 4 cores using orca.
+2026-10-05 00:35:43,905 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF25/gsolv on 4 cores using orca.
+2026-10-05 00:35:51,032 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF24/gsolv on 4 cores using orca.
+2026-10-05 00:39:26,030 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF23/gsolv on 4 cores using orca.
+2026-10-05 00:40:11,189 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF22/gsolv on 4 cores using orca.
+2026-10-05 00:40:17,069 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF21/gsolv on 4 cores using orca.
+2026-10-05 00:43:43,295 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF20/gsolv on 4 cores using orca.
+2026-10-05 00:44:09,236 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF19/gsolv on 4 cores using orca.
+2026-10-05 00:44:33,995 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF18/gsolv on 4 cores using orca.
+2026-10-05 00:48:11,086 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF17/gsolv on 4 cores using orca.
+2026-10-05 00:48:11,502 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF16/gsolv on 4 cores using orca.
+2026-10-05 00:48:59,294 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF15/gsolv on 4 cores using orca.
+2026-10-05 00:52:20,082 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF14/gsolv on 4 cores using orca.
+2026-10-05 00:52:28,086 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF13/gsolv on 4 cores using orca.
+2026-10-05 00:53:26,112 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF12/gsolv on 4 cores using orca.
+2026-10-05 00:56:33,755 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF11/gsolv on 4 cores using orca.
+2026-10-05 00:56:48,885 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF10/gsolv on 4 cores using orca.
+2026-10-05 00:57:49,224 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF9/gsolv on 4 cores using orca.
+2026-10-05 01:00:50,421 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF8/gsolv on 4 cores using orca.
+2026-10-05 01:00:59,211 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF7/gsolv on 4 cores using orca.
+2026-10-05 01:02:16,997 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF6/gsolv on 4 cores using orca.
+2026-10-05 01:05:03,023 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF5/gsolv on 4 cores using orca.
+2026-10-05 01:05:15,678 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF4/gsolv on 4 cores using orca.
+2026-10-05 01:08:05,738 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF88/gsolv on 12 cores using orca.
+2026-10-05 01:08:47,978 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF84/gsolv on 4 cores using orca.
+2026-10-05 01:08:47,979 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF82/gsolv on 4 cores using orca.
+2026-10-05 01:08:47,980 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF83/gsolv on 4 cores using orca.
+2026-10-05 01:13:10,118 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF81/gsolv on 4 cores using orca.
+2026-10-05 01:13:14,069 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF80/gsolv on 4 cores using orca.
+2026-10-05 01:13:14,292 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF79/gsolv on 4 cores using orca.
+2026-10-05 01:17:30,484 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF78/gsolv on 4 cores using orca.
+2026-10-05 01:17:31,119 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF77/gsolv on 4 cores using orca.
+2026-10-05 01:17:36,726 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF76/gsolv on 4 cores using orca.
+2026-10-05 01:21:53,390 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF75/gsolv on 4 cores using orca.
+2026-10-05 01:21:55,396 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF74/gsolv on 4 cores using orca.
+2026-10-05 01:22:01,817 -censo.processing.processor-   INFO   - worker1538632:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF73/gsolv on 4 cores using orca.
+2026-10-05 01:26:12,767 -     censo.parallel     -   INFO   - All jobs executed successfully.
+2026-10-05 01:26:12,911 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF1/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:12,943 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF2/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:12,945 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF3/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:14,365 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF62/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:14,372 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF61/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:14,385 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF60/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:15,649 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF59/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:15,654 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF58/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:15,665 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF56/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:16,924 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF55/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:16,956 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF54/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:16,958 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF53/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:18,201 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF52/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:18,232 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF51/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:18,235 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF50/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:19,486 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF49/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:19,506 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF48/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:19,535 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF47/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:20,747 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF46/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:20,772 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF45/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:20,803 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF44/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:21,908 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF43/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:21,950 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF42/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:22,071 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF41/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:23,089 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF40/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:23,240 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF39/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:23,347 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF38/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:24,350 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF37/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:24,423 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF36/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:24,529 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF33/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:25,532 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF32/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:25,621 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF31/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:25,623 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF30/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:26,707 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF29/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:26,796 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF28/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:26,809 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF27/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:27,887 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF26/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:27,970 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF25/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:27,993 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF24/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:29,139 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF23/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:29,162 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF22/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:29,272 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF21/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:30,224 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF20/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:30,355 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF19/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:30,462 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF18/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:31,316 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF17/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:31,417 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF16/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:31,631 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF15/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:32,401 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF14/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:32,604 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF13/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:32,812 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF12/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:33,478 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF11/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:33,785 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF10/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:33,999 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF9/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:34,639 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF8/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:35,061 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF7/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:35,063 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF6/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:35,687 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF5/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:36,234 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF4/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:37,171 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF88/xtb_rrho on 12 cores using xtb.
+2026-10-05 01:26:37,922 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF83/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:37,922 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF82/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:37,922 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF84/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:39,217 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF81/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:39,224 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF80/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:39,228 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF79/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:40,424 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF78/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:40,428 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF77/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:40,531 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF76/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:41,599 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF75/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:41,606 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF74/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:41,715 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF73/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:42,782 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF72/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:42,788 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF71/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:42,898 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF70/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:43,973 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF69/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:43,984 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF68/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:44,091 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF66/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:45,160 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF65/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:45,162 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF64/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:45,270 -censo.processing.processor-   INFO   - worker1538632:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF63/xtb_rrho on 4 cores using xtb.
+2026-10-05 01:26:46,449 -     censo.parallel     -   INFO   - All jobs executed successfully.

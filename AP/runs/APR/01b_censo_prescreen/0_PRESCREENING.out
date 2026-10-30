@@ -1,0 +1,8 @@
+CONF#      E (DFT)      ΔE (DFT)     ΔGsolv (xTB)      Gtot         ΔGtot       Boltzmann weight
+            [Eh]       [kcal/mol]     [kcal/mol]       [Eh]       [kcal/mol]     % at 298.15 K
+-------  -----------  ------------  --------------  -----------  ------------  ------------------
+CONF1    -303.159312      0.00        -4.381564     -303.166294      0.00            100.00
+Boltzmann averaged free energy/enthalpy of ensemble on input geometries (not DFT optimized):
+temperature /K:   avE(T) /a.u.   avG(T) /a.u.
+    298.15        -303.1593118    -303.1662943     <<==part0==
+----------------------------------------------------------------------------------------------------

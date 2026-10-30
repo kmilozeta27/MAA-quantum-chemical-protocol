@@ -1,0 +1,103 @@
+17:36:00  INFO      ============================================================
+17:36:00  INFO      PIPELINE ORCA  —  molécula: 4DG_T
+17:36:00  INFO      Carga: 0   Mult: 1
+17:36:00  INFO      Flujo: CREST → CENSO (prescreen) → OPT (nconf auto) → NumFreq → SP → TDDFT → ADC2
+17:36:00  INFO      Inicio desde etapa: CREST
+17:36:00  INFO      ORCA: /home/kmilozeta/orca_6_1_1_avx2/orca
+17:36:00  INFO      Temperatura CENSO      : 298.15 K
+17:36:00  INFO      Recursos CREST/CENSO   : 12 cores  (xTB --T, escala lineal)
+17:36:00  INFO      Recursos OPT           : 3×4 cores / 2196 MB  → 8.6 GB/job
+17:36:00  INFO      Recursos SP            : 3×4 cores / 2196 MB  → 8.6 GB/job
+17:36:00  INFO      Recursos TDDFT         : 2×6 cores / 1568 MB  → 9.2 GB/job  (NRoots 15)
+17:36:00  INFO      Recursos NumFreq       : 1×12 cores / 2196 MB  → 25.7 GB
+17:36:00  INFO      ============================================================
+17:36:00  DEBUG     [CHECK-BIN] CREST → /home/kmilozeta/miniforge3/bin/crest
+17:36:00  DEBUG     [CHECK-BIN] CENSO → /home/kmilozeta/miniforge3/envs/sciencebitch/bin/censo
+17:36:00  INFO      [CREST] lanzando sobre 4DG_T.xyz  (carga=0)  [nohup]
+05:18:19  INFO      ============================================================
+05:18:19  INFO      PIPELINE ORCA  —  molécula: 4DG_T
+05:18:19  INFO      Carga: 0   Mult: 1
+05:18:19  INFO      Flujo: CREST → CENSO (prescreen) → OPT (nconf auto) → NumFreq → SP → TDDFT → ADC2
+05:18:19  INFO      Inicio desde etapa: CREST
+05:18:19  INFO      ORCA: /home/kmilozeta/orca_6_1_1_avx2/orca
+05:18:19  INFO      Temperatura CENSO      : 298.15 K
+05:18:19  INFO      Recursos CREST/CENSO   : 12 cores  (xTB --T, escala lineal)
+05:18:19  INFO      Recursos OPT           : 3×4 cores / 2196 MB  → 8.6 GB/job
+05:18:19  INFO      Recursos SP            : 3×4 cores / 2196 MB  → 8.6 GB/job
+05:18:19  INFO      Recursos TDDFT         : 2×6 cores / 1568 MB  → 9.2 GB/job  (NRoots 15)
+05:18:19  INFO      Recursos NumFreq       : 1×12 cores / 2196 MB  → 25.7 GB
+05:18:19  INFO      ============================================================
+05:18:19  DEBUG     [CHECK-BIN] CREST → /home/kmilozeta/miniforge3/bin/crest
+05:18:19  DEBUG     [CHECK-BIN] CENSO → /home/kmilozeta/miniforge3/envs/sciencebitch/bin/censo
+05:18:19  INFO      [CREST] lanzando sobre 4DG_T.xyz  (carga=0)  [nohup]
+05:22:33  INFO      [CREST] 94 confórmeros generados en 4.2 min
+05:22:33  DEBUG     [CENSO-RECOVER]  diagnóstico 01b_censo_prescreen: 0 CONF dirs | sp_ok=0 | gsolv_ok=0 | full=0 | can_recover=False
+05:22:33  INFO      [CENSO]  ▶  lanzando pre-screening sobre crest_conformers.xyz (carga=0, T=298.15 K)  [nohup]
+07:54:19  WARNING   [CENSO]  ⚠  78 conf(s) del screening no encontrados en crest_conformers.xyz: ['CONF17', 'CONF29', 'CONF27', 'CONF59', 'CONF31']…
+07:54:19  INFO      [CENSO]  ✓  pre-screening terminó en 151.8 min — 78 confórmero(s) sobreviven, ensemble reconstruido desde 1_SCREENING.out (geometrías: 1_SCREENING.xyz, ordenado por Gtot)
+07:54:19  WARNING   [NCONF-BOLTZMANN] solo 2 conf(s) ≥ 5.0% — añadiendo 1 conf(s) extra para garantizar nconf_min=3: ['CONF27']
+07:54:19  INFO      [NCONF-BOLTZMANN] umbral=5.0% → 2 conf(s) seleccionados: CONF17(7.0%), CONF29(6.3%)
+07:54:19  INFO      [NCONF-BOLTZMANN] 76 conf(s) por debajo del umbral (mayor: CONF27 4.24%) — descartados
+07:54:19  INFO      [NCONF-BOLTZMANN] → nconf=3 (nconf_min=3)
+07:54:19  INFO      [OPT] optimizando 3 confórmeros (Boltzmann (3 conf(s): CONF17, CONF29, CONF27))
+07:54:19  INFO      [OPT] 3 confórmeros disponibles — batch 3x4 cores
+07:54:19  INFO      [OPT] IDs CREST → dirs: CONF17→conf_17  CONF29→conf_29  CONF27→conf_27
+07:54:19  INFO      [OPT] ── Lote 1/~1: ['conf_17', 'conf_29']  (cores: ['4,5,6,7', '8,9,10,11'])
+07:54:19  INFO        ▶  lanzando ORCA: opt.inp  (cores 8,9,10,11)  [nohup]
+07:54:19  INFO        ▶  lanzando ORCA: opt.inp  (cores 4,5,6,7)  [nohup]
+08:08:34  INFO        ✓  opt.inp terminó en 14.3 min
+08:08:34  INFO      [OPT]   ✓ conf_17  (14.3 min)
+08:08:51  INFO        ✓  opt.inp terminó en 14.5 min
+08:08:51  INFO      [OPT]   ✓ conf_29  (14.5 min)
+08:08:51  INFO      [OPT] ── Lote 2/~1: ['conf_27']  (cores: ['4,5,6,7'])
+08:08:51  INFO        ▶  lanzando ORCA: opt.inp  (cores 4,5,6,7)  [nohup]
+08:23:23  INFO        ✓  opt.inp terminó en 14.5 min
+08:23:23  INFO      [OPT]   ✓ conf_27  (14.5 min)
+08:23:23  INFO      [OPT] 3/3 confórmeros optimizados
+08:23:23  INFO      [NUMFREQ] calculando frecuencias para 3 confórmeros
+08:23:23  INFO        ▶  lanzando ORCA: freq.inp  [nohup]
+09:10:16  INFO        ✓  freq.inp terminó en 46.9 min
+09:10:16  INFO      [NUMFREQ] conf_17: sin frecuencias imaginarias ✓
+09:10:16  INFO        ▶  lanzando ORCA: freq.inp  [nohup]
+09:57:18  INFO        ✓  freq.inp terminó en 47.0 min
+09:57:18  INFO      [NUMFREQ] conf_29: sin frecuencias imaginarias ✓
+09:57:18  INFO        ▶  lanzando ORCA: freq.inp  [nohup]
+10:43:50  INFO        ✓  freq.inp terminó en 46.5 min
+10:43:50  INFO      [NUMFREQ] conf_27: sin frecuencias imaginarias ✓
+10:43:50  INFO      [NUMFREQ] 3/3 completados
+10:43:50  INFO      [SP] single point para 3 confórmeros (batch=3, 4 cores/job)
+10:43:50  INFO      [SP] 3 SPs en 1 lote(s) de ≤3 (CPUs activos/lote: 12)
+10:43:50  INFO      [SP] ── Lote 1/~1: ['conf_17', 'conf_29']  (cores: ['4,5,6,7', '8,9,10,11'])
+10:43:50  INFO        ▶  lanzando ORCA: sp.inp  (cores 4,5,6,7)  [nohup]
+10:43:50  INFO        ▶  lanzando ORCA: sp.inp  (cores 8,9,10,11)  [nohup]
+10:56:58  INFO        ✓  sp.inp terminó en 13.1 min
+10:56:58  INFO      [SP]   ✓ conf_17  (13.1 min)
+10:57:02  INFO        ✓  sp.inp terminó en 13.2 min
+10:57:02  INFO      [SP]   ✓ conf_29  (13.2 min)
+10:57:02  INFO      [SP] ── Lote 2/~1: ['conf_27']  (cores: ['4,5,6,7'])
+10:57:02  INFO        ▶  lanzando ORCA: sp.inp  (cores 4,5,6,7)  [nohup]
+11:09:25  INFO        ✓  sp.inp terminó en 12.4 min
+11:09:25  INFO      [SP]   ✓ conf_27  (12.4 min)
+11:09:25  INFO      [SP] 3/3 completados
+11:09:25  INFO      [SP_GAS] no incluido en esta ejecución (opcional — usa --spgas)
+11:09:25  INFO      [SP_SMD] no incluido en esta ejecución (opcional — usa --spsmd)
+11:09:25  INFO      [TDDFT] calculando espectros para 3 confórmeros — batch 2×6 cores (NRoots 15)
+11:09:25  INFO      [TDDFT] ── Lote 1/~2: ['conf_17']  (cores: ['4,5,6,7,8,9'])
+11:09:25  INFO        ▶  lanzando ORCA: tddft.inp  (cores 4,5,6,7,8,9)  [nohup]
+11:20:03  INFO        ✓  tddft.inp terminó en 10.6 min
+11:20:03  INFO      [TDDFT]   ✓ conf_17  (10.6 min)
+11:20:03  INFO      [TDDFT] ── Lote 2/~2: ['conf_29']  (cores: ['4,5,6,7,8,9'])
+11:20:03  INFO        ▶  lanzando ORCA: tddft.inp  (cores 4,5,6,7,8,9)  [nohup]
+11:31:11  INFO        ✓  tddft.inp terminó en 11.1 min
+11:31:11  INFO      [TDDFT]   ✓ conf_29  (11.1 min)
+11:31:11  INFO      [TDDFT] ── Lote 3/~2: ['conf_27']  (cores: ['4,5,6,7,8,9'])
+11:31:11  INFO        ▶  lanzando ORCA: tddft.inp  (cores 4,5,6,7,8,9)  [nohup]
+11:42:19  INFO        ✓  tddft.inp terminó en 11.1 min
+11:42:19  INFO      [TDDFT]   ✓ conf_27  (11.1 min)
+11:42:19  INFO      [TDDFT] 3/3 completados
+11:42:19  INFO      [TDDFT] 3 espectros calculados ✓
+11:42:19  INFO      [ADC2] no incluido en esta ejecución (opcional — usa --adc2 para activarla)
+11:42:19  INFO      ============================================================
+11:42:19  INFO      PIPELINE FINALIZADO  (requisito obligatorio SP fase-gas: OK)
+11:42:19  INFO      Resultados en: /home/kmilozeta/PAPER1/DG/runs/4DG_T
+11:42:19  INFO      ============================================================

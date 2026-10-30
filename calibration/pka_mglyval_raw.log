@@ -1,0 +1,64 @@
+/home/kmilozeta/PAPER1/maaqc.py:12171: UserWarning: [tautómero R⇌D] Could not verify charge between 'R' and 'D' (charge not determined from the ORCA .out for at least one of the two states). Manually verify that the expected charge relation (Δq=+0) is correct.
+  warnings.warn(f"[tautómero {mol_R}⇌{mol_D}] {msg}")
+/home/kmilozeta/PAPER1/maaqc.py:12171: UserWarning: [tautómero R⇌D] Could not verify atom count between 'R' and 'D' (atom count not determined from the ORCA .out for at least one of the two states). Manually verify that the expected relation (ΔN=+0) is correct.
+  warnings.warn(f"[tautómero {mol_R}⇌{mol_D}] {msg}")
+/home/kmilozeta/PAPER1/maaqc.py:12171: UserWarning: [tautómero R⇌D] No representative conformer for R.
+  warnings.warn(f"[tautómero {mol_R}⇌{mol_D}] {msg}")
+
+══════════════════════════════════════════════════════════════════════════
+  PROTONATION CYCLE  —  FAE-MAA / kmilozeta
+══════════════════════════════════════════════════════════════════════════
+  molécula : MGLYVAL
+  runs/ : /home/kmilozeta/PAPER1/MGLYVAL/runs
+  log   : /home/kmilozeta/PAPER1/MGLYVAL/logs/run_20261004_154250_465520_pid1450985.log
+
+══════════════════════════════════════════════════════════════════════════
+  PASADA 1/2  —  G_corr ARMÓNICO ESTÁNDAR (NumFreq, RRHO)
+══════════════════════════════════════════════════════════════════════════
+
+▸ Cargando catión protonado: A
+
+──────────────────────────────────────────────────────────────────────────
+  ESTADO: A
+──────────────────────────────────────────────────────────────────────────
+  ⚠  Sin datos.
+
+▸ Cargando estado neutro: R
+
+──────────────────────────────────────────────────────────────────────────
+  ESTADO: R
+──────────────────────────────────────────────────────────────────────────
+  ⚠  Sin datos.
+
+▸ Cargando zwitterión (tautómero de R): D
+
+──────────────────────────────────────────────────────────────────────────
+  ESTADO: D
+──────────────────────────────────────────────────────────────────────────
+  ⚠  Sin datos.
+
+▸ Cargando anión: B
+
+──────────────────────────────────────────────────────────────────────────
+  ESTADO: B
+──────────────────────────────────────────────────────────────────────────
+  ⚠  Sin datos.
+
+▸ Cargando dianión: C
+
+──────────────────────────────────────────────────────────────────────────
+  ESTADO: C
+──────────────────────────────────────────────────────────────────────────
+  ⚠  Sin datos.
+
+▸ Calculando equilibrio de tautómeros  (R ⇌ D)  @ T=298.15 K
+
+  ⚠  No se pudo calcular el equilibrio de tautómeros (R⇌D). Se continúa usando solo 'R' como estado neutro (f_R=100%, f_D=0%).
+    ⚠  Could not verify charge between 'R' and 'D' (charge not determined from the ORCA .out for at least one of the two states). Manually verify that the expected charge relation (Δq=+0) is correct.
+    ⚠  Could not verify atom count between 'R' and 'D' (atom count not determined from the ORCA .out for at least one of the two states). Manually verify that the expected relation (ΔN=+0) is correct.
+    ⚠  No representative conformer for R.
+
+  ⚠  Tampoco se pudo obtener G_total para 'R'. Abortando.
+
+  (log completo de esta corrida guardado en: /home/kmilozeta/PAPER1/MGLYVAL/logs/run_20261004_154250_465520_pid1450985.log)
+

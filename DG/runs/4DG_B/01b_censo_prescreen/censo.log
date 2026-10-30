@@ -1,0 +1,430 @@
+
+               ______________________________________________________________
+              |                                                              |
+              |                                                              |
+              |                   CENSO - Commandline ENSO                   |
+              |                         v 3.0.9.dev1                         |
+              |          energetic sorting of Conformer Rotamer Ensembles    |
+              |                    University of Bonn, MCTC                  |
+              |                           Oct 2024                           |
+              |                 based on ENSO version 2.0.1                  |
+              |             L. M. Seidler, F. Bohle and S. Grimme            |
+              |                                                              |
+              |______________________________________________________________|
+
+              Please cite:
+              (TBA)
+              S. Grimme, F. Bohle, A. Hansen, P. Pracht, S. Spicher, and M. Stahn
+              J. Phys. Chem. A 2021, 125, 19, 4039-4054.
+              DOI: https://doi.org/10.1021/acs.jpca.1c00971
+
+              This program is distributed in the hope that it will be useful,
+              but WITHOUT ANY WARRANTY; without even the implied warranty of
+              MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+
+CALL: /home/kmilozeta/miniforge3/envs/sciencebitch/bin/censo --prescreening --screening -i crest_conformers.xyz -c -1 -u 0 --solvent water --maxcores 12 --omp-min 4 -T 298.15
+Reading configuration file from /home/kmilozeta/.censo2rc.
+Read 50 conformers.
+
+
+Setting working directory to /home/kmilozeta/PAPER1/DG/runs/4DG_B/01b_censo_prescreen
+
+----------------------------------------------------------------------------------------------------
+                                              General                                               
+----------------------------------------------------------------------------------------------------
+    
+                                         sm_rrho : gbsa
+                                   evaluate_rrho : True
+                                       gas_phase : False
+                                         copy_mo : True
+                                         balance : True
+                                   ignore_failed : False
+                                     temperature : 298.15
+                                         imagthr : -100.0
+                                            sthr : 50.0
+                                         solvent : water
+
+----------------------------------------------------------------------------------------------------
+                                            Prescreening                                            
+----------------------------------------------------------------------------------------------------
+    
+                                            gfnv : gfn2
+                                            prog : orca
+                                        template : False
+                                       threshold : 4.0
+                                            func : b97-d3
+                                           basis : def2-sv(p)
+
+----------------------------------------------------------------------------------------------------
+                                             Screening                                              
+----------------------------------------------------------------------------------------------------
+    
+                                            gfnv : gfn2
+                                              sm : cpcm
+                                            prog : orca
+                                  gsolv_included : False
+                                        template : False
+                                       threshold : 3.5
+                                            func : r2scan-3c
+                                           basis : def2-mtzvpp
+
+----------------------------------------------------------------------------------------------------
+                                     PATHS of External Programs                                     
+----------------------------------------------------------------------------------------------------
+    
+                                            orca : /home/kmilozeta/orca_6_1_1_avx2/orca
+                                              tm : 
+                                             xtb : /home/kmilozeta/miniforge3/envs/sciencebitch/bin/xtb
+                                      cosmotherm : 
+                                    cosmorssetup : 
+
+----------------------------------------------------------------------------------------------------
+
+
+----------------------------------------------------------------------------------------------------
+                                            PRESCREENING                                            
+----------------------------------------------------------------------------------------------------
+    
+Running xtb_gsolv calculation for CONF1 using xtb.
+Running xtb_gsolv calculation for CONF2 using xtb.
+Running xtb_gsolv calculation for CONF3 using xtb.
+Running xtb_gsolv calculation for CONF49 using xtb.
+Running xtb_gsolv calculation for CONF50 using xtb.
+Running xtb_gsolv calculation for CONF47 using xtb.
+Running xtb_gsolv calculation for CONF48 using xtb.
+Running xtb_gsolv calculation for CONF46 using xtb.
+Running xtb_gsolv calculation for CONF45 using xtb.
+Running xtb_gsolv calculation for CONF44 using xtb.
+Running xtb_gsolv calculation for CONF43 using xtb.
+Running xtb_gsolv calculation for CONF42 using xtb.
+Running xtb_gsolv calculation for CONF41 using xtb.
+Running xtb_gsolv calculation for CONF40 using xtb.
+Running xtb_gsolv calculation for CONF39 using xtb.
+Running xtb_gsolv calculation for CONF38 using xtb.
+Running xtb_gsolv calculation for CONF37 using xtb.
+Running xtb_gsolv calculation for CONF36 using xtb.
+Running xtb_gsolv calculation for CONF35 using xtb.
+Running xtb_gsolv calculation for CONF34 using xtb.
+Running xtb_gsolv calculation for CONF33 using xtb.
+Running xtb_gsolv calculation for CONF32 using xtb.
+Running xtb_gsolv calculation for CONF31 using xtb.
+Running xtb_gsolv calculation for CONF30 using xtb.
+Running xtb_gsolv calculation for CONF29 using xtb.
+Running xtb_gsolv calculation for CONF28 using xtb.
+Running xtb_gsolv calculation for CONF27 using xtb.
+Running xtb_gsolv calculation for CONF26 using xtb.
+Running xtb_gsolv calculation for CONF25 using xtb.
+Running xtb_gsolv calculation for CONF24 using xtb.
+Running xtb_gsolv calculation for CONF23 using xtb.
+Running xtb_gsolv calculation for CONF22 using xtb.
+Running xtb_gsolv calculation for CONF21 using xtb.
+Running xtb_gsolv calculation for CONF20 using xtb.
+Running xtb_gsolv calculation for CONF19 using xtb.
+Running xtb_gsolv calculation for CONF18 using xtb.
+Running xtb_gsolv calculation for CONF17 using xtb.
+Running xtb_gsolv calculation for CONF16 using xtb.
+Running xtb_gsolv calculation for CONF15 using xtb.
+Running xtb_gsolv calculation for CONF14 using xtb.
+Running xtb_gsolv calculation for CONF13 using xtb.
+Running xtb_gsolv calculation for CONF12 using xtb.
+Running xtb_gsolv calculation for CONF11 using xtb.
+Running xtb_gsolv calculation for CONF10 using xtb.
+Running xtb_gsolv calculation for CONF9 using xtb.
+Running xtb_gsolv calculation for CONF8 using xtb.
+Running xtb_gsolv calculation for CONF7 using xtb.
+Running xtb_gsolv calculation for CONF6 using xtb.
+Running xtb_gsolv calculation for CONF5 using xtb.
+Running xtb_gsolv calculation for CONF4 using xtb.
+Running sp calculation for CONF1 using orca.
+Running sp calculation for CONF2 using orca.
+Running sp calculation for CONF3 using orca.
+Running sp calculation for CONF49 using orca.
+Running sp calculation for CONF50 using orca.
+Running sp calculation for CONF47 using orca.
+Running sp calculation for CONF48 using orca.
+Running sp calculation for CONF46 using orca.
+Running sp calculation for CONF45 using orca.
+Running sp calculation for CONF44 using orca.
+Running sp calculation for CONF43 using orca.
+Running sp calculation for CONF42 using orca.
+Running sp calculation for CONF41 using orca.
+Running sp calculation for CONF40 using orca.
+Running sp calculation for CONF39 using orca.
+Running sp calculation for CONF38 using orca.
+Running sp calculation for CONF37 using orca.
+Running sp calculation for CONF36 using orca.
+Running sp calculation for CONF35 using orca.
+Running sp calculation for CONF34 using orca.
+Running sp calculation for CONF33 using orca.
+Running sp calculation for CONF32 using orca.
+Running sp calculation for CONF31 using orca.
+Running sp calculation for CONF30 using orca.
+Running sp calculation for CONF29 using orca.
+Running sp calculation for CONF28 using orca.
+Running sp calculation for CONF27 using orca.
+Running sp calculation for CONF26 using orca.
+Running sp calculation for CONF25 using orca.
+Running sp calculation for CONF24 using orca.
+Running sp calculation for CONF23 using orca.
+Running sp calculation for CONF22 using orca.
+Running sp calculation for CONF21 using orca.
+Running sp calculation for CONF20 using orca.
+Running sp calculation for CONF19 using orca.
+Running sp calculation for CONF18 using orca.
+Running sp calculation for CONF17 using orca.
+Running sp calculation for CONF16 using orca.
+Running sp calculation for CONF15 using orca.
+Running sp calculation for CONF14 using orca.
+Running sp calculation for CONF13 using orca.
+Running sp calculation for CONF12 using orca.
+Running sp calculation for CONF11 using orca.
+Running sp calculation for CONF10 using orca.
+Running sp calculation for CONF9 using orca.
+Running sp calculation for CONF8 using orca.
+Running sp calculation for CONF7 using orca.
+Running sp calculation for CONF6 using orca.
+Running sp calculation for CONF5 using orca.
+Running sp calculation for CONF4 using orca.
+
+-------------------------------- PRESCREENING SINGLE-POINT RESULTS ---------------------------------
+
+CONF#      E (DFT)      ΔE (DFT)     ΔGsolv (xTB)      Gtot         ΔGtot       Boltzmann weight
+            [Eh]       [kcal/mol]     [kcal/mol]       [Eh]       [kcal/mol]     % at 298.15 K
+-------  -----------  ------------  --------------  -----------  ------------  ------------------
+CONF1    -686.544897      0.00        -56.617729    -686.635123      0.00            57.70
+CONF2    -686.536976      4.97        -59.278286    -686.631442      2.31             1.17
+CONF3    -686.544063      0.52        -56.689739    -686.634404      0.45            26.94
+CONF4    -686.536632      5.19        -59.360718    -686.631229      2.44             0.93
+CONF5    -686.538789      3.83        -57.490376    -686.630406      2.96             0.39
+CONF6    -686.534942      6.25        -60.509152    -686.631369      2.36             1.08
+CONF7    -686.539063      3.66        -57.435699    -686.630593      2.84             0.48
+CONF8    -686.532920      7.52        -60.626810    -686.629535      3.51             0.16
+CONF9    -686.537784      4.46        -58.959408    -686.631742      2.12             1.61
+CONF10   -686.532957      7.49        -60.710189    -686.629705      3.40             0.19
+CONF11   -686.540361      2.85        -57.586755    -686.632132      1.88             2.43
+CONF12   -686.537763      4.48        -59.069063    -686.631895      2.03             1.89
+CONF13   -686.534089      6.78        -60.624121    -686.630700      2.78             0.53
+CONF14   -686.539821      3.18        -57.596072    -686.631607      2.21             1.39
+CONF15   -686.536039      5.56        -59.262250    -686.630479      2.91             0.42
+CONF16   -686.536012      5.58        -59.090437    -686.630178      3.10             0.31
+CONF19   -686.534980      6.22        -59.226345    -686.629363      3.61             0.13
+CONF20   -686.534713      6.39        -59.379156    -686.629340      3.63             0.13
+CONF23   -686.532581      7.73        -61.539375    -686.630650      2.81             0.51
+CONF25   -686.527371     11.00        -63.922081    -686.629237      3.69             0.11
+CONF35   -686.539774      3.21        -56.957436    -686.630541      2.87             0.45
+CONF37   -686.532047      8.06        -61.667315    -686.630320      3.01             0.36
+CONF38   -686.531983      8.10        -61.686713    -686.630287      3.03             0.34
+CONF41   -686.533184      7.35        -60.294928    -686.629270      3.67             0.12
+CONF46   -686.539046      3.67        -57.041577    -686.629948      3.25             0.24
+
+Boltzmann averaged free energy/enthalpy of ensemble on input geometries (not DFT optimized):
+temperature /K:   avE(T) /a.u.   avG(T) /a.u.
+    298.15        -686.5435009    -686.6343373     <<==part0==
+----------------------------------------------------------------------------------------------------
+Ran prescreening in 773.31 seconds!
+
+----------------------------------------------------------------------------------------------------
+                                             SCREENING                                              
+----------------------------------------------------------------------------------------------------
+    
+Running gsolv calculation for CONF1 using orca.
+Running gsolv calculation for CONF2 using orca.
+Running gsolv calculation for CONF3 using orca.
+Running gsolv calculation for CONF46 using orca.
+Running gsolv calculation for CONF41 using orca.
+Running gsolv calculation for CONF37 using orca.
+Running gsolv calculation for CONF38 using orca.
+Running gsolv calculation for CONF35 using orca.
+Running gsolv calculation for CONF25 using orca.
+Running gsolv calculation for CONF23 using orca.
+Running gsolv calculation for CONF20 using orca.
+Running gsolv calculation for CONF19 using orca.
+Running gsolv calculation for CONF16 using orca.
+Running gsolv calculation for CONF15 using orca.
+Running gsolv calculation for CONF14 using orca.
+Running gsolv calculation for CONF13 using orca.
+Running gsolv calculation for CONF12 using orca.
+Running gsolv calculation for CONF11 using orca.
+Running gsolv calculation for CONF10 using orca.
+Running gsolv calculation for CONF9 using orca.
+Running gsolv calculation for CONF8 using orca.
+Running gsolv calculation for CONF7 using orca.
+Running gsolv calculation for CONF6 using orca.
+Running gsolv calculation for CONF5 using orca.
+Running gsolv calculation for CONF4 using orca.
+Running xtb_rrho calculation for CONF1 using xtb.
+Running xtb_rrho calculation for CONF2 using xtb.
+Running xtb_rrho calculation for CONF3 using xtb.
+Running xtb_rrho calculation for CONF46 using xtb.
+Running xtb_rrho calculation for CONF38 using xtb.
+Running xtb_rrho calculation for CONF37 using xtb.
+Running xtb_rrho calculation for CONF41 using xtb.
+Running xtb_rrho calculation for CONF35 using xtb.
+Running xtb_rrho calculation for CONF25 using xtb.
+Running xtb_rrho calculation for CONF23 using xtb.
+Running xtb_rrho calculation for CONF20 using xtb.
+Running xtb_rrho calculation for CONF19 using xtb.
+Running xtb_rrho calculation for CONF16 using xtb.
+Running xtb_rrho calculation for CONF15 using xtb.
+Running xtb_rrho calculation for CONF14 using xtb.
+Running xtb_rrho calculation for CONF13 using xtb.
+Running xtb_rrho calculation for CONF12 using xtb.
+Running xtb_rrho calculation for CONF11 using xtb.
+Running xtb_rrho calculation for CONF10 using xtb.
+Running xtb_rrho calculation for CONF9 using xtb.
+Running xtb_rrho calculation for CONF8 using xtb.
+Running xtb_rrho calculation for CONF7 using xtb.
+Running xtb_rrho calculation for CONF6 using xtb.
+Running xtb_rrho calculation for CONF5 using xtb.
+Running xtb_rrho calculation for CONF4 using xtb.
+Updated fuzzy threshold: 3.71 kcal/mol.
+
+----------------------------- SCREENING SINGLE-POINT (+ mRRHO) RESULTS -----------------------------
+
+CONF#      E (DFT)       ΔGsolv      GmRRHO      Gtot         ΔGtot       Boltzmann weight
+            [Eh]       [kcal/mol]     [Eh]       [Eh]       [kcal/mol]     % at 298.15 K
+-------  -----------  ------------  --------  -----------  ------------  ------------------
+CONF1    -687.529623   -60.155605   0.141690  -687.483798      0.14            12.86
+CONF2    -687.522425   -63.488885   0.141568  -687.482033      1.25             1.98
+CONF3    -687.528852   -60.688688   0.141542  -687.484023      0.00            16.33
+CONF4    -687.522337   -63.463420   0.141478  -687.481994      1.27             1.90
+CONF5    -687.525389   -61.674892   0.141618  -687.482057      1.23             2.03
+CONF6    -687.521152   -64.050504   0.141112  -687.482111      1.20             2.15
+CONF7    -687.525513   -61.660869   0.141700  -687.482076      1.22             2.08
+CONF8    -687.520084   -64.238175   0.141355  -687.481098      1.84             0.74
+CONF9    -687.522938   -63.237269   0.141454  -687.482259      1.11             2.52
+CONF10   -687.519893   -64.528900   0.141436  -687.481290      1.71             0.90
+CONF11   -687.525264   -62.021246   0.141364  -687.482737      0.81             4.18
+CONF12   -687.522946   -63.218175   0.141389  -687.482301      1.08             2.64
+CONF13   -687.520276   -64.456845   0.140996  -687.481999      1.27             1.91
+CONF14   -687.524623   -62.322068   0.141234  -687.482706      0.83             4.05
+CONF15   -687.520726   -64.610389   0.141172  -687.482517      0.95             3.31
+CONF16   -687.520772   -64.306289   0.140453  -687.482798      0.77             4.46
+CONF19   -687.521402   -63.352187   0.141404  -687.480955      1.93             0.63
+CONF20   -687.521422   -63.473854   0.140425  -687.482150      1.18             2.24
+CONF23   -687.517739   -66.797379   0.141151  -687.483036      0.62             5.74
+CONF25   -687.513364   -68.704160   0.141090  -687.481762      1.42             1.49
+CONF35   -687.524672   -62.272142   0.140893  -687.483015      0.63             5.61
+CONF37   -687.517354   -67.000531   0.141036  -687.483090      0.59             6.08
+CONF38   -687.517344   -66.955888   0.141058  -687.482987      0.65             5.45
+CONF41   -687.519331   -64.875300   0.140778  -687.481938      1.31             1.79
+CONF46   -687.524057   -62.728606   0.140812  -687.483209      0.51             6.90
+
+Boltzmann averaged free energy/enthalpy of ensemble on input geometries (not DFT optimized):
+temperature /K:   avE(T) /a.u.   avG(T) /a.u.
+    298.15        -687.5236839    -687.4829927     <<==part1==
+----------------------------------------------------------------------------------------------------
+Ran screening in 2280.52 seconds!
+
+Finished ensemble optimization
+
+
+------------------------------------- FINAL RANKING COMPARISON -------------------------------------
+
+ CONF#    ΔGtot Prescreening    ΔGtot Screening
+              [kcal/mol]          [kcal/mol]
+-------  --------------------  -----------------
+ CONF1           0.00                0.14
+ CONF2           2.31                1.25
+ CONF3           0.45                0.00
+ CONF4           2.44                1.27
+ CONF5           2.96                1.23
+ CONF6           2.36                1.20
+ CONF7           2.84                1.22
+ CONF8           3.51                1.84
+ CONF9           2.12                1.11
+CONF10           3.40                1.71
+CONF11           1.88                0.81
+CONF12           2.03                1.08
+CONF13           2.78                1.27
+CONF14           2.21                0.83
+CONF15           2.91                0.95
+CONF16           3.10                0.77
+CONF19           3.61                1.93
+CONF20           3.63                1.18
+CONF23           2.81                0.62
+CONF25           3.69                1.42
+CONF35           2.87                0.63
+CONF37           3.01                0.59
+CONF38           3.03                0.65
+CONF41           3.67                1.31
+CONF46           3.25                0.51
+----------------------------------------------------------------------------------------------------
+
+
+Timings:
+       Prescreening: 00:12:53  ( 25.3 %)
+          Screening: 00:38:00  ( 74.7 %)
+========================================
+
+Total CENSO runtime: 00:50:53
+
+CENSO all done!
+/CONF17/sp on 4 cores using orca.
+2026-10-05 11:54:38,354 -censo.processing.processor-   INFO   - worker1728369:Running sp calculation using OrcaProc in 0_PRESCREENING/CONF16/sp on 4 cores using orca.
+2026-10-05 11:55:23,845 -censo.processing.processor-   INFO   - worker1728369:Running sp calculation using OrcaProc in 0_PRESCREENING/CONF15/sp on 4 cores using orca.
+2026-10-05 11:55:25,738 -censo.processing.processor-   INFO   - worker1728369:Running sp calculation using OrcaProc in 0_PRESCREENING/CONF14/sp on 4 cores using orca.
+2026-10-05 11:55:26,171 -censo.processing.processor-   INFO   - worker1728369:Running sp calculation using OrcaProc in 0_PRESCREENING/CONF13/sp on 4 cores using orca.
+2026-10-05 11:56:06,176 -censo.processing.processor-   INFO   - worker1728369:Running sp calculation using OrcaProc in 0_PRESCREENING/CONF12/sp on 4 cores using orca.
+2026-10-05 11:56:11,457 -censo.processing.processor-   INFO   - worker1728369:Running sp calculation using OrcaProc in 0_PRESCREENING/CONF11/sp on 4 cores using orca.
+2026-10-05 11:56:12,518 -censo.processing.processor-   INFO   - worker1728369:Running sp calculation using OrcaProc in 0_PRESCREENING/CONF10/sp on 4 cores using orca.
+2026-10-05 11:56:52,222 -censo.processing.processor-   INFO   - worker1728369:Running sp calculation using OrcaProc in 0_PRESCREENING/CONF9/sp on 4 cores using orca.
+2026-10-05 11:56:56,544 -censo.processing.processor-   INFO   - worker1728369:Running sp calculation using OrcaProc in 0_PRESCREENING/CONF8/sp on 4 cores using orca.
+2026-10-05 11:56:56,767 -censo.processing.processor-   INFO   - worker1728369:Running sp calculation using OrcaProc in 0_PRESCREENING/CONF7/sp on 4 cores using orca.
+2026-10-05 11:57:35,596 -censo.processing.processor-   INFO   - worker1728369:Running sp calculation using OrcaProc in 0_PRESCREENING/CONF6/sp on 4 cores using orca.
+2026-10-05 11:57:40,895 -censo.processing.processor-   INFO   - worker1728369:Running sp calculation using OrcaProc in 0_PRESCREENING/CONF5/sp on 4 cores using orca.
+2026-10-05 11:57:42,071 -censo.processing.processor-   INFO   - worker1728369:Running sp calculation using OrcaProc in 0_PRESCREENING/CONF4/sp on 4 cores using orca.
+2026-10-05 11:58:20,634 -     censo.parallel     -   INFO   - All jobs executed successfully.
+2026-10-05 11:58:20,781 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF1/gsolv on 4 cores using orca.
+2026-10-05 11:58:20,784 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF2/gsolv on 4 cores using orca.
+2026-10-05 11:58:20,989 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF3/gsolv on 4 cores using orca.
+2026-10-05 12:02:30,368 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF46/gsolv on 12 cores using orca.
+2026-10-05 12:03:11,231 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF41/gsolv on 4 cores using orca.
+2026-10-05 12:03:11,231 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF37/gsolv on 4 cores using orca.
+2026-10-05 12:03:11,233 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF38/gsolv on 4 cores using orca.
+2026-10-05 12:07:50,974 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF35/gsolv on 4 cores using orca.
+2026-10-05 12:07:59,433 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF25/gsolv on 4 cores using orca.
+2026-10-05 12:08:06,174 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF23/gsolv on 4 cores using orca.
+2026-10-05 12:11:48,919 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF20/gsolv on 4 cores using orca.
+2026-10-05 12:12:47,722 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF19/gsolv on 4 cores using orca.
+2026-10-05 12:13:07,277 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF16/gsolv on 4 cores using orca.
+2026-10-05 12:16:23,869 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF15/gsolv on 4 cores using orca.
+2026-10-05 12:17:45,270 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF14/gsolv on 4 cores using orca.
+2026-10-05 12:17:52,731 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF13/gsolv on 4 cores using orca.
+2026-10-05 12:20:53,980 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF12/gsolv on 4 cores using orca.
+2026-10-05 12:21:43,013 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF11/gsolv on 4 cores using orca.
+2026-10-05 12:22:50,837 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF10/gsolv on 4 cores using orca.
+2026-10-05 12:25:40,033 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF9/gsolv on 4 cores using orca.
+2026-10-05 12:25:45,680 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF8/gsolv on 4 cores using orca.
+2026-10-05 12:28:21,933 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF7/gsolv on 4 cores using orca.
+2026-10-05 12:30:38,120 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF6/gsolv on 4 cores using orca.
+2026-10-05 12:30:56,507 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF5/gsolv on 4 cores using orca.
+2026-10-05 12:33:14,965 -censo.processing.processor-   INFO   - worker1728369:Running gsolv calculation using OrcaProc in 1_SCREENING/CONF4/gsolv on 4 cores using orca.
+2026-10-05 12:36:09,762 -     censo.parallel     -   INFO   - All jobs executed successfully.
+2026-10-05 12:36:09,851 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF1/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:09,863 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF2/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:09,867 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF3/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:11,298 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF46/xtb_rrho on 12 cores using xtb.
+2026-10-05 12:36:12,046 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF38/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:12,046 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF37/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:12,046 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF41/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:13,225 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF35/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:13,231 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF25/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:13,332 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF23/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:14,220 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF20/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:14,320 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF19/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:14,416 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF16/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:15,151 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF15/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:15,600 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF14/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:16,123 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF13/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:16,649 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF12/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:17,173 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF11/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:17,696 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF10/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:18,114 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF9/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:18,949 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF8/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:19,149 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF7/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:19,261 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF6/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:20,003 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF5/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:20,209 -censo.processing.processor-   INFO   - worker1728369:Running xtb_rrho calculation using XtbProc in 1_SCREENING/CONF4/xtb_rrho on 4 cores using xtb.
+2026-10-05 12:36:21,157 -     censo.parallel     -   INFO   - All jobs executed successfully.

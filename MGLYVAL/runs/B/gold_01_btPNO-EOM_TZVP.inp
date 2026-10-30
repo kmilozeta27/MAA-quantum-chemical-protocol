@@ -1,0 +1,25 @@
+! bt-PNO-EOM-CCSD def2-TZVP def2-TZVP/C def2/J TightSCF TightPNO MOREAD
+
+%moinp "gold_scf_cromoforo.gbw"
+
+%pal
+  nprocs 4
+end
+
+%maxcore 3000
+
+%scf
+  MaxIter 300          # sin STABPerform: ya salió estable (menor autovalor +0.034 Eh)
+end
+
+%mdci
+  NRoots 3
+  NDav 8               # espacio reducido máx. = 8 x 3 = 24 vectores
+  NInits 4             # guía inicial = 4 x 3 = 12 vectores (default: 120)
+  MaxIter 200
+  DTol 1e-6
+  DLPNOLINEAR true
+  NEWDOMAINS true
+end
+
+* xyzfile 0 1 cromoforo_S1.xyz
