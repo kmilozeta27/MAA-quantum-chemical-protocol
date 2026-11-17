@@ -105,7 +105,8 @@ opposite ways.**
 The protocol was calibrated against aspartic acid, glutamic acid, glycine, valine and
 4-aminopyridine, grouped by *type* of deprotonation. The same cycle at the same level of
 theory reproduces first-carboxyl deprotonations closely. For an ammonium group flanked by two
-carboxylates (glutamic acid, −1 → −2) it misses by **about eight pKa units**. A single global
+carboxylates (glutamic acid, −1 → −2) the raw cycle overshoots by **about six pKa units**
+(+6.0 with SMD and the direct cycle; the earlier Born/CPCM cycle gave about eight). A single global
 correction would average these two cases and be wrong for both. The pipeline therefore
 calibrates per class and **refuses** to apply a calibrator across charge classes unless the
 user explicitly overrides it. Three MAAs (shinorine, porphyra-334, mycosporine-glycine:valine)
@@ -121,10 +122,12 @@ its three physical components (−270.29 kcal/mol) removed a systematic error fr
 project. With the corrected constant, the two cycle variants become algebraically identical,
 which the pipeline uses as an implementation check.
 
-**3. Every conformer converged.**
-For all ten compounds and every protonation state, all dominant conformers selected by CENSO
-converged through DFT optimisation, frequency verification, single points and TD-DFT. No
-structure had to be discarded.
+**3. Convergence is not uniform, and it is checked per conformer.**
+Not every stage has been completed for every compound (see [Status](#status)). For
+mycosporine-glycine:valine B, CENSO kept 33 conformers and six were optimised; two of those
+(conf_004, conf_005) retain small imaginary frequencies (−8.7 and −17.6 cm⁻¹) that still have to
+be re-optimised or documented. The pipeline verifies optimisation convergence, absence of
+imaginary modes and normal termination for each output instead of assuming them.
 
 ---
 
@@ -199,8 +202,8 @@ predominant species can differ from the one at pH 7.
 ├── calibration/          # pKa calibration fits (JSON/CSV) and raw logs
 ├── CALIBRATIONS/         # reference amino acids used to calibrate the pKa cycle
 │   └── <ASPARTIC|GLUTAMIC|GLYCINE|VALINE>/molecules/*.xyz
-├── AP/                   # 4-aminopyridine (pyridinium calibrator), complete run record
-├── DG/                   # 4-deoxygadusol, complete run record
+├── AP/                   # 4-aminopyridine (the only pyridinium calibrator; 6 stages, 1 conformer each)
+├── DG/                   # 4-deoxygadusol (partial: 4DG_A/T through TD-DFT; 4DG_B incomplete)
 ├── MGLYVAL/              # mycosporine-glycine:valine (reference MAA of the project)
 ├── SHINORINE/ PORPHYRA-334/ PALYTHINE/ MGLY/ GADUSOL/   # starting geometries
 ├── QCG/                  # explicit-solvation test (CREST quantum cluster growth, water shell)
@@ -267,16 +270,20 @@ English.
 These limits are stated up front:
 
 - **Implicit solvent.** A dielectric continuum cannot represent hydrogen bonds to first-shell
-  water. The eight-unit pKa error above is one measurable consequence. The `QCG/` folder holds a
+  water. The roughly six-unit pKa error above (eight with the earlier Born/CPCM cycle) is one measurable consequence. The `QCG/` folder holds a
   first test with explicit water molecules.
 - **Vertical, single-reference excited states.** TD-DFT predicts *where* a molecule absorbs,
   not how efficiently it turns that energy into heat.
-- **The functional error has not been benchmarked yet.** The protonated MAA chromophore is
+- **The functional error is only partly benchmarked.** The protonated MAA chromophore is
   cyanine-like, and TD-DFT is known to overestimate excitation energies systematically for
-  such systems. The next step is a coupled-cluster (STEOM-DLPNO-CCSD) reference on a truncated
-  chromophore model, validated against the full molecule. At the triple-zeta level this
-  calculation is beyond what a laptop can run, which makes it the main resource bottleneck of
-  the project.
+  such systems. A first coupled-cluster reference already exists: STEOM-DLPNO-CCSD on the full
+  mycosporine-glycine:valine B molecule (def2-SVP, def2-SVPD, ma-def2-SVP, CPCM) gives
+  3.41–3.62 eV, against 4.20 eV for ωB97X-D3 and an experimental maximum of 3.70 eV (335 nm).
+  Still missing: the triple-zeta increment (def2-TZVP; the maTZVP attempt failed) and the
+  bt-PNO-EOM-CCSD reference (the first attempt failed). A truncated-chromophore model has not yet
+  been validated against the full molecule. ADC(2) was cut by a timeout and its only table is
+  not the bright state, so it is not used. At the triple-zeta level the remaining calculations
+  are beyond what a laptop can run comfortably, which makes them the main resource bottleneck.
 - **Not yet run:** a direct comparison against structures rebuilt exactly as the published
   docking studies built them (ten single points). This comparison turns the paper's central
   argument into a measurement.
@@ -288,14 +295,19 @@ These limits are stated up front:
 | Component | Status |
 |---|---|
 | Automated pipeline, all stages | ✅ Built and running |
-| Conformer search, DFT optimisation, frequencies, single points, TD-DFT (10 compounds) | ✅ Done |
+| MGLYVAL B: CREST → CENSO → 6 conformers: optimisation, frequencies, single points (6/6) | ✅ Done (2 conformers with small imaginary modes) |
+| MGLYVAL B TD-DFT | 🔄 Done, re-run by hand for conf_5 / conf_6 |
+| MGLYVAL A / R / D / C | 🔄 Single points (CPCM) reported in the log; `pka` has not yet completed in this layout |
+| AP (APA / APR) | ✅ 6 stages, 1 conformer each |
+| DG | 🔄 4DG_A/T: optimisation, frequencies, single points, TD-DFT (no SP_GAS/SP_SMD). 4DG_B: 7 optimisations, 3 of 4 NumFreq, no SP or TD-DFT |
+| Wave-function reference (STEOM-DLPNO-CCSD) | 🔄 SVP / SVPD / ma-SVP / CPCM done; TZVP and bt-PNO-EOM missing; ADC(2) incomplete |
 | Thermodynamic pKa cycle with unified proton reference | ✅ Implemented |
 | Monte Carlo uncertainty (correlated proton error across the chain) | ✅ Implemented |
 | Class-resolved calibration | 🔄 Framework built; calibration set being extended |
 | ESP / orbital / NTO analysis | 🔄 Computed, being organised |
 | Tabulation of results for the manuscript | 🔄 In progress |
 | Comparison against database-derived structures | ⏳ Next |
-| Wave-function benchmark (coupled cluster) | ⏳ Needs computing resources beyond a laptop |
+| Wave-function benchmark, triple-zeta increment | ⏳ Needs computing resources beyond a laptop |
 | Re-docking with corrected structures | Follow-up project |
 
 ---

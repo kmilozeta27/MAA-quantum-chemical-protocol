@@ -84,11 +84,11 @@ def test_check_no_imaginary_synthetic(tmp_path):
 
 @needs(REAL_ADC2)
 def test_extract_adc2_lambda_real():
-    res = m.extract_adc2_lambda(REAL_ADC2)
-    assert res is not None
-    lam, ev, fosc = res
-    assert 150 < lam < 600 and 2 < ev < 9 and fosc >= 0
-    assert math.isclose(lam, 1239.84198 / ev, rel_tol=5e-3)
+    # adc2.out real de MGLYVAL/B/07_adc2/conf_006 fue cortado por timeout
+    # (sin TERMINATED NORMALLY): el extractor no debe fiarse de él.
+    assert not m.check_success(REAL_ADC2)
+    assert m.extract_adc2_lambda(REAL_ADC2) is None
+    assert m.parse_adc2_excitations(REAL_ADC2) == []
 
 
 # ── constantes del protón dependientes de T ──────────────────────────────────
@@ -345,3 +345,511 @@ def test_setup_logging_distinct_per_path(tmp_path):
         for h in list(lg.handlers):
             h.close()
             lg.removeHandler(h)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  P0-2 · P0-3 · P0-5 · P0-7  (fixtures sintéticos en tmp_path)
+# ═════════════════════════════════════════════════════════════════════════════
+
+import numpy as np
+
+_ABS_BLOCK = (
+    "-----\n ABSORPTION SPECTRUM VIA TRANSITION ELECTRIC DIPOLE MOMENTS\n-----\n"
+    "     Transition      Energy     Energy  Wavelength fosc(D2)\n-----\n"
+    "  0-1A  ->  1-1A    {ev:.6f}   28000.0   {nm:.1f}   0.400000000   4.0  0.1  0.1  0.1\n"
+    "-----\n ABSORPTION SPECTRUM VIA TRANSITION VELOCITY DIPOLE MOMENTS\n"
+)
+
+
+def _mk_sp(path: Path, e: float):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"FINAL SINGLE POINT ENERGY      {e:.8f}\n****ORCA TERMINATED NORMALLY****\n")
+
+
+# ── P0-2: ids numéricos de conformero ────────────────────────────────────────
+
+def test_conf_num_numeric_ids():
+    assert m._conf_num("conf_5") == m._conf_num("conf_005") == 5
+    assert m._conf_num("conf_6_PBE0") is None
+    assert m._conf_num("conf6") is None and m._conf_num("sel") is None
+
+
+def test_collect_tddft_includes_all_conformer_dir_names(tmp_path, monkeypatch):
+    """conf_5/conf_6 (hechos a mano) deben cruzarse con conf_005/conf_006 de
+    04_sp y con sus pesos de Boltzmann; conf_6_PBE0 no es parte del ensemble."""
+    mol = tmp_path / "X"
+    energies = {"conf_001": -100.000, "conf_004": -99.999,
+                "conf_005": -99.998, "conf_006": -100.002}   # 006 = dominante
+    for cid, e in energies.items():
+        _mk_sp(mol / "04_sp" / cid / "sp.out", e)
+    _mk_sp(mol / "04_sp" / "conf_6_PBE0" / "sp.out", -100.5)   # no debe entrar
+    for cid, tdir, ev in (("conf_001", "conf_001", 3.5), ("conf_004", "conf_004", 3.6),
+                          ("conf_005", "conf_5", 3.7), ("conf_006", "conf_6", 3.4),
+                          (None, "conf_6_PBE0", 4.2)):
+        d = mol / "05_tddft" / tdir
+        d.mkdir(parents=True)
+        (d / "tddft.out").write_text(_ABS_BLOCK.format(ev=ev, nm=1239.84198 / ev))
+    monkeypatch.setattr(m, "RC_WORK_ROOT", tmp_path)
+    with pytest.warns(UserWarning):          # sin NumFreq: Boltzmann solo electrónico
+        df_conf, df_tddft = m.collect_results("X")
+    assert sorted(df_conf["conformer"]) == sorted(energies)
+    assert "conf_6_PBE0" not in set(df_conf["conformer"])
+    s1 = df_tddft[df_tddft["state"] == 1]
+    assert sorted(s1["conformer"]) == sorted(energies)          # 4/4, no 2/4
+    assert not s1["E_eV"].eq(4.2).any()
+    w = df_conf.set_index("conformer")["boltz_298K"]
+    assert w.sum() == pytest.approx(1.0)
+    assert w.idxmax() == "conf_006"
+    assert df_conf.attrs["lambda_max_boltz_298K"] > 0   # el cruce con pesos no pierde conf_5/6
+
+
+def test_ensemble_conf_dirs_duplicates_prefer_file(tmp_path):
+    (tmp_path / "conf_6").mkdir()
+    d = tmp_path / "conf_006"
+    d.mkdir()
+    (d / "tddft.out").write_text("x")
+    with pytest.warns(UserWarning):
+        got = m._ensemble_conf_dirs(tmp_path, "tddft.out")
+    assert [g.name for g in got] == ["conf_006"]
+
+
+# ── P0-3: CENSO ausente aborta ───────────────────────────────────────────────
+
+def _patch_censo_missing(monkeypatch):
+    def boom(*a, **k):
+        raise FileNotFoundError("censo")
+    monkeypatch.setattr(m, "_acquire_cpu_pool", lambda *a, **k: [0, 1])
+    monkeypatch.setattr(m, "_reconcile_censo_budget", lambda *a, **k: (2, 1))
+    monkeypatch.setattr(m, "_cpu_lock_release", lambda: None)
+    monkeypatch.setattr(m, "_run_censo_locked", boom)
+
+
+def test_censo_missing_aborts(tmp_path, monkeypatch):
+    xyz = tmp_path / "crest_conformers.xyz"
+    xyz.write_text("1\nE=-1.0\nH 0 0 0\n")
+    _patch_censo_missing(monkeypatch)
+    monkeypatch.setattr(m, "ALLOW_NO_CENSO", False)
+    with pytest.raises(m.CensoUnavailableError):
+        m.stage_censo_prescreen(xyz, tmp_path / "run", 0, LOG)
+    # con el flag explícito se recupera el comportamiento antiguo (con aviso)
+    monkeypatch.setattr(m, "ALLOW_NO_CENSO", True)
+    assert m.stage_censo_prescreen(xyz, tmp_path / "run", 0, LOG) == xyz
+
+
+# ── P0-5: calibración obsoleta fuera del camino por defecto ──────────────────
+
+def _fake_calib(**kw):
+    return {"amino": [
+        {"mol": "A", "calc_harmonic": 10.0, "calc_goodvibes": 10.0, "exp": 9.0, "exp_ref": "t"},
+        {"mol": "B", "calc_harmonic": 12.0, "calc_goodvibes": 12.0, "exp": 9.5, "exp_ref": "t"},
+    ]}
+
+
+def test_calibration_file_overrides_builtin(tmp_path, monkeypatch):
+    import copy
+    monkeypatch.setattr(m, "EMPIRICAL_CALIBRATION", copy.deepcopy(m.EMPIRICAL_CALIBRATION))
+    before = m.fit_empirical_correction("amino", mode="offset")["intercept"]
+    f = tmp_path / "cal.json"
+    f.write_text(json.dumps({"meta": {"T": 298.15}, "EMPIRICAL_CALIBRATION": {
+        "amino": [{"mol": "Z1", "calc_goodvibes": 20.0, "calc_harmonic": 20.0, "exp": 10.0},
+                  {"mol": "Z2", "calc_goodvibes": 22.0, "calc_harmonic": 22.0, "exp": 12.0}]}}))
+    meta = m.load_calibration_file(f)
+    assert meta["T"] == 298.15
+    fit = m.fit_empirical_correction("amino", mode="offset")
+    assert fit["molecules"] == ["Z1", "Z2"] and fit["intercept"] == pytest.approx(-10.0)
+    assert fit["intercept"] != pytest.approx(before)
+    # los tipos que el archivo no trae se conservan
+    assert "carboxyl" in m.EMPIRICAL_CALIBRATION
+
+
+def test_empirical_correction_requires_calibration_file(tmp_path):
+    with pytest.raises(SystemExit, match="calibration"):
+        m.resolve_calibration_source(None, "pKa0=carboxyl", search_roots=[tmp_path])
+    # archivo explícito gana; sin --empirical-correction no hace falta nada
+    assert m.resolve_calibration_source("x.json", "pKa0=carboxyl") == Path("x.json")
+    assert m.resolve_calibration_source(None, None, search_roots=[tmp_path]) is None
+    # escape explícito
+    assert m.resolve_calibration_source(None, "pKa0=carboxyl", allow_builtin=True,
+                                        search_roots=[tmp_path]) is None
+    # calibration_v3.json por defecto, si existe
+    (tmp_path / "calibration").mkdir()
+    (tmp_path / "calibration" / "calibration_v3.json").write_text("{}")
+    got = m.resolve_calibration_source(None, "pKa0=carboxyl", search_roots=[tmp_path])
+    assert got == tmp_path / "calibration" / "calibration_v3.json"
+
+
+def test_refuses_cross_class_without_force(monkeypatch):
+    import copy
+    monkeypatch.setattr(m, "EMPIRICAL_CALIBRATION", copy.deepcopy(_fake_calib()))
+    monkeypatch.setitem(m.EMPIRICAL_OPTS, "force_class", False)
+    # 'amino' es 0→−1; el tramo a corregir es B→C (−1→−2)
+    res = m.apply_empirical_correction(15.0, "amino", mode="offset",
+                                       pka_result={"q_acid": -1, "q_base": -2})
+    assert not res["ok"] and "clase de carga" in res["reason"]
+    # misma clase → se aplica
+    ok = m.apply_empirical_correction(15.0, "amino", mode="offset",
+                                      pka_result={"q_acid": 0, "q_base": -1})
+    assert ok["ok"]
+    # forzado
+    monkeypatch.setitem(m.EMPIRICAL_OPTS, "force_class", True)
+    forced = m.apply_empirical_correction(15.0, "amino", mode="offset",
+                                          pka_result={"q_acid": -1, "q_base": -2})
+    assert forced["ok"]
+
+
+# ── P0-7: ajuste empírico ────────────────────────────────────────────────────
+
+def _calib_xy(monkeypatch, pts):
+    monkeypatch.setattr(m, "EMPIRICAL_CALIBRATION", {"t": [
+        {"mol": f"M{i}", "calc_goodvibes": x, "calc_harmonic": x, "exp": y}
+        for i, (x, y) in enumerate(pts)]})
+
+
+def test_fit_empirical_offset_n1_rmse_nan(monkeypatch):
+    _calib_xy(monkeypatch, [(11.0, 9.0)])
+    monkeypatch.setitem(m.EMPIRICAL_OPTS, "allow_n1", False)
+    assert not m.fit_empirical_correction("t")["ok"]          # n=1 rechazado por defecto
+    monkeypatch.setitem(m.EMPIRICAL_OPTS, "allow_n1", True)
+    fit = m.fit_empirical_correction("t")
+    assert fit["ok"] and fit["n"] == 1 and fit["mode"] == "offset"
+    assert math.isnan(fit["rmse"]) and math.isnan(fit["loo_rmse"])
+    assert fit["slope"] == 1.0 and fit["intercept"] == pytest.approx(-2.0)
+
+
+def test_fit_auto_switches_to_linear_n3_span1(monkeypatch):
+    _calib_xy(monkeypatch, [(2.0, 1.0), (3.0, 2.2), (4.0, 2.9)])    # rango = 2 ≥ 1
+    assert m.fit_empirical_correction("t")["mode"] == "linear"
+    _calib_xy(monkeypatch, [(2.0, 1.0), (2.4, 1.5), (2.8, 2.1)])    # rango = 0.8 < 1
+    fit = m.fit_empirical_correction("t")
+    assert fit["mode"] == "offset" and fit["slope"] == 1.0
+    assert any("rango" in w for w in fit["warnings"])
+    _calib_xy(monkeypatch, [(2.0, 1.0), (3.0, 2.2)])                # n=2 → offset
+    assert m.fit_empirical_correction("t")["mode"] == "offset"
+
+
+def test_loo_rmse_two_points(monkeypatch):
+    _calib_xy(monkeypatch, [(10.0, 8.0), (12.0, 9.0)])   # sesgos −2 y −3
+    fit = m.fit_empirical_correction("t", mode="offset")
+    assert fit["intercept"] == pytest.approx(-2.5)
+    assert fit["loo_rmse"] == pytest.approx(1.0)         # |b0 − b1|
+    assert fit["rmse"] == pytest.approx(0.5)
+
+
+# ── P0-7: especiación ────────────────────────────────────────────────────────
+
+def test_speciation_fractions_sum_to_one_and_monotonic():
+    phs = [float(x) for x in np.arange(0, 14.5, 0.5)]
+    d = m.boltzmann_protonation_states(3.0, 9.0, phs)
+    tot = d["f_neutral"] + d["f_anion"] + d["f_dianion"]
+    assert np.allclose(tot, 1.0)
+    assert d["f_neutral"].is_monotonic_decreasing
+    assert d["f_dianion"].is_monotonic_increasing
+    d5 = m.boltzmann_5state(2.0, 5.0, 9.0, 0.3, 0.7, phs)
+    tot5 = d5["f_cation"] + d5["f_R"] + d5["f_D"] + d5["f_anion"] + d5["f_dianion"]
+    assert np.allclose(tot5, 1.0)
+    assert d5["f_cation"].is_monotonic_decreasing
+    assert d5["f_dianion"].is_monotonic_increasing
+    # pH = pKa → mitad/mitad en el par de dos estados
+    d1 = m.boltzmann_protonation_states(7.0, None, [7.0])
+    assert d1["f_neutral"][0] == pytest.approx(0.5)
+
+
+# ── P0-7: Monte Carlo ────────────────────────────────────────────────────────
+
+def _fake_compute_pka(monkeypatch):
+    monkeypatch.setattr(
+        m, "compute_pka",
+        lambda *a, **k: {"ok": True, "dG_aq_kcal": 13.0, "method": "direct", "warnings": []})
+
+
+def test_mc_reproducible_with_seed(monkeypatch):
+    _fake_compute_pka(monkeypatch)
+    kw = dict(data_A={"a": 1}, data_neutral_macro={"n": 1}, data_B={"b": 1},
+              data_C={"c": 1}, f_R=1.0, f_D=0.0, pH_values=[7.0, 8.1], n_samples=500)
+    r1 = m.run_chain_montecarlo(seed=7, **kw)
+    r2 = m.run_chain_montecarlo(seed=7, **kw)
+    r3 = m.run_chain_montecarlo(seed=8, **kw)
+    assert r1["ok"]
+    for k in ("mc_pka0", "mc_pka1", "mc_pka2"):
+        assert np.array_equal(r1[k]["pka_samples"], r2[k]["pka_samples"])
+    assert not np.array_equal(r1["mc_pka1"]["pka_samples"], r3["mc_pka1"]["pka_samples"])
+    assert r1["df_dist_bands"].equals(r2["df_dist_bands"])
+
+
+def test_mc_shared_proton_draw_reduces_dpKa_variance(monkeypatch):
+    _fake_compute_pka(monkeypatch)
+    n = 4000
+    rng = np.random.default_rng(1)
+    shared = rng.normal(0.0, 2.5, size=n)
+
+    def two(shared_draw):
+        a = m.compute_pka_montecarlo({}, {}, n_samples=n, shared_hplus_draw=shared_draw,
+                                     rng=np.random.default_rng(11))
+        b = m.compute_pka_montecarlo({}, {}, n_samples=n, shared_hplus_draw=shared_draw,
+                                     rng=np.random.default_rng(12))
+        return a["pka_samples"] - b["pka_samples"]
+
+    var_shared = np.var(two(shared))
+    # sin compartir: cada tramo sortea su propio protón (rng distinto)
+    a = m.compute_pka_montecarlo({}, {}, n_samples=n, rng=np.random.default_rng(21))
+    b = m.compute_pka_montecarlo({}, {}, n_samples=n, rng=np.random.default_rng(22))
+    var_indep = np.var(a["pka_samples"] - b["pka_samples"])
+    assert var_shared < 0.25 * var_indep   # teórico ≈ 0.12 (σ_H⁺=2.5 vs σ_e,g combinado)
+
+
+# ── P0-7: Boltzmann multi-T ──────────────────────────────────────────────────
+
+def test_boltzmann_weights_multiT_sum_one():
+    import pandas as pd
+    e = [-100.000, -99.999, -99.997]
+    df = pd.DataFrame({"conformer": ["conf_001", "conf_002", "conf_003"], "E_hartree": e})
+    with pytest.warns(UserWarning):
+        out = m.compute_boltzmann_multiT(df)             # modo electrónico
+    assert out.attrs["boltzmann_mode"] == "electronic_only"
+    for lbl in m.TEMP_LABELS:
+        assert out[f"boltz_{lbl}"].sum() == pytest.approx(1.0)
+    # más frío → más peso en el mínimo
+    assert out["boltz_250K"][0] > out["boltz_310K"][0]
+    # modo Gibbs compuesto
+    df2 = df.copy()
+    df2["thermo_ok"] = True
+    for T, lbl in zip(m.TEMP_LABELS, m.TEMP_LABELS):
+        g = np.array(e) + np.array([0.0, 0.0005, 0.0002])
+        df2[f"G_total_{lbl}"] = g
+        df2[f"dG_{lbl}_kcal"] = (g - g.min()) * m.HARTREE_TO_KCAL
+    out2 = m.compute_boltzmann_multiT(df2)
+    assert out2.attrs["boltzmann_mode"] == "gibbs_composite"
+    for lbl in m.TEMP_LABELS:
+        assert out2[f"boltz_{lbl}"].sum() == pytest.approx(1.0)
+    assert out2["boltz_298K"].equals(out2["boltz_298K"])
+
+
+# ── P0-7: NTO, Multiwfn, extractores ORCA ────────────────────────────────────
+
+def test_nto_selection_dual_criterion():
+    st = m.ExcitedState(state_idx=1, ntos=[
+        m.NTOPair(10, 11, 0.95), m.NTOPair(9, 12, 0.40),
+        m.NTOPair(8, 13, 0.06), m.NTOPair(7, 14, 0.02)])
+    # relativo (≥ 0.1·0.95 = 0.095) Y absoluto (≥ min_coef)
+    sel = m.select_ntos_for_state(st, threshold=0.1, min_coef=0.05, max_pairs=None)
+    assert [p.coef for p in sel] == [0.95, 0.40]             # 0.06 falla el relativo
+    sel = m.select_ntos_for_state(st, threshold=0.01, min_coef=0.05, max_pairs=None)
+    assert [p.coef for p in sel] == [0.95, 0.40, 0.06]       # 0.02 falla el absoluto
+    sel = m.select_ntos_for_state(st, threshold=0.0, min_coef=0.0, max_pairs=2)
+    assert len(sel) == 2
+    assert m.select_ntos_for_state(m.ExcitedState(2), 0.1, 0.05, None) == []
+
+
+def test_parse_multiwfn_esp_log():
+    log = (
+        " Global surface minimum: -0.151 a.u.\n"
+        " Minimal value:   -0.15127 a.u. (  -94.92 kcal/mol )\n"
+        " Maximal value:    0.12790 a.u. (   80.26 kcal/mol )\n"
+        " Overall surface area:      412.5 Bohr^2  (  115.5 Angstrom^2)\n"
+        " Positive surface area:     200.0 Bohr^2  (   56.0 Angstrom^2)\n"
+        " Negative surface area:     212.5 Bohr^2  (   59.5 Angstrom^2)\n"
+        " Overall average value:   0.01000 a.u. (    6.28 kcal/mol )\n"
+    )
+    r = m._parse_multiwfn_esp_log(log)
+    assert r["ok"]
+    assert r["ESP_min_kcal"] == pytest.approx(-94.92)
+    assert r["ESP_max_kcal"] == pytest.approx(80.26)
+    assert r["area_total_ang2"] == pytest.approx(115.5)
+    assert r["avg_kcal"] == pytest.approx(6.28)
+    bad = m._parse_multiwfn_esp_log("nada útil")
+    assert not bad["ok"] and bad["warning"]
+
+
+REAL_STEOM = ROOT / "MGLYVAL/runs/B/07_adc2/conf_6/CCSD_CPCM.out"
+REAL_MATZVP = ROOT / "MGLYVAL/runs/B/07_adc2/conf_6/CCSD_maTZVP.out"
+
+
+@needs(REAL_STEOM)
+def test_extract_steom_vs_cis_spectrum():
+    """El output STEOM trae primero el espectro CIS de referencia (4.943 eV);
+    el extractor debe quedarse con el bloque RIGHT de STEOM (3.549 eV)."""
+    res = m.extract_adc2_lambda(REAL_STEOM)
+    assert res is not None
+    lam, ev, fosc = res
+    assert ev == pytest.approx(3.549, abs=1e-3)
+    assert not math.isclose(ev, 4.943, abs_tol=0.1)
+    assert lam == pytest.approx(349.4, abs=0.1)
+
+
+@needs(REAL_MATZVP)
+def test_extract_steom_matzvp_failed_returns_none():
+    assert not m.check_success(REAL_MATZVP)
+    assert m.extract_adc2_lambda(REAL_MATZVP) is None
+
+
+@needs(REAL_ADC2)
+def test_adc2_requires_normal_termination(tmp_path):
+    # real: cortado por timeout → None / []
+    assert m.extract_adc2_lambda(REAL_ADC2) is None
+    assert m.parse_adc2_excitations(REAL_ADC2) == []
+    # sintético: mismo bloque RIGHT con y sin terminación normal
+    body = ("SPECTRUM FOR RIGHT TRANSITION MOMENTS\n" + _ABS_BLOCK.format(ev=3.46, nm=357.8))
+    cut = tmp_path / "cut.out"
+    cut.write_text(body)
+    done = tmp_path / "done.out"
+    done.write_text(body + "\n   ****ORCA TERMINATED NORMALLY****\n")
+    assert m.extract_adc2_lambda(cut) is None
+    assert m.extract_adc2_lambda(done)[1] == pytest.approx(3.46)
+    assert m.parse_adc2_excitations(cut) == []
+    assert len(m.parse_adc2_excitations(done)) == 1
+
+
+# ── P1-11 / P1-12: calibración, N microestados, MC calibrado ─────────────────
+
+def test_pka_exp_single_source():
+    # Asp: fuente [W] verificada (2.09/3.86/9.82), no McMurry (1.88/3.65/9.60)
+    assert m.PKA_EXP["Aspartic"] == {"carboxyl": 2.09, "carboxyl_2": 3.86, "amino": 9.82}
+    asp = {p["mol"]: p["exp"] for p in m.EMPIRICAL_CALIBRATION["carboxyl"]}
+    assert asp["Aspartic"] == m.PKA_EXP["Aspartic"]["carboxyl"]
+    assert m.EMPIRICAL_CALIBRATION["carboxyl_2"][0]["exp"] == m.PKA_EXP["Aspartic"]["carboxyl_2"]
+    tr = {(mol, t["type"]): t["exp"] for mol, spec in m.CALIBRATION_SETS.items()
+          for t in spec["transitions"]}
+    assert tr[("ASPARTIC", "carboxyl")] == 2.09 and tr[("ASPARTIC", "carboxyl_2")] == 3.86
+    # toda 'exp' de CALIBRATION_SETS coincide con PKA_EXP
+    for mol, spec in m.CALIBRATION_SETS.items():
+        for t in spec["transitions"]:
+            assert t["exp"] == m.PKA_EXP[spec["label"]][t["type"]]
+
+
+def test_loo_linear(monkeypatch):
+    pts = [(2.0, 1.0), (3.0, 2.3), (4.0, 2.8), (6.0, 5.1)]
+    _calib_xy(monkeypatch, pts)
+    fit = m.fit_empirical_correction("t", mode="linear")
+    assert fit["mode"] == "linear"
+    # LOO manual con numpy
+    res = []
+    for k in range(len(pts)):
+        xs = [p[0] for i, p in enumerate(pts) if i != k]
+        ys = [p[1] for i, p in enumerate(pts) if i != k]
+        sl, ic = np.polyfit(xs, ys, 1)
+        res.append(pts[k][1] - (sl * pts[k][0] + ic))
+    assert fit["loo_rmse"] == pytest.approx(float(np.sqrt(np.mean(np.square(res)))))
+    assert fit["loo_rmse"] > fit["rmse"]
+    # n=2 lineal: sin grados de libertad para el LOO
+    _calib_xy(monkeypatch, pts[:2])
+    assert math.isnan(m.fit_empirical_correction("t", mode="linear")["loo_rmse"])
+
+
+def test_aicc_selects_offset_vs_linear(monkeypatch):
+    # sesgo constante + ruido pequeño, n=6, rango ≥3 → offset gana
+    rng = np.random.default_rng(0)
+    xs = [2, 3.5, 5, 7, 9, 11]
+    _calib_xy(monkeypatch, [(x, x - 1.5 + rng.normal(0, 0.05)) for x in xs])
+    fit = m.fit_empirical_correction("t", mode="aicc")
+    assert fit["mode"] == "offset" and fit["aicc_offset"] < fit["aicc_linear"] + 2
+    # pendiente real 0.7 → lineal gana
+    _calib_xy(monkeypatch, [(x, 0.7 * x + 0.5 + rng.normal(0, 0.05)) for x in xs])
+    assert m.fit_empirical_correction("t", mode="aicc")["mode"] == "linear"
+    # n<5 → offset siempre, AICc lineal indefinido
+    _calib_xy(monkeypatch, [(2, 1), (5, 3), (8, 4.5), (11, 7)])
+    f4 = m.fit_empirical_correction("t", mode="aicc")
+    assert f4["mode"] == "offset" and math.isnan(f4["aicc_linear"])
+
+
+def _micro(name, G, q=0, n=10):
+    return {"mol_name": name, "is_macrostate": True, "G_total_direct_Eh": G,
+            "charge": q, "n_atoms": n, "use_smd": False}
+
+
+def test_macrostate_n_micro_degeneracy(tmp_path):
+    T = m.T_STD
+    kT = m.R_KCAL * T / m.HARTREE_TO_KCAL      # Eh
+    # N=3 microestados degenerados en G, g = 1, 1, 2 → G_macro = G − kT·ln 4
+    G0 = -100.0
+    micro = [_micro("R", G0), _micro("D", G0), _micro("Dp", G0)]
+    res = m.compute_micro_equilibrium(micro, degeneracy={"Dp": 2}, T=T)
+    assert res["ok"]
+    assert res["G_macro_Eh"] == pytest.approx(G0 - kT * math.log(4.0))
+    assert res["fractions"]["Dp"] == pytest.approx(0.5)
+    assert sum(res["fractions"].values()) == pytest.approx(1.0)
+    # sin degeneración y N=2 coincide con el macroestado histórico R/D
+    dG = 1.0 / m.HARTREE_TO_KCAL
+    two = m.compute_micro_equilibrium([_micro("R", G0), _micro("D", G0 + dG)], T=T)
+    pair = m.compute_tautomer_equilibrium(_micro("R", G0), _micro("D", G0 + dG), T=T)
+    assert two["G_macro_Eh"] == pytest.approx(pair["G_macro_Eh"])
+    # carga inconsistente → ok=False, sin fallback silencioso
+    bad = m.compute_micro_equilibrium([_micro("R", G0), _micro("X", G0, q=-1)], T=T)
+    assert not bad["ok"]
+    # _build_neutral_macrostate con extra_micro + degeneración
+    taut, macro = m._build_neutral_macrostate(
+        _micro("R", G0), _micro("D", G0), "R", "D", T, verbose=False,
+        extra_micro=[_micro("Dp", G0)], degeneracy={"Dp": 2})
+    assert macro["G_total_direct_Eh"] == pytest.approx(G0 - kT * math.log(4.0))
+    assert macro["mol_name"] == "R/D/Dp"
+    assert taut["f_R"] == pytest.approx(0.5)      # f_R/f_D siguen siendo los del par R/D
+
+
+def test_mc_calibrated_no_hplus(monkeypatch):
+    _fake_compute_pka(monkeypatch)                # dG=13 kcal/mol → pKa crudo ≈ 9.53
+    pts = [(10.0, 8.0), (12.0, 9.0), (11.0, 8.6)]
+    _calib_xy(monkeypatch, pts)
+    fit = m.fit_empirical_correction("t", mode="offset")
+    fit["group_type"] = "t"
+    n = 20000
+    kw = dict(n_samples=n)
+    draw = m._calibration_intercept_draw(fit, n, np.random.default_rng(3))
+    # σ_H⁺ enorme y shared_hplus_draw no tienen efecto en modo calibrado
+    a = m.compute_pka_montecarlo({}, {}, sigma_hplus_kcal=50.0, calibration_fit=fit,
+                                 calib_intercept_draw=draw, rng=np.random.default_rng(1), **kw)
+    b = m.compute_pka_montecarlo({}, {}, sigma_hplus_kcal=0.0,
+                                 shared_hplus_draw=np.full(n, 99.0), calibration_fit=fit,
+                                 calib_intercept_draw=draw, rng=np.random.default_rng(2), **kw)
+    assert a["ok"] and a["hplus_draw"] is None
+    assert np.array_equal(a["pka_samples"], b["pka_samples"])
+    pka_raw = 13.0 / (m.R_KCAL * m.T_STD * m.LN10)
+    assert a["pka_mean"] == pytest.approx(pka_raw + fit["intercept"], abs=0.05)
+    nn = fit["n"]
+    expected = fit["loo_rmse"] * math.sqrt(1 + 1 / nn)
+    # t con 2 g.l. tiene varianza infinita: la mediana del |desvío| es la medida robusta
+    mad = float(np.median(np.abs(a["pka_samples"] - a["pka_median"])))
+    assert 0.4 * expected < mad < 1.6 * expected
+    # run_chain_montecarlo: un solo sorteo por clase, compartido entre tramos
+    r = m.run_chain_montecarlo(
+        data_A={"a": 1}, data_neutral_macro={"n": 1}, data_B={"b": 1}, data_C=None,
+        f_R=1.0, f_D=0.0, pH_values=[7.0], n_samples=300, seed=5,
+        calibrations={"pKa0": fit, "pKa1": fit})
+    assert r["ok"] and r["mc_pka0"]["calibrated"] and r["mc_pka1"]["calibrated"]
+    assert np.array_equal(r["mc_pka0"]["pka_samples"], r["mc_pka1"]["pka_samples"])
+    # n=1 → sin error estimable: cae al MC crudo con aviso
+    n1 = dict(fit, n=1, loo_rmse=float("nan"))
+    r1 = m.run_chain_montecarlo(
+        data_A={"a": 1}, data_neutral_macro={"n": 1}, data_B={"b": 1}, data_C=None,
+        f_R=1.0, f_D=0.0, pH_values=[7.0], n_samples=300, seed=5,
+        calibrations={"pKa0": n1})
+    assert not r1["mc_pka0"].get("calibrated") and any("n<2" in w for w in r1["warnings"])
+
+
+def test_double_difference_class(monkeypatch):
+    def pts(mol_pts):
+        return [{"mol": f"M{i}", "calc_goodvibes": x, "calc_harmonic": x, "exp": y}
+                for i, (x, y) in enumerate(mol_pts)]
+    monkeypatch.setattr(m, "EMPIRICAL_CALIBRATION", {
+        "ammonium_dianion": pts([(17.0, 9.0), (18.0, 10.0)]),     # sesgo −8 → Δ=−8
+        "amidinium":        pts([(10.0, 9.0), (12.0, 11.0)]),     # Δ=−1
+        "ammonium":         pts([(12.0, 10.0), (13.0, 11.0)]),    # Δ=−2
+    })
+    assert m.EMPIRICAL_TYPE_META["double_difference"]["dq"] == "−1→−2"
+    for t in ("amidinium", "ammonium", "ammonium_dianion", "pyridinium_anion"):
+        assert t in m.EMPIRICAL_TYPE_META
+    assert m._dq_of_type("amidinium") == (1, 0) and m._dq_of_type("ammonium_dianion") == (-1, -2)
+    monkeypatch.setitem(m.EMPIRICAL_OPTS, "force_class", False)
+    res = m.apply_double_difference_correction(
+        16.0, mode="offset", pka_result={"q_acid": -1, "q_base": -2})
+    # pKa_corr = 16 + (−8) + (−1 − (−2)) = 9
+    assert res["ok"] and res["pKa_corrected"] == pytest.approx(9.0)
+    assert res["components"] == pytest.approx({"ammonium_dianion": -8.0, "amidinium": -1.0, "ammonium": -2.0})
+    # LOO de dos puntos con sesgos iguales → 0 en los tres
+    assert res["sigma"] == pytest.approx(0.0)
+    # clase de carga incorrecta → rechazada (no pasa por --force-charge-class)
+    bad = m.apply_double_difference_correction(
+        16.0, pka_result={"q_acid": 0, "q_base": -1})
+    assert not bad["ok"] and "−1→−2" in bad["reason"]
+    # componente faltante → error explícito
+    monkeypatch.setattr(m, "EMPIRICAL_CALIBRATION", {"amidinium": pts([(10.0, 9.0), (12.0, 11.0)])})
+    miss = m.apply_double_difference_correction(16.0)
+    assert not miss["ok"] and "ammonium_dianion" in miss["reason"]

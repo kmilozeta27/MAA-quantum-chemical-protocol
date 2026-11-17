@@ -265,6 +265,30 @@ def _resolve_bin(name: str, conda_env: str = "sciencebitch") -> Path:
     return Path(name)
 
 
+# P0-3: sin CENSO el ensemble CREST llegaría SIN filtrar a OPT (cientos de
+# confórmeros, o una selección distinta a la del protocolo) y el resultado
+# cambia en silencio. Por defecto es un error fatal; solo --allow-no-censo
+# restaura el comportamiento antiguo (fail-open con aviso).
+ALLOW_NO_CENSO = False
+
+
+class CensoUnavailableError(RuntimeError):
+    """CENSO no disponible/falló y no se pasó --allow-no-censo."""
+
+
+def _censo_fallback(log: logging.Logger, conformers_xyz: Path, reason: str) -> Path:
+    """Aborta (CensoUnavailableError) o, con ALLOW_NO_CENSO, devuelve el ensemble CREST."""
+    if ALLOW_NO_CENSO:
+        log.warning(f"[CENSO]  ⚠  {reason} — --allow-no-censo: se usa el "
+                    f"ensemble CREST SIN filtrar")
+        return conformers_xyz
+    msg = (f"CENSO no pudo filtrar el ensemble: {reason}. Abortando para no "
+           f"continuar con el ensemble CREST sin filtrar (usa --allow-no-censo "
+           f"para permitirlo explícitamente).")
+    log.error(f"[CENSO]  ✗  {msg}")
+    raise CensoUnavailableError(msg)
+
+
 def check_required_bins(log: logging.Logger) -> None:
     """
     Verifica al inicio del pipeline (antes de lanzar CREST) que los binarios
@@ -280,6 +304,10 @@ def check_required_bins(log: logging.Logger) -> None:
             missing.append((bin_name, bin_path))
         else:
             log.debug(f"[CHECK-BIN] {bin_name} → {resolved}")
+    if ALLOW_NO_CENSO and any(n == "CENSO" for n, _ in missing):
+        log.warning("[CHECK-BIN] CENSO ausente pero --allow-no-censo activo: "
+                    "se seguirá con el ensemble CREST sin filtrar.")
+        missing = [(n, b) for n, b in missing if n != "CENSO"]
     if missing:
         for bin_name, bin_path in missing:
             log.error(
@@ -1865,6 +1893,10 @@ def extract_adc2_lambda(out_file: Path) -> Optional[tuple[float, float, float]]:
     """
     if not out_file.exists():
         return None
+    # P0-7: un ADC(2) cortado por timeout deja tablas parciales (p. ej. el
+    # estado equivocado, f=0.037) — sin "TERMINATED NORMALLY" no se confía.
+    if not check_success(out_file):
+        return None
 
     # Patrón de la línea de datos: al menos 7 columnas separadas por espacios.
     # Columnas: label_from -> label_to  eV  cm-1  nm  fosc  D2  DX  DY  DZ
@@ -2582,9 +2614,9 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
     un nivel barato (funcional/base/threshold definidos en ~/.censo2rc,
     no por CLI en CENSO 3.x).
 
-    Fail-open: si CENSO no está, falla, o no produce un ensemble
-    reconocible, se devuelve conformers_xyz sin tocar y el pipeline
-    sigue exactamente como antes (no bloquea nada).
+    Fail-closed (P0-3): si CENSO no está, falla, o no produce un ensemble
+    reconocible, lanza CensoUnavailableError. Solo con ALLOW_NO_CENSO
+    (--allow-no-censo) se devuelve conformers_xyz sin filtrar.
 
     Args:
         conformers_xyz : ruta al ensemble CREST (multi-XYZ).
@@ -3048,9 +3080,8 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
     # por nombre relativo evita ambigüedad sobre rutas absolutas en -i.
     local_input = censo_dir / conformers_xyz.name
     if not safe_copy(conformers_xyz, local_input):
-        log.warning(f"[CENSO] no se pudo copiar {conformers_xyz.name} a {censo_dir} "
-                    f"— usando ensemble CREST sin filtrar")
-        return conformers_xyz
+        return _censo_fallback(log, conformers_xyz,
+                               f"no se pudo copiar {conformers_xyz.name} a {censo_dir}")
 
     log.info(f"[CENSO]  ▶  lanzando pre-screening sobre {conformers_xyz.name} "
              f"(carga={charge}, T={temperature:.2f} K)"
@@ -3070,9 +3101,7 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
         )
         if eff_maxcores == 0:
             _cpu_lock_release()
-            log.error("[CENSO]  ✗  sin CPUs disponibles — "
-                      "usando ensemble CREST sin filtrar")
-            return conformers_xyz
+            return _censo_fallback(log, conformers_xyz, "sin CPUs disponibles")
 
         cmd = [
             str(CENSO_BIN),
@@ -3126,21 +3155,21 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
         )
         returncode = proc.returncode
     except subprocess.TimeoutExpired:
-        log.error(f"[CENSO]  ✗  TIMEOUT ({CENSO_TIMEOUT_HOURS} h) — "
-                  f"usando ensemble CREST sin filtrar")
-        return conformers_xyz
+        return _censo_fallback(log, conformers_xyz,
+                               f"TIMEOUT ({CENSO_TIMEOUT_HOURS} h)")
     except FileNotFoundError as e:
         if "taskset" in str(e):
             log.error("  ✗  no se encontró 'taskset' en PATH — instálalo "
                       "(paquete util-linux) o llama a stage_censo_prescreen "
                       "sin cpu pinning")
         else:
-            log.error(f"[CENSO]  ✗  no se encontró el ejecutable ({CENSO_BIN}) — "
-                      f"¿'conda activate sciencebitch'? Usando ensemble CREST sin filtrar")
-        return conformers_xyz
+            return _censo_fallback(
+                log, conformers_xyz,
+                f"no se encontró el ejecutable ({CENSO_BIN}) — "
+                f"¿'conda activate sciencebitch'?")
+        return _censo_fallback(log, conformers_xyz, "falta 'taskset'")
     except Exception as e:
-        log.error(f"[CENSO]  ✗  error inesperado: {e} — usando ensemble CREST sin filtrar")
-        return conformers_xyz
+        return _censo_fallback(log, conformers_xyz, f"error inesperado: {e}")
     finally:
         _cpu_lock_release()
 
@@ -3251,9 +3280,12 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
         log.warning(
             f"[CENSO]  ✗  no se encontró un ensemble filtrado reconocible "
             f"(returncode={returncode}) en {censo_dir} — revisa {censo_log_path} "
-            f"a mano. Usando ensemble CREST sin filtrar."
+            f"a mano."
         )
-    return conformers_xyz
+    return _censo_fallback(
+        log, conformers_xyz,
+        f"sin ensemble filtrado reconocible (returncode={returncode})"
+        + (f"; {_censo_log_snippet}" if _censo_log_snippet else ""))
 
 
 # ─────────────────────────────────────────────
@@ -6132,7 +6164,9 @@ def _setup_run_resources(args):
     global NPROCS_CREST, NPROCS, MAXCORE, NPROCS_NUMFREQ, MAXCORE_NUMFREQ, \
            NPROCS_TDDFT, MAXCORE_TDDFT, NPROCS_ADC2, MAXCORE_ADC2, \
            OPT_BATCH_SIZE, SP_BATCH_SIZE, TDDFT_BATCH_SIZE, OMP_ENV, \
-           NUMFREQ_BATCH_SIZE
+           NUMFREQ_BATCH_SIZE, ALLOW_NO_CENSO
+
+    ALLOW_NO_CENSO = bool(getattr(args, "allow_no_censo", False))
 
     # ── Validar --multitemp / --trange ───────────────────────────────────────
     if args.trange is not None and not args.multitemp:
@@ -7029,6 +7063,15 @@ Ejemplos (modo multi-molécula, --mol repetido):
     res_group.add_argument(
         "--maxcore-numfreq", type=int, default=None, metavar="MB",
         help=f"(avanzado) MB/core para NumFreq. Default: {MAXCORE_NUMFREQ}.",
+    )
+
+    parser.add_argument(
+        "--allow-no-censo", action="store_true",
+        help=(
+            "Permite continuar con el ensemble CREST SIN filtrar si CENSO no está "
+            "o falla. Por defecto es un error fatal (el ensemble sin filtrar "
+            "cambia silenciosamente el protocolo)."
+        ),
     )
 
     # ── Modo SP + NRoots 1 ─────────────────────────────────────────────────
@@ -8408,6 +8451,69 @@ def print_pka_analysis(pka_result: dict, mol_acid: str, mol_base: str):
 #  COLECTOR PRINCIPAL
 # ─────────────────────────────────────────────
 
+# ─────────────────────────────────────────────
+#  IDENTIFICADOR NUMÉRICO DE CONFÓRMERO (conf_5 ≡ conf_005)
+# ─────────────────────────────────────────────
+# Las carpetas de un mismo confórmero pueden llamarse conf_005 (pipeline) o
+# conf_5 (rehechas a mano). Comparar por nombre perdía conf_5/conf_6 al cruzar
+# etapas y pesos de Boltzmann. Carpetas con sufijo (conf_6_PBE0) son
+# cálculos auxiliares y NO forman parte del ensemble.
+
+_CONF_DIR_RE = re.compile(r"^conf_(\d+)$")
+
+
+def _conf_num(name: str) -> Optional[int]:
+    """conf_5 / conf_005 → 5; conf_6_PBE0, conf6 u otros → None."""
+    mt = _CONF_DIR_RE.match(name)
+    return int(mt.group(1)) if mt else None
+
+
+def _ensemble_conf_dirs(stage_root: Path, must_have: Optional[str] = None) -> list[Path]:
+    """
+    Carpetas conf_<n> de una etapa, ordenadas por n, una por id numérico.
+    Excluye sufijos (conf_6_PBE0). Si hay duplicados numéricos (conf_6 y
+    conf_006) prefiere el que contiene `must_have` y avisa.
+    """
+    if not stage_root.exists():
+        return []
+    by_num: dict[int, list[Path]] = {}
+    for d in stage_root.glob("conf_*"):
+        n = _conf_num(d.name)
+        if n is not None and d.is_dir():
+            by_num.setdefault(n, []).append(d)
+    out: list[Path] = []
+    for n in sorted(by_num):
+        cands = sorted(by_num[n], key=lambda d: d.name)
+        if len(cands) > 1:
+            warnings.warn(f"[collect] ids duplicados para conf {n} en {stage_root}: "
+                          f"{[c.name for c in cands]}")
+            if must_have:
+                cands.sort(key=lambda d: not (d / must_have).exists())
+        out.append(cands[0])
+    return out
+
+
+def _find_conf_dir(stage_root: Path, conf_id: str,
+                   must_have: Optional[str] = None) -> Optional[Path]:
+    """Carpeta de `stage_root` cuyo id numérico coincide con `conf_id`."""
+    n = _conf_num(conf_id)
+    if n is None:
+        return None
+    for d in _ensemble_conf_dirs(stage_root, must_have):
+        if _conf_num(d.name) == n:
+            return d
+    return None
+
+
+def _canon_conf_id(conf_id: str, known_ids) -> str:
+    """Devuelve el nombre de `known_ids` con el mismo id numérico (o conf_id)."""
+    n = _conf_num(conf_id)
+    for k in known_ids:
+        if n is not None and _conf_num(k) == n:
+            return k
+    return conf_id
+
+
 def collect_results(mol_name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Devuelve (df_conf, df_tddft) con todos los campos enriquecidos:
@@ -8421,8 +8527,12 @@ def collect_results(mol_name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     conf_rows: list[dict] = []
     tddft_rows: list[dict] = []
 
-    sp_dirs = sorted((mol_dir / "04_sp").glob("conf_*")) \
-              if (mol_dir / "04_sp").exists() else []
+    # ids numéricos: conf_5 ≡ conf_005; sufijos (conf_6_PBE0) fuera del ensemble
+    sp_dirs = _ensemble_conf_dirs(mol_dir / "04_sp", "sp.out")
+
+    def _stage_file(stage: str, conf_id: str, fname: str) -> Path:
+        d = _find_conf_dir(mol_dir / stage, conf_id, fname)
+        return (d or mol_dir / stage / conf_id) / fname
 
     for sp_dir in sp_dirs:
         conf_id  = sp_dir.name
@@ -8430,11 +8540,11 @@ def collect_results(mol_name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         e_sp     = rc_parse_sp_energy(sp_out)
 
         # Energía DFT post-opt (de la optimización, no del SP)
-        opt_out  = mol_dir / "02_opt" / conf_id / "opt.out"
+        opt_out  = _stage_file("02_opt", conf_id, "opt.out")
         e_opt    = parse_opt_energy(opt_out)
 
         # Frecuencias imaginarias
-        freq_out   = mol_dir / "03_numfreq" / conf_id / "freq.out"
+        freq_out   = _stage_file("03_numfreq", conf_id, "freq.out")
         imag_freqs = parse_imaginary_freqs(freq_out)
 
         conf_rows.append({
@@ -8448,7 +8558,7 @@ def collect_results(mol_name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
         })
 
         # TDDFT
-        tddft_out = mol_dir / "05_tddft" / conf_id / "tddft.out"
+        tddft_out = _stage_file("05_tddft", conf_id, "tddft.out")
         for exc in parse_tddft_excitations(tddft_out):
             tddft_rows.append({"conformer": conf_id, **exc})
 
@@ -8466,7 +8576,7 @@ def collect_results(mol_name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     _thermochem_cache: list[Optional[dict]] = []
     for _, row in df_conf.iterrows():
         conf_id  = row["conformer"]
-        freq_out = mol_dir / "03_numfreq" / conf_id / "freq.out"
+        freq_out = _stage_file("03_numfreq", conf_id, "freq.out")
         tc = rc_thermochem_multiT(freq_out)
         _thermochem_cache.append(tc if tc.get("ok") else None)
     df_conf["_thermochem"] = _thermochem_cache
@@ -10143,7 +10253,7 @@ def run_multiwfn_esp_on_mol(mol_name: str) -> dict[str, dict]:
         warnings.warn(f"[Multiwfn/ESP] {tddft_dir} no existe — omitiendo {mol_name}.")
         return {}
 
-    conf_dirs = sorted(tddft_dir.glob("conf_*"))
+    conf_dirs = _ensemble_conf_dirs(tddft_dir, "tddft.gbw")
     if not conf_dirs:
         warnings.warn(f"[Multiwfn/ESP] Sin subdirectorios conf_* en {tddft_dir}.")
         return {}
@@ -10178,8 +10288,11 @@ def compute_esp_summary_df(df_conf: "pd.DataFrame",
     extremos ESP con población Boltzmann de cada confórmero.
     """
     rows = []
+    known = (list(df_conf["conformer"])
+             if df_conf is not None and not df_conf.empty and "conformer" in df_conf.columns
+             else [])
     for conf_id, res in esp_results.items():
-        row = {"conformer": conf_id}
+        row = {"conformer": _canon_conf_id(conf_id, known)}  # conf_6 ≡ conf_006
         row.update({k: v for k, v in res.items()
                      if k not in ("log_path", "extrema_path")})
         row["log_path"]     = str(res.get("log_path") or "")
@@ -10288,6 +10401,8 @@ def parse_adc2_excitations(adc2_out: Path) -> list[dict]:
     """
     if not adc2_out.exists():
         return []
+    if not check_success(adc2_out):   # ADC(2) truncado: tablas parciales no fiables
+        return []
 
     try:
         text = adc2_out.read_text(errors="replace")
@@ -10392,10 +10507,10 @@ def collect_adc2_results(mol_name: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     rows = []
-    for conf_dir in sorted(adc2_dir.glob("conf_*")):
-        if not conf_dir.is_dir():
-            continue
-        conf_id  = conf_dir.name
+    # id canónico = el de 04_sp (para cruzar con boltz_*); conf_6 ≡ conf_006
+    known_ids = [d.name for d in _ensemble_conf_dirs(mol_dir / "04_sp")]
+    for conf_dir in _ensemble_conf_dirs(adc2_dir, "adc2.out"):
+        conf_id  = _canon_conf_id(conf_dir.name, known_ids)
         adc2_out = conf_dir / "adc2.out"
         for exc in parse_adc2_excitations(adc2_out):
             rows.append({"conformer": conf_id, **exc})
@@ -11226,39 +11341,78 @@ PH_STANDARD    = 7.0
 # por lo que "cae" sobre el experimental solo por esa calibración vieja.
 # Re-correr `calibrate` con los datos actuales (o --calibration-file con
 # valores regenerados) antes de aplicar --empirical-correction.
-_REF_AA = "McMurry Table 26-1 / Carey & Giuliano (consistente con CRC)"
-_REF_AP = "4-aminopiridina, 9.17 a 25 °C (dato del proyecto)"
+# P1-11: FUENTE ÚNICA de pKa experimentales. EMPIRICAL_CALIBRATION y
+# CALIBRATION_SETS leen de aquí (no repetir literales). Valores verificados el
+# 2026-11-17 contra la compilación de Williams/Evans (ACS Org. Div., 4/2022,
+# pka-compilation-williams.pdf): Gly 2.34/9.6, Val 2.32/9.62, Asp 2.09/3.86/9.82,
+# Glu 2.19/4.25/9.67, IDA 2.98/9.89, MeIDA 2.81/10.18, Tris 8.10, benzamidina
+# 11.6, acetamidina 12.52. PENDIENTE: contrastar contra IUPAC / NIST SRD 46
+# (no accesible desde aquí); si difieren, cambiar SOLO esta tabla.
+# El Asp anterior (1.88/3.65/9.60) venía de McMurry y se descarta.
+_REF_W = "Williams/Evans pKa compilation (ACS Org. Div., 4/2022)"
+_REF_AA = _REF_W
+_REF_AP = "4-aminopiridina, 9.17 a 25 °C (dato del proyecto; [W] ref. 41)"
+PKA_EXP: dict[str, dict[str, float]] = {
+    "Glycine":  {"carboxyl": 2.34, "amino": 9.60},
+    "Valine":   {"carboxyl": 2.32, "amino": 9.62},
+    "Aspartic": {"carboxyl": 2.09, "carboxyl_2": 3.86, "amino": 9.82},
+    "Glutamic": {"carboxyl": 2.19, "carboxyl_2": 4.25, "amino_dianion": 9.67},
+    "AP":       {"pyridinium": 9.17},
+    "IDA":      {"ammonium_dianion": 9.89},
+    "MeIDA":    {"ammonium_dianion": 10.18},
+    "Benzamidine": {"amidinium": 11.6},
+    "Acetamidine": {"amidinium": 12.52},
+    "Tris":     {"ammonium": 8.10},
+}
 
 EMPIRICAL_CALIBRATION: dict[str, list[dict]] = {
     "carboxyl": [
         {"mol": "Glycine",  "calc_harmonic": 2.50, "calc_goodvibes": 2.45,
-         "exp": 2.34, "exp_ref": _REF_AA},
+         "exp": PKA_EXP["Glycine"]["carboxyl"], "exp_ref": _REF_AA},
         {"mol": "Valine",   "calc_harmonic": 2.38, "calc_goodvibes": 2.37,
-         "exp": 2.32, "exp_ref": _REF_AA},
+         "exp": PKA_EXP["Valine"]["carboxyl"], "exp_ref": _REF_AA},
         {"mol": "Aspartic", "calc_harmonic": 2.09, "calc_goodvibes": 2.01,
-         "exp": 1.88, "exp_ref": _REF_AA + " (α-COOH)"},
+         "exp": PKA_EXP["Aspartic"]["carboxyl"], "exp_ref": _REF_AA + " (α-COOH)"},
         {"mol": "Glutamic", "calc_harmonic": None, "calc_goodvibes": None,
-         "exp": 2.19, "exp_ref": _REF_AA + " (α-COOH)"},
+         "exp": PKA_EXP["Glutamic"]["carboxyl"], "exp_ref": _REF_AA + " (α-COOH)"},
     ],
     "carboxyl_2": [
         {"mol": "Aspartic", "calc_harmonic": None, "calc_goodvibes": None,
-         "exp": 3.65, "exp_ref": _REF_AA + " (β-COOH)"},
+         "exp": PKA_EXP["Aspartic"]["carboxyl_2"], "exp_ref": _REF_AA + " (β-COOH)"},
         {"mol": "Glutamic", "calc_harmonic": None, "calc_goodvibes": None,
-         "exp": 4.25, "exp_ref": _REF_AA + " (γ-COOH)"},
+         "exp": PKA_EXP["Glutamic"]["carboxyl_2"], "exp_ref": _REF_AA + " (γ-COOH)"},
     ],
     "amino": [
         {"mol": "Glycine",  "calc_harmonic": 11.95, "calc_goodvibes": 11.91,
-         "exp": 9.60, "exp_ref": _REF_AA},
+         "exp": PKA_EXP["Glycine"]["amino"], "exp_ref": _REF_AA},
         {"mol": "Valine",   "calc_harmonic": 12.18, "calc_goodvibes": 12.19,
-         "exp": 9.62, "exp_ref": _REF_AA},
+         "exp": PKA_EXP["Valine"]["amino"], "exp_ref": _REF_AA},
     ],
     "amino_dianion": [
         {"mol": "Glutamic", "calc_harmonic": 17.89, "calc_goodvibes": 17.89,
-         "exp": 9.67, "exp_ref": _REF_AA + " (α-NH₃⁺ de Glu)"},
+         "exp": PKA_EXP["Glutamic"]["amino_dianion"], "exp_ref": _REF_AA + " (α-NH₃⁺ de Glu)"},
     ],
     "pyridinium": [
         {"mol": "AP", "calc_harmonic": None, "calc_goodvibes": None,
-         "exp": 9.17, "exp_ref": _REF_AP},
+         "exp": PKA_EXP["AP"]["pyridinium"], "exp_ref": _REF_AP},
+    ],
+    # P1-12(e): calibradores de los tipos nuevos (calc=None: pendientes de
+    # cómputo; solo exp verificado en [W]).
+    "ammonium_dianion": [
+        {"mol": "IDA",   "calc_harmonic": None, "calc_goodvibes": None,
+         "exp": PKA_EXP["IDA"]["ammonium_dianion"], "exp_ref": _REF_W},
+        {"mol": "MeIDA", "calc_harmonic": None, "calc_goodvibes": None,
+         "exp": PKA_EXP["MeIDA"]["ammonium_dianion"], "exp_ref": _REF_W},
+    ],
+    "amidinium": [
+        {"mol": "Benzamidine", "calc_harmonic": None, "calc_goodvibes": None,
+         "exp": PKA_EXP["Benzamidine"]["amidinium"], "exp_ref": _REF_W},
+        {"mol": "Acetamidine", "calc_harmonic": None, "calc_goodvibes": None,
+         "exp": PKA_EXP["Acetamidine"]["amidinium"], "exp_ref": _REF_W},
+    ],
+    "ammonium": [
+        {"mol": "Tris", "calc_harmonic": None, "calc_goodvibes": None,
+         "exp": PKA_EXP["Tris"]["ammonium"], "exp_ref": _REF_W},
     ],
 }
 
@@ -11270,6 +11424,15 @@ EMPIRICAL_TYPE_META: dict[str, dict] = {
     "amino":         {"slots": ("pKa1",),          "dq": "0→−1",  "grupo": "NH₃⁺ sin carga vecina"},
     "amino_dianion": {"slots": ("pKa2",),          "dq": "−1→−2", "grupo": "NH₃⁺ con 2×COO⁻"},
     "pyridinium":    {"slots": ("pKa2", "pair"),   "dq": "+1→0",  "grupo": "N–H⁺ aromático → N"},
+    # P1-12(e) — tipos para el sitio (iii) de MGLYVAL (CALIBRATION_PLAN.md §2-3)
+    "amidinium":        {"slots": ("pKa0", "pair"), "dq": "+1→0",  "grupo": "amidinio N–H⁺ → N (sin COO⁻ vecino)"},
+    "ammonium":         {"slots": ("pair",),        "dq": "+1→0",  "grupo": "R–NH₃⁺ → R–NH₂ (par de la doble diferencia)"},
+    "ammonium_dianion": {"slots": ("pKa2",),        "dq": "−1→−2", "grupo": "amonio con 2×COO⁻ (IDA, MeIDA, Glu)"},
+    "pyridinium_anion": {"slots": ("pair",),        "dq": "0→−1",  "grupo": "piridinio con COO⁻ (test de aditividad)"},
+    "amidinium_dianion": {"slots": ("pKa2",),       "dq": "−1→−2", "grupo": "amidinio vinílogo con 2×COO⁻ (objetivo M3; sin calibradores directos)"},
+    # Tipo COMPUESTO (no es un offset simple): ver apply_double_difference_correction().
+    "double_difference": {"slots": ("pKa2",),       "dq": "−1→−2", "grupo": "doble diferencia: amidinio vinílogo con 2×COO⁻",
+                          "components": ("ammonium_dianion", "amidinium", "ammonium")},
 }
 EMPIRICAL_VALID_SLOTS = ("pKa0", "pKa1", "pKa2", "pair")
 
@@ -11325,6 +11488,31 @@ def _dq_of_type(group_type: str) -> Optional[tuple[int, int]]:
         return None
 
 
+def _aicc_offset_vs_linear(x: list[float], y: list[float]) -> tuple[float, float]:
+    """
+    AICc de los dos modelos de calibración, con la misma convención:
+    AICc = n·ln(RSS/n) + 2k + 2k(k+1)/(n−k−1), k = parámetros + 1 (σ residual).
+    offset: k=2 (b); lineal: k=3 (m, b). NaN si n−k−1 ≤ 0 (offset: n<4;
+    lineal: n<5, de ahí el "n≥5" del plan). RSS se acota a 1e-12 para evitar
+    ln(0) con ajustes exactos.
+    """
+    n = len(x)
+    xa, ya = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+
+    def _aicc(rss: float, k: int) -> float:
+        if n - k - 1 <= 0:
+            return float("nan")
+        return float(n * np.log(max(rss / n, 1e-12)) + 2 * k
+                     + 2 * k * (k + 1) / (n - k - 1))
+
+    rss_off = float(np.sum((ya - (xa + np.mean(ya - xa))) ** 2)) if n >= 1 else float("nan")
+    fit = _ols_fit(x, y)
+    rss_lin = float(np.sum(np.square(fit["residuals"]))) if fit.get("ok") else float("nan")
+    a_off = _aicc(rss_off, 2) if n >= 1 else float("nan")
+    a_lin = _aicc(rss_lin, 3) if fit.get("ok") else float("nan")
+    return a_off, a_lin
+
+
 def fit_empirical_correction(group_type: str, gcorr_source: str = "goodvibes",
                              mode: str = "auto") -> dict:
     """
@@ -11339,9 +11527,15 @@ def fit_empirical_correction(group_type: str, gcorr_source: str = "goodvibes",
                otro caso, desplazamiento puro (m=1, b=sesgo medio).
       'linear' — fuerza regresión lineal (≥2 puntos; con 2 el ajuste es exacto).
       'offset' — fuerza desplazamiento puro con ≥1 punto.
+      'aicc'   — criterio del plan (CALIBRATION_PLAN.md §3): pendiente libre
+               solo con n≥5, rango de pKa calculado ≥3 Y AICc(lineal) <
+               AICc(offset) − 2; si no, desplazamiento puro.
 
     Con n=1 el RMSE es indefinido (NaN): el ajuste es exacto por construcción.
-    Con n≥2 en modo offset se reporta además loo_rmse (leave-one-out).
+    Con n≥2 en modo offset, y con n≥3 en modo lineal, se reporta loo_rmse
+    (leave-one-out; con 2 puntos el modo lineal no deja grados de libertad
+    para el LOO → NaN). Siempre se devuelven aicc_offset / aicc_linear
+    (NaN si n es insuficiente: AICc exige n ≥ k+2, con k = parámetros + σ).
     """
     calib = EMPIRICAL_CALIBRATION.get(group_type)
     if not calib:
@@ -11375,7 +11569,13 @@ def fit_empirical_correction(group_type: str, gcorr_source: str = "goodvibes",
     warn: list[str] = []
     x_range = max(x) - min(x)
 
-    if mode == "auto":
+    aicc_off, aicc_lin = _aicc_offset_vs_linear(x, y)
+
+    if mode == "aicc":
+        use_mode = ("linear" if (n >= 5 and x_range >= 3.0 and np.isfinite(aicc_lin)
+                                 and np.isfinite(aicc_off) and aicc_lin < aicc_off - 2.0)
+                    else "offset")
+    elif mode == "auto":
         use_mode = "linear" if (n >= 3 and x_range >= 1.0) else "offset"
         if n >= 3 and use_mode == "offset":
             warn.append(f"n={n} pero el rango de pKa calculado es solo "
@@ -11393,6 +11593,18 @@ def fit_empirical_correction(group_type: str, gcorr_source: str = "goodvibes",
     if use_mode == "linear":
         fit = _ols_fit(x, y)
         slope, intercept, r2, rmse = fit["slope"], fit["intercept"], fit["r2"], fit["rmse"]
+        if n >= 3:
+            loo = []
+            for k in range(n):
+                xs = [x[j] for j in range(n) if j != k]
+                ys = [y[j] for j in range(n) if j != k]
+                fk = _ols_fit(xs, ys)
+                if not fk["ok"]:
+                    loo = []
+                    break
+                loo.append(y[k] - (fk["slope"] * x[k] + fk["intercept"]))
+            if loo:
+                loo_rmse = float(np.sqrt(np.mean(np.square(loo))))
         if n == 2:
             warn.append("Regresión lineal con solo 2 puntos: el ajuste es EXACTO "
                         "(0 grados de libertad), R² no informativo y pendiente "
@@ -11426,6 +11638,7 @@ def fit_empirical_correction(group_type: str, gcorr_source: str = "goodvibes",
             "mode": use_mode, "n": n, "molecules": mols,
             "slope": slope, "intercept": intercept, "r2": r2, "rmse": rmse,
             "loo_rmse": loo_rmse,
+            "aicc_offset": aicc_off, "aicc_linear": aicc_lin,
             "calib_x": x, "calib_y": y, "warnings": warn}
 
 
@@ -11468,8 +11681,63 @@ def apply_empirical_correction(pka_value: Optional[float], group_type: str,
            "delta": corrected - pka_value}
     out.update({k: fit[k] for k in
                 ("group_type", "gcorr_source", "mode", "n", "molecules",
-                 "slope", "intercept", "r2", "rmse", "loo_rmse", "warnings")})
+                 "slope", "intercept", "r2", "rmse", "loo_rmse", "warnings",
+                 "aicc_offset", "aicc_linear")})
     return out
+
+
+def apply_double_difference_correction(pka_value: Optional[float],
+                                       gcorr_source: str = "goodvibes",
+                                       mode: str = "offset",
+                                       pka_result: Optional[dict] = None) -> dict:
+    """
+    Corrección de doble diferencia para el sitio (iii) de MGLYVAL (amidinio
+    vinílogo con 2×COO⁻, transición −1→−2), CALIBRATION_PLAN.md §2:
+
+        pKa_corr = pKa_calc − δ(amonio, −1→−2) − [δ(amidinio, +1→0) − δ(amonio, +1→0)]
+
+    con δ = calc − exp. En términos de las correcciones ya ajustadas
+    (Δ = corregido − crudo = −δ):
+
+        pKa_corr = pKa_calc + Δ[ammonium_dianion] + Δ[amidinium] − Δ[ammonium]
+
+    El término de carga sale de calibradores de la MISMA carga (−1→−2), la
+    corrección química de un par +1→0; supone que ambos errores se suman (hay
+    que comprobarlo con el test de aditividad con pyridinium_anion). Es un
+    tipo compuesto explícito: no pasa por --force-charge-class. El término
+    −1→−2 usa `mode`; los dos términos +1→0 usan siempre offset puro (el plan
+    los toma como desplazamientos). La incertidumbre devuelta (`sigma`) es la
+    suma en cuadratura de los loo_rmse de los tres componentes (NaN si alguno
+    no tiene LOO).
+    """
+    comps = EMPIRICAL_TYPE_META["double_difference"]["components"]
+    if pka_value is None:
+        return {"ok": False, "group_type": "double_difference",
+                "reason": "pKa crudo no disponible (None)"}
+    qa = (pka_result or {}).get("q_acid")
+    qb = (pka_result or {}).get("q_base")
+    if qa is not None and qb is not None and (qa, qb) != (-1, -2):
+        return {"ok": False, "group_type": "double_difference",
+                "reason": f"la doble diferencia es para −1→−2; el tramo es "
+                          f"{qa:+d}→{qb:+d}."}
+    fits = {}
+    for t, md in zip(comps, (mode, "offset", "offset")):
+        f = fit_empirical_correction(t, gcorr_source=gcorr_source, mode=md)
+        if not f["ok"]:
+            return {"ok": False, "group_type": "double_difference",
+                    "reason": f"componente '{t}' no disponible: {f.get('reason')}"}
+        fits[t] = f
+    f_dia, f_amd, f_amm = (fits[t] for t in comps)
+    d_dia = f_dia["slope"] * pka_value + f_dia["intercept"] - pka_value
+    d_amd = f_amd["intercept"]            # offset puro: Δ = b
+    d_amm = f_amm["intercept"]
+    delta = d_dia + (d_amd - d_amm)
+    loos = [f["loo_rmse"] for f in (f_dia, f_amd, f_amm)]
+    sigma = float(np.sqrt(np.sum(np.square(loos)))) if all(np.isfinite(loos)) else float("nan")
+    return {"ok": True, "group_type": "double_difference",
+            "pKa_raw": pka_value, "pKa_corrected": pka_value + delta, "delta": delta,
+            "components": {"ammonium_dianion": d_dia, "amidinium": d_amd, "ammonium": d_amm},
+            "sigma": sigma, "n": {t: fits[t]["n"] for t in comps}}
 
 
 def _print_empirical_correction(corr: Optional[dict], label: str):
@@ -11548,6 +11816,42 @@ def _parse_empirical_correction_spec(spec: Optional[str]) -> dict[str, str]:
                   file=sys.stderr)
         out[key] = val
     return out
+
+
+DEFAULT_CALIBRATION_FILE = Path("calibration") / "calibration_v3.json"
+
+
+def resolve_calibration_source(calibration_file: Optional[str],
+                               empirical_correction: Optional[str],
+                               allow_builtin: bool = False,
+                               search_roots: Optional[list[Path]] = None
+                               ) -> Optional[Path]:
+    """
+    P0-5: la tabla EMPIRICAL_CALIBRATION embebida es OBSOLETA (constantes
+    G(H⁺,aq) antiguas, born/CPCM). Con --empirical-correction se exige un
+    calibration.json: el indicado con --calibration-file o, si no hay,
+    calibration/calibration_v3.json (en cwd o junto a maaqc.py). Si no existe
+    ninguno → SystemExit con mensaje claro, salvo --allow-builtin-calibration.
+    Sin --empirical-correction no se necesita nada (devuelve el archivo
+    explícito, si lo hay).
+    """
+    if calibration_file:
+        return Path(calibration_file).expanduser()
+    if not empirical_correction or allow_builtin:
+        return None
+    roots = search_roots if search_roots is not None else \
+        [Path.cwd(), Path(__file__).resolve().parent]
+    for r in roots:
+        cand = Path(r) / DEFAULT_CALIBRATION_FILE
+        if cand.is_file():
+            return cand
+    raise SystemExit(
+        "ERROR: --empirical-correction requiere un calibration.json vigente: "
+        "pasa --calibration-file RUTA o coloca "
+        f"{DEFAULT_CALIBRATION_FILE} (no encontrado en "
+        f"{', '.join(str(r) for r in roots)}). La tabla embebida "
+        "EMPIRICAL_CALIBRATION está obsoleta; para usarla igualmente "
+        "(no recomendado) añade --allow-builtin-calibration.")
 
 
 def load_calibration_file(path: Path) -> dict:
@@ -12778,6 +13082,84 @@ def compute_tautomer_equilibrium(
     return result
 
 
+def _boltzmann_macro_G(G_eh: list[float], g: Optional[list[float]] = None,
+                       T: float = T_STD) -> tuple[float, list[float]]:
+    """
+    G_macro = −RT·ln Σᵢ gᵢ·exp(−Gᵢ/RT) (en Eh) y las fracciones
+    fᵢ = gᵢ·exp(−Gᵢ/RT)/Z. gᵢ es la degeneración del microestado (nº de
+    microestados equivalentes por simetría, p. ej. 2 para IDA/amidinas;
+    ±RT·ln2 = 0.41 kcal/mol ↔ 0.30 unidades de pKa). Estable numéricamente
+    (se resta G_min).
+    """
+    g_arr = np.ones(len(G_eh)) if g is None else np.asarray(g, dtype=float)
+    G = np.asarray(G_eh, dtype=float)
+    if len(g_arr) != len(G) or np.any(g_arr <= 0):
+        raise ValueError("degeneraciones: misma longitud que G y todas > 0")
+    G_min = float(G.min())
+    w = g_arr * np.exp(-(G - G_min) * HARTREE_TO_KCAL / (R_KCAL * T))
+    Z = float(w.sum())
+    G_macro = G_min - (R_KCAL * T * np.log(Z)) / HARTREE_TO_KCAL
+    return float(G_macro), (w / Z).tolist()
+
+
+def compute_micro_equilibrium(
+    micro: list[dict],
+    degeneracy: Optional[dict] = None,
+    T: float = T_STD,
+    gcorr_source: str = "harmonic",
+) -> dict:
+    """
+    Macroestado de una carga con N microestados (P1-12a; generaliza el par
+    R/D de compute_tautomer_equilibrium, que se conserva sin cambios).
+
+    micro      : lista de dicts de estado (collect_mol_data() o macroestados con
+                 is_macrostate=True); todos con el mismo q y N° de átomos.
+    degeneracy : {mol_name: g} (por defecto 1). Entra como g·exp(−G/RT).
+
+    Retorna dict: ok, labels, G_Eh (por microestado), g, fractions
+    ({mol_name: f}), G_macro_Eh, theory, aq_source, warnings. ok=False (con
+    warnings) si falta G de algún microestado o hay inconsistencia de carga,
+    átomos o modelo de solvatación; NO hace fallback silencioso.
+    """
+    degeneracy = degeneracy or {}
+    labels = [d["mol_name"] for d in micro]
+    warns: list[str] = []
+    out: dict = {"ok": False, "labels": labels, "T": T, "warnings": warns,
+                 "G_Eh": None, "g": None, "fractions": None, "G_macro_Eh": None,
+                 "theory": None, "aq_source": micro[0].get("aq_source", "CPCM") if micro else None}
+    if len(micro) < 1:
+        warns.append("compute_micro_equilibrium: lista de microestados vacía.")
+        return out
+    for d in micro[1:]:
+        msgs = _validate_state_charges(micro[0], d, dq_expected=0, dn_expected=0,
+                                       label_a=labels[0], label_b=d["mol_name"])
+        warns.extend(msgs)
+        if any(m.startswith("❌") for m in msgs):
+            return out
+        if d.get("use_smd", False) != micro[0].get("use_smd", False):
+            warns.append(f"INCONSISTENT SOLVATION MODEL entre {labels[0]} y {d['mol_name']}.")
+            return out
+    Gs, theories = [], []
+    for d in micro:
+        gi = _state_G_total_direct(d, T=T, gcorr_source=gcorr_source)
+        if not gi.get("ok"):
+            warns.append(gi.get("warn") or f"Sin G_total para {d['mol_name']}.")
+            return out
+        if gi.get("warn"):
+            warns.append(gi["warn"])
+        Gs.append(gi["G_total_Eh"])
+        theories.append(gi["theory_sp"])
+    th = {t for t in theories if t}
+    if len(th) > 1:
+        warns.append(f"INCONSISTENT THEORY LEVEL entre microestados: {sorted(th)}")
+    g = [float(degeneracy.get(lbl, 1.0)) for lbl in labels]
+    G_macro, f = _boltzmann_macro_G(Gs, g, T=T)
+    out.update({"ok": True, "G_Eh": Gs, "g": g,
+                "fractions": dict(zip(labels, f)), "G_macro_Eh": G_macro,
+                "theory": next(iter(th), None)})
+    return out
+
+
 def _print_tautomer_cycle(r: dict):
     """Imprime el equilibrio de tautómeros neutro⇌zwitterión."""
     sep = "─" * 66
@@ -13358,6 +13740,19 @@ def compute_pka(
 #                        cantidades derivadas (Δ entre pKa's, fracciones de
 #                        especie) queda sobreestimada.
 
+def _calibration_intercept_draw(fit: dict, n_samples: int,
+                                rng: np.random.Generator) -> Optional[np.ndarray]:
+    """
+    b ~ b̂ + t_{n−1}·s_LOO·√(1+1/n) (CALIBRATION_PLAN.md §3.6). None si la
+    calibración no tiene n≥2 y loo_rmse finito (n=1: sin error estimable).
+    """
+    n, s_loo = fit.get("n", 0), fit.get("loo_rmse", float("nan"))
+    if n < 2 or not np.isfinite(s_loo):
+        return None
+    return (fit["intercept"]
+            + rng.standard_t(n - 1, size=n_samples) * s_loo * np.sqrt(1.0 + 1.0 / n))
+
+
 def compute_pka_montecarlo(
     data_acid: dict,
     data_base: dict,
@@ -13370,8 +13765,20 @@ def compute_pka_montecarlo(
     sigma_hplus_kcal: float = 2.5,
     shared_hplus_draw: Optional[np.ndarray] = None,
     rng: Optional[np.random.Generator] = None,
+    calibration_fit: Optional[dict] = None,
+    calib_intercept_draw: Optional[np.ndarray] = None,
 ) -> dict:
     """
+    P1-12d — modo calibrado: si se pasan `calibration_fit` (salida de
+    fit_empirical_correction) y `calib_intercept_draw` (shape (n_samples,),
+    sorteo del intercepto b ~ b̂ + t_{n−1}·s_LOO·√(1+1/n), COMPARTIDO por todos
+    los usos de esa clase, ver _calibration_intercept_draw), el pKa muestreado
+    es slope·pKa_crudo + b_draw. En ese modo NO se muestrean σ_H⁺ ni
+    σ_elec/σ_gcorr (el residuo de calibración ya los contiene) y
+    `hplus_draw` queda en None. Pendiente: incertidumbre conformacional
+    (bootstrap sobre conformeros), que el plan pide sumar. Con modo lineal solo
+    se sortea el intercepto (la incertidumbre de la pendiente no se propaga).
+
     Propaga incertidumbre en el pKa de AH → A⁻ + H⁺ vía Monte Carlo,
     reusando compute_pka() como fuente única de verdad para el valor
     determinístico (mismo mapeo de estados, misma validación de carga/N°
@@ -13463,6 +13870,27 @@ def compute_pka_montecarlo(
 
     if rng is None:
         rng = np.random.default_rng()
+
+    if calibration_fit is not None:
+        if calib_intercept_draw is None or len(calib_intercept_draw) != n_samples:
+            raise ValueError("calibration_fit requiere calib_intercept_draw con "
+                             f"{n_samples} muestras.")
+        pka_raw = base_result["dG_aq_kcal"] / (R_KCAL * T * LN10)
+        pka_samples = calibration_fit["slope"] * pka_raw + np.asarray(calib_intercept_draw)
+        ci_lo, ci_hi = np.percentile(pka_samples, [2.5, 97.5])
+        out["warnings"].append(
+            "MC calibrado: sin σ_H⁺/σ_elec/σ_gcorr genéricos (el residuo de "
+            "calibración ya los contiene); incertidumbre conformacional NO incluida.")
+        out.update({
+            "ok": True, "calibrated": True,
+            "pka_samples": pka_samples,
+            "pka_mean":   float(np.mean(pka_samples)),
+            "pka_std":    float(np.std(pka_samples, ddof=1)),
+            "pka_median": float(np.median(pka_samples)),
+            "pka_ci95":   (float(ci_lo), float(ci_hi)),
+            "hplus_draw": None,
+        })
+        return out
 
     d_hplus = (
         shared_hplus_draw if shared_hplus_draw is not None
@@ -13908,8 +14336,16 @@ def run_chain_montecarlo(
     sigma_gcorr_kcal: float = 0.4,
     sigma_hplus_kcal: float = 2.5,
     seed: Optional[int] = None,
+    calibrations: Optional[dict] = None,
 ) -> dict:
     """
+    P1-12d: `calibrations` = {"pKa0"|"pKa1"|"pKa2": fit_empirical_correction(...)}
+    activa el MC calibrado en esos tramos (ver compute_pka_montecarlo). El
+    sorteo del intercepto es UNO por clase (group_type del fit), compartido
+    entre todos los tramos de esa clase. Tramos sin calibración (o con n<2 /
+    LOO indefinido, con aviso) siguen con el MC crudo. Sin `calibrations` el
+    resultado es idéntico al anterior (mismo flujo de rng).
+
     Propaga incertidumbre por Monte Carlo a través de TODA la cadena de 5
     estados (A⁺ ⇌ [R⇌D] ⇌ B⁻ ⇌ C²⁻), preservando la correlación física de
     G(H⁺,aq) entre pKa0/pKa1/pKa2, y devuelve bandas de confianza para las
@@ -13966,6 +14402,23 @@ def run_chain_montecarlo(
 
     mc_pka0 = mc_pka1 = mc_pka2 = None
 
+    cal_kw: dict = {"pKa0": {}, "pKa1": {}, "pKa2": {}}
+    if calibrations:
+        class_draw: dict = {}
+        rng_cal = np.random.default_rng(None if seed is None else [seed, 1])
+        for slot, fit in calibrations.items():
+            if slot not in cal_kw or not fit or not fit.get("ok"):
+                continue
+            gt = fit.get("group_type", slot)
+            if gt not in class_draw:
+                class_draw[gt] = _calibration_intercept_draw(fit, n_samples, rng_cal)
+            if class_draw[gt] is None:
+                out["warnings"].append(
+                    f"{slot}: calibración '{gt}' con n<2 o LOO indefinido; "
+                    f"se usa el MC crudo en ese tramo.")
+                continue
+            cal_kw[slot] = {"calibration_fit": fit, "calib_intercept_draw": class_draw[gt]}
+
     if data_A is not None and data_neutral_macro is not None:
         mc_pka0 = compute_pka_montecarlo(
             data_A, data_neutral_macro, T=T, method=method, gcorr_source=gcorr_source,
@@ -13973,6 +14426,7 @@ def run_chain_montecarlo(
             sigma_elec_kcal=sigma_elec_kcal, sigma_gcorr_kcal=sigma_gcorr_kcal,
             sigma_hplus_kcal=sigma_hplus_kcal,
             shared_hplus_draw=shared_hplus_draw, rng=rng_pka0,
+            **cal_kw["pKa0"],
         )
         out["warnings"].extend(mc_pka0["warnings"])
 
@@ -13983,6 +14437,7 @@ def run_chain_montecarlo(
             sigma_elec_kcal=sigma_elec_kcal, sigma_gcorr_kcal=sigma_gcorr_kcal,
             sigma_hplus_kcal=sigma_hplus_kcal,
             shared_hplus_draw=shared_hplus_draw, rng=rng_pka1,
+            **cal_kw["pKa1"],
         )
         out["warnings"].extend(mc_pka1["warnings"])
 
@@ -13993,6 +14448,7 @@ def run_chain_montecarlo(
             sigma_elec_kcal=sigma_elec_kcal, sigma_gcorr_kcal=sigma_gcorr_kcal,
             sigma_hplus_kcal=sigma_hplus_kcal,
             shared_hplus_draw=shared_hplus_draw, rng=rng_pka2,
+            **cal_kw["pKa2"],
         )
         out["warnings"].extend(mc_pka2["warnings"])
 
@@ -15325,6 +15781,11 @@ help="Aplica la corrección empírica calibrada (ver "
                         help="Permite --empirical-correction con tipos calibrados "
                              "con UN solo punto (ajuste exacto, sin validación). "
                              "Por defecto se exige n≥2.")
+    parser.add_argument("--allow-builtin-calibration", action="store_true",
+                        help="Permite --empirical-correction con la tabla "
+                             "EMPIRICAL_CALIBRATION embebida (OBSOLETA) cuando no "
+                             "hay --calibration-file ni calibration/"
+                             "calibration_v3.json. No recomendado.")
     parser.add_argument("--force-charge-class", action="store_true",
                         help="Aplica el tipo de --empirical-correction aunque la "
                              "clase de carga (q_ácido→q_base) del tramo no "
@@ -15334,8 +15795,13 @@ help="Aplica la corrección empírica calibrada (ver "
     EMPIRICAL_OPTS["allow_n1"] = bool(args.allow_n1)
     EMPIRICAL_OPTS["force_class"] = bool(args.force_charge_class)
 
-    if args.calibration_file:
-        _meta = load_calibration_file(Path(args.calibration_file).expanduser())
+    _calib_path = resolve_calibration_source(
+        args.calibration_file, args.empirical_correction,
+        allow_builtin=args.allow_builtin_calibration)
+    if _calib_path is not None:
+        if not _calib_path.is_file():
+            raise SystemExit(f"ERROR: --calibration-file: no existe {_calib_path}")
+        _meta = load_calibration_file(_calib_path)
         _cm, _ct = _meta.get("method_resolved"), _meta.get("T")
         if _cm and args.method not in ("auto", _cm):
             print(f"AVISO: la calibración se hizo con method='{_cm}' y estás "
@@ -15676,8 +16142,17 @@ class MacrostateError(SystemExit):
 
 def _build_neutral_macrostate(data_R: dict, data_D: dict, neutral: str,
                               zwitterion: str, T: float, verbose: bool,
-                              gcorr_source: str = "harmonic") -> tuple[dict, dict]:
+                              gcorr_source: str = "harmonic",
+                              extra_micro: Optional[list[dict]] = None,
+                              degeneracy: Optional[dict] = None) -> tuple[dict, dict]:
     """
+    P1-12a: `extra_micro` (lista de dicts de estado de la misma carga, p. ej.
+    D′ y R′ de MGLYVAL) y `degeneracy` ({mol_name: g}) amplían el macroestado a
+    N microestados vía compute_micro_equilibrium(); G_macro y las etiquetas
+    salen de esa suma (R y D se incluyen siempre). Sin ambos, comportamiento
+    idéntico al histórico (solo R y D). taut_result conserva f_R/f_D del PAR
+    R/D (los usa boltzmann_5state) y agrega "micro" con el detalle de los N.
+
     Construye el macroestado neutro/zwitterión (R ⇌ D, tautómeros) usado como
     estado intermedio de la cadena A → [R/D] → B → C. Retorna
     (taut_result, data_neutral_macro). Extraído tal cual de _run_extended()
@@ -15726,7 +16201,26 @@ def _build_neutral_macrostate(data_R: dict, data_D: dict, neutral: str,
     elif not verbose:
         _print_tautomer_cycle(taut_result)
 
-    if taut_result["conf_D"] is not None:
+    micro_res = None
+    if extra_micro or degeneracy:
+        members = [data_R] + ([data_D] if taut_result["conf_D"] is not None else []) \
+                  + list(extra_micro or [])
+        micro_res = compute_micro_equilibrium(members, degeneracy=degeneracy, T=T,
+                                              gcorr_source=gcorr_source)
+        if micro_res["ok"]:
+            taut_result["G_macro_Eh"] = micro_res["G_macro_Eh"]
+            taut_result["micro"] = micro_res
+        else:
+            print(f"\n  ⚠  Macroestado de N microestados no calculable; se usa el "
+                  f"par {neutral}/{zwitterion}.")
+            for w in micro_res["warnings"]:
+                print(f"    ⚠  {w}")
+            taut_result["warnings"] = list(taut_result["warnings"]) + micro_res["warnings"]
+
+    if micro_res is not None and micro_res["ok"]:
+        conf_label = " + ".join(micro_res["labels"]) + " (Boltzmann, N micro)"
+        mol_label = "/".join(micro_res["labels"])
+    elif taut_result["conf_D"] is not None:
         conf_label = (f"{neutral}:{taut_result['conf_R']} + "
                       f"{zwitterion}:{taut_result['conf_D']} (Boltzmann)")
         mol_label  = f"{neutral}/{zwitterion}"
@@ -16903,14 +17397,14 @@ def _main_cubes(argv: Optional[list[str]] = None) -> int:
 #
 # 'chain' = {rol: carpeta dentro de <base>/<MOL>/runs/}. Si una carpeta se
 # llama distinto (p. ej. glycine en vez de GR) usa --override GLYCINE.neutral=glycine.
-_CALIB_REF_AA = "McMurry Table 26-1 / Carey & Giuliano"
+_CALIB_REF_AA = _REF_W
 CALIBRATION_SETS: dict[str, dict] = {
     "ASPARTIC": {
         "label": "Aspartic",
         "chain": {"protonated": "AA", "neutral": "AR", "zwitterion": "AD", "anion": "AB"},
         "transitions": [
-            {"slot": "pKa0", "type": "carboxyl",   "step": "A→R/D", "group": "α-COOH", "exp": 1.88},
-            {"slot": "pKa1", "type": "carboxyl_2", "step": "R/D→B", "group": "β-COOH", "exp": 3.65},
+            {"slot": "pKa0", "type": "carboxyl",   "step": "A→R/D", "group": "α-COOH", "exp": PKA_EXP["Aspartic"]["carboxyl"]},
+            {"slot": "pKa1", "type": "carboxyl_2", "step": "R/D→B", "group": "β-COOH", "exp": PKA_EXP["Aspartic"]["carboxyl_2"]},
         ],
     },
     "GLUTAMIC": {
@@ -16918,25 +17412,25 @@ CALIBRATION_SETS: dict[str, dict] = {
         "chain": {"protonated": "GA", "neutral": "GR", "zwitterion": "GD",
                   "anion": "GB", "dianion": "GC"},
         "transitions": [
-            {"slot": "pKa0", "type": "carboxyl",      "step": "A→R/D", "group": "α-COOH",  "exp": 2.19},
-            {"slot": "pKa1", "type": "carboxyl_2",    "step": "R/D→B", "group": "γ-COOH",  "exp": 4.25},
-            {"slot": "pKa2", "type": "amino_dianion", "step": "B→C",   "group": "NH₃⁺ (2×COO⁻)", "exp": 9.67},
+            {"slot": "pKa0", "type": "carboxyl",      "step": "A→R/D", "group": "α-COOH",  "exp": PKA_EXP["Glutamic"]["carboxyl"]},
+            {"slot": "pKa1", "type": "carboxyl_2",    "step": "R/D→B", "group": "γ-COOH",  "exp": PKA_EXP["Glutamic"]["carboxyl_2"]},
+            {"slot": "pKa2", "type": "amino_dianion", "step": "B→C",   "group": "NH₃⁺ (2×COO⁻)", "exp": PKA_EXP["Glutamic"]["amino_dianion"]},
         ],
     },
     "GLYCINE": {
         "label": "Glycine",
         "chain": {"protonated": "GA", "neutral": "GR", "zwitterion": "GD", "anion": "GB"},
         "transitions": [
-            {"slot": "pKa0", "type": "carboxyl", "step": "A→R/D", "group": "COOH", "exp": 2.34},
-            {"slot": "pKa1", "type": "amino",    "step": "R/D→B", "group": "NH₃⁺",  "exp": 9.60},
+            {"slot": "pKa0", "type": "carboxyl", "step": "A→R/D", "group": "COOH", "exp": PKA_EXP["Glycine"]["carboxyl"]},
+            {"slot": "pKa1", "type": "amino",    "step": "R/D→B", "group": "NH₃⁺",  "exp": PKA_EXP["Glycine"]["amino"]},
         ],
     },
     "VALINE": {
         "label": "Valine",
         "chain": {"protonated": "VA", "neutral": "VR", "zwitterion": "VD", "anion": "VB"},
         "transitions": [
-            {"slot": "pKa0", "type": "carboxyl", "step": "A→R/D", "group": "COOH", "exp": 2.32},
-            {"slot": "pKa1", "type": "amino",    "step": "R/D→B", "group": "NH₃⁺",  "exp": 9.62},
+            {"slot": "pKa0", "type": "carboxyl", "step": "A→R/D", "group": "COOH", "exp": PKA_EXP["Valine"]["carboxyl"]},
+            {"slot": "pKa1", "type": "amino",    "step": "R/D→B", "group": "NH₃⁺",  "exp": PKA_EXP["Valine"]["amino"]},
         ],
     },
     "AP": {
@@ -16944,7 +17438,7 @@ CALIBRATION_SETS: dict[str, dict] = {
         "pair": ("APA", "APR"),
         "transitions": [
             {"slot": "pair", "type": "pyridinium", "step": "APA→APR",
-             "group": "N–H⁺ (4-aminopiridinio)", "exp": 9.17},
+             "group": "N–H⁺ (4-aminopiridinio)", "exp": PKA_EXP["AP"]["pyridinium"]},
         ],
     },
 }
@@ -17401,6 +17895,8 @@ def main(argv: "list[str] | None" = None) -> int:
             _main_calibrate()
             return 0
     except SystemExit as exc:
+        if isinstance(exc.code, str):       # SystemExit("ERROR: ...") se perdía en silencio
+            print(exc.code, file=sys.stderr)
         return exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
     finally:
         sys.argv = saved_argv
