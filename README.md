@@ -66,15 +66,15 @@ quantum-mechanical free-energy calculation.
 
 ```mermaid
 flowchart TD
-    A["PubChem record<br/>protonation states<br/>A, R, D, B, C"] --> B["CREST<br/>conformer search<br/>GFN2-xTB, ALPB water"]
+    A["PubChem record<br/>protonation states A R D B C"] --> B["CREST<br/>conformer search<br/>GFN2 xTB with ALPB water"]
     B --> C["CENSO<br/>ensemble screening<br/>Boltzmann filter 5 percent"]
-    C --> D["DFT optimisation<br/>wB97X-D3 / def2-SVP<br/>CPCM water"]
+    C --> D["DFT optimisation<br/>wB97X D3 with def2 SVP<br/>CPCM water"]
     D --> E["Numerical frequencies<br/>no imaginary modes<br/>thermal corrections"]
-    E --> F["Single points<br/>def2-TZVPD<br/>gas, CPCM, SMD"]
-    F --> G["TD-DFT<br/>15 excited states<br/>NTOs, ESP, orbitals"]
-    F --> H["pKa cycle<br/>class-resolved calibration<br/>Monte Carlo uncertainty"]
-    H --> I["Speciation<br/>pH 7.0 and 8.1<br/>4 temperatures"]
-    G --> J["Docking-ready structures<br/>and electronic descriptors"]
+    E --> F["Single points<br/>def2 TZVPD<br/>gas phase and CPCM and SMD"]
+    F --> G["TD DFT<br/>15 excited states<br/>NTOs and ESP and orbitals"]
+    F --> H["pKa cycle<br/>class resolved calibration<br/>Monte Carlo uncertainty"]
+    H --> I["Speciation<br/>pH 7 and pH 8 point 1<br/>4 temperatures"]
+    G --> J["Docking ready structures<br/>and electronic descriptors"]
     I --> J
 ```
 
