@@ -80,3 +80,7 @@ docs/papers/**/*.pdf
 # salidas regenerables de microestados (CREST/xtb)
 MGLYVAL/microstates_new/crest/
 MGLYVAL/microstates_new/xtb_opt/
+
+# === manuscritos (solo local, no se publican) ===
+manuscript/
+*.docx

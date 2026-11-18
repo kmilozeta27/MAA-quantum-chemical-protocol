@@ -20,6 +20,9 @@ for m, v in sorted(g.items()):
     for e, n in sorted(v)[:k]: print(n, Q[n])
 PY
 while read -r n q; do
+  # reanudable: salta corridas terminadas; una corrida incompleta se aparta (no se borra) y se repite
+  if grep -qs "CREST terminated normally" crest/$n/crest.log; then echo "skip $n (terminada)"; continue; fi
+  if [ -d crest/$n ]; then mv crest/$n crest/${n}.interrumpida_$(date +%Y%m%d_%H%M%S); fi
   mkdir -p crest/$n; cp xtb_opt/$n/xtbopt.xyz crest/$n/in.xyz
   ( cd crest/$n && crest in.xyz --T $NT --chrg $q --uhf 0 --alpb water > crest.log 2>&1 )
 done < crest_jobs.txt

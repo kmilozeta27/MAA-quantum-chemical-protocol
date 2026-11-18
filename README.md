@@ -12,7 +12,8 @@ marine algae.
 
 > **Manuscript (in preparation, *Marine Drugs*, MDPI):**
 > *Protonation state and conformational ensemble in mycosporine-like amino acids: a calibrated
-> quantum-chemical protocol.* Camilo Zúñiga Jara et al.
+> quantum-chemical protocol.* Camilo Zúñiga Jara. The draft is not distributed through this
+> repository; it is available from the author on request.
 
 ---
 
@@ -295,15 +296,17 @@ These limits are stated up front:
 | Component | Status |
 |---|---|
 | Automated pipeline, all stages | ✅ Built and running |
-| MGLYVAL B: CREST → CENSO → 6 conformers: optimisation, frequencies, single points (6/6) | ✅ Done (2 conformers with small imaginary modes) |
-| MGLYVAL B TD-DFT | 🔄 Done, re-run by hand for conf_5 / conf_6 |
-| MGLYVAL A / R / D / C | 🔄 Single points (CPCM) reported in the log; `pka` has not yet completed in this layout |
-| AP (APA / APR) | ✅ 6 stages, 1 conformer each |
-| DG | 🔄 4DG_A/T: optimisation, frequencies, single points, TD-DFT (no SP_GAS/SP_SMD). 4DG_B: 7 optimisations, 3 of 4 NumFreq, no SP or TD-DFT |
+| Calibration set (Asp, Glu, Gly, Val, 4-aminopyridine) | ✅ All stages, including SMD single points |
+| MGLYVAL A / R / D / B / C | ✅ CREST, CENSO, optimisation, frequencies, CPCM and gas single points, TD-DFT; SMD for dominant conformers only (two B conformers carry extremely small imaginary frequencies, ignored for now) |
+| MGLYVAL new microstates D′ / R′ / C′ / 010 / 100 ([`MGLYVAL/microstates_new/`](MGLYVAL/microstates_new/)) | 🔄 CREST running; CENSO and DFT next |
+| Shinorine | 🔄 Partial: two states optimised, monoanion through TD-DFT |
+| 4-Deoxygadusol (DG, GADUSOL) | 🔄 Partial: most states optimised, four through TD-DFT; CPCM single points only |
+| Palythine / porphyra-334 / mycosporine-glycine | ⏳ CREST only or starting structures |
+| Asterina-330 / palythinol / usujirene / palythene | ⏳ Not started |
 | Wave-function reference (STEOM-DLPNO-CCSD) | 🔄 SVP / SVPD / ma-SVP / CPCM done; TZVP and bt-PNO-EOM missing; ADC(2) incomplete |
 | Thermodynamic pKa cycle with unified proton reference | ✅ Implemented |
 | Monte Carlo uncertainty (correlated proton error across the chain) | ✅ Implemented |
-| Class-resolved calibration | 🔄 Framework built; calibration set being extended |
+| Class-resolved calibration | 🔄 Framework built; specification frozen at tag `pka-spec-v1`; calibration set being extended |
 | ESP / orbital / NTO analysis | 🔄 Computed, being organised |
 | Tabulation of results for the manuscript | 🔄 In progress |
 | Comparison against database-derived structures | ⏳ Next |
@@ -315,8 +318,11 @@ These limits are stated up front:
 ## Authorship
 
 **Camilo Zúñiga Jara** designed the protocol, wrote the pipeline, ran all calculations and is
-writing the manuscript. The work is done in collaboration with Dr. Ricardo Veloso (Universidad
-de La Frontera) and Dr. Desmond Macleod (Universidad Autónoma, Santiago).
+writing the manuscript. Co-authors are not yet defined.
+
+**Acknowledgements.** Dr. Ricardo Veloso (Universidad de La Frontera) and Dr. Desmond Macleod
+(Universidad Autónoma, Santiago) provided guidance and support as advising professors; they
+are not co-authors of this work.
 
 **Use of AI tools.** Parts of `maaqc.py` were written with the help of Claude Code (Anthropic).
 All scientific choices, calculations and outputs were designed, reviewed and verified by the

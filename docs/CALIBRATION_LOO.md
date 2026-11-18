@@ -52,3 +52,17 @@ El error sobreestima el pKa siempre (signo positivo) y crece con la carga negati
 - Con n = 2, RMSE_LOO (0.91 y 1.15) es poco informativo: es |b1 − b2| y se debe leer como dispersión entre los dos calibradores, no como incertidumbre de predicción.
 - Los pKa experimentales de Asp en el CSV (1.88 / 3.65) son los de McMurry; la compilación [W] da 2.09 / 3.86 (P1-11). Con 2.09 el error de Asp en carboxyl bajaría a 0.93 y el RMSE_LOO de carboxyl cambiaría; habrá que rehacer este cálculo tras P1-11.
 - Los pKa calculados provienen del esquema A→R/D; la validez de la clase carboxyl para MGLYVAL depende de que A→D/D′ sea el camino dominante (ver `CALIBRATION_PLAN.md`).
+
+## Recalculo con `PKA_EXP` unificado (Asp 2.09 / 3.86), 2026-11-17
+
+Mismas fórmulas que arriba, sustituyendo los pKa experimentales de Asp (1.88 → 2.09 y 3.65 → 3.86) en `calib_v3.csv`. Los pKa calculados no se rehicieron.
+
+| Clase | n | Offset (exp − calc) | RMSE | RMSE_LOO |
+|---|---|---|---|---|
+| carboxyl | 4 | −1.312 | 0.233 | 0.311 |
+| carboxyl_2 | 2 | −1.753 | 0.349 | 0.698 |
+| amino | 2 | −2.566 | 0.576 | 1.153 |
+| pyridinium | 1 | −1.575 | n/d | n/d |
+| amino_dianion | 1 | −6.009 | n/d | n/d |
+
+Errores crudos por calibrador (calc − exp) en carboxyl: 0.93 (Asp α), 1.51, 1.48, 1.33. carboxyl_2: 2.10 (Asp β) y 1.40. El criterio de carboxyl (RMSE_LOO ≤ 0.5) se sigue cumpliendo; el valor ≈ 0.20 de la tabla anterior correspondía a los pKa de Asp de McMurry.
