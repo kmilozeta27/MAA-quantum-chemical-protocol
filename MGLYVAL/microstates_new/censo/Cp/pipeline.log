@@ -1,0 +1,4 @@
+2026-11-19 09:11:32  INFO      ── maaqc.py  commit=3e0d16529736d89f8121fa8bc819ffd9993717ff (modificado)  sha1=d243e395d2ea  argv=maaqc.py run --censo-standalone MGLYVAL/microstates_new/merged/Cp/crest_ensemble.xyz --out MGLYVAL/microstates_new/censo/Cp --charge -2 --temperature 298.15 --censo-refine  orca=/home/kmilozeta/orca_6_1_1_avx2/orca  cpu_topo=sysfs  host=Kmilo-ThinkPad-T14
+2026-11-19 09:11:32  DEBUG     [CHECK-BIN] CREST → /home/kmilozeta/.local/bin/crest
+2026-11-19 09:11:32  DEBUG     [CHECK-BIN] CENSO → /home/kmilozeta/miniforge3/envs/sciencebitch/bin/censo
+2026-11-19 09:11:32  INFO      [CENSO-STANDALONE]  ▶  lanzando sobre crest_ensemble.xyz (carga=-2, T=298.15 K, maxcores=12, omp-min=4) en /home/kmilozeta/PAPER1/MGLYVAL/microstates_new/censo/Cp  [nohup]

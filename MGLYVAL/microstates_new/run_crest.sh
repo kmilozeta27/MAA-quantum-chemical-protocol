@@ -4,8 +4,10 @@
 # asi CREST no cambia tautomero y las semillas s00/s01/s10/s11 conservan su isomeria C=N / orientacion N-R).
 # Seleccion por defecto: las 2 semillas de menor energia xTB de cada microestado (2 x 7 = 14 corridas).
 # Con ALL=1 corre las 28. Estimacion: 48 atomos, 12 hilos, ~1.5-4 h por corrida (14 corridas ~1-2 dias en serie).
+# JOBS_FILE=ruta (lineas "nombre carga") sustituye la seleccion automatica.
 # Uso: nohup bash run_crest.sh > crest_all.log 2>&1 &
 cd "$(dirname "$0")"; NT=${NT:-12}
+if [ -n "$JOBS_FILE" ]; then cp "$JOBS_FILE" crest_jobs.txt; else
 python3 - <<'PY' > crest_jobs.txt
 import re, collections
 Q = {l.split("\t")[0][:-4]: l.split("\t")[1] for l in open("start/charges.tsv")}
@@ -19,6 +21,7 @@ k = 99 if os.environ.get("ALL") else 2
 for m, v in sorted(g.items()):
     for e, n in sorted(v)[:k]: print(n, Q[n])
 PY
+fi
 while read -r n q; do
   # reanudable: salta corridas terminadas; una corrida incompleta se aparta (no se borra) y se repite
   if grep -qs "CREST terminated normally" crest/$n/crest.log; then echo "skip $n (terminada)"; continue; fi
