@@ -446,6 +446,8 @@ def _fake_calib(**kw):
 
 
 def test_calibration_file_overrides_builtin(tmp_path, monkeypatch):
+    # prueba la mecánica del ajuste con n=2 (bajo CALIB_MIN_N): override explícito
+    monkeypatch.setitem(m.EMPIRICAL_OPTS, "allow_below_min", True)
     import copy
     monkeypatch.setattr(m, "EMPIRICAL_CALIBRATION", copy.deepcopy(m.EMPIRICAL_CALIBRATION))
     before = m.fit_empirical_correction("amino", mode="offset")["intercept"]
@@ -479,6 +481,8 @@ def test_empirical_correction_requires_calibration_file(tmp_path):
 
 
 def test_refuses_cross_class_without_force(monkeypatch):
+    # prueba la mecánica del ajuste con n=2 (bajo CALIB_MIN_N): override explícito
+    monkeypatch.setitem(m.EMPIRICAL_OPTS, "allow_below_min", True)
     import copy
     monkeypatch.setattr(m, "EMPIRICAL_CALIBRATION", copy.deepcopy(_fake_calib()))
     monkeypatch.setitem(m.EMPIRICAL_OPTS, "force_class", False)
@@ -517,6 +521,8 @@ def test_fit_empirical_offset_n1_rmse_nan(monkeypatch):
 
 
 def test_fit_auto_switches_to_linear_n3_span1(monkeypatch):
+    # prueba la mecánica del ajuste con n=2 (bajo CALIB_MIN_N): override explícito
+    monkeypatch.setitem(m.EMPIRICAL_OPTS, "allow_below_min", True)
     _calib_xy(monkeypatch, [(2.0, 1.0), (3.0, 2.2), (4.0, 2.9)])    # rango = 2 ≥ 1
     assert m.fit_empirical_correction("t")["mode"] == "linear"
     _calib_xy(monkeypatch, [(2.0, 1.0), (2.4, 1.5), (2.8, 2.1)])    # rango = 0.8 < 1
@@ -528,6 +534,8 @@ def test_fit_auto_switches_to_linear_n3_span1(monkeypatch):
 
 
 def test_loo_rmse_two_points(monkeypatch):
+    # prueba la mecánica del ajuste con n=2 (bajo CALIB_MIN_N): override explícito
+    monkeypatch.setitem(m.EMPIRICAL_OPTS, "allow_below_min", True)
     _calib_xy(monkeypatch, [(10.0, 8.0), (12.0, 9.0)])   # sesgos −2 y −3
     fit = m.fit_empirical_correction("t", mode="offset")
     assert fit["intercept"] == pytest.approx(-2.5)
@@ -717,6 +725,8 @@ def test_pka_exp_single_source():
 
 
 def test_loo_linear(monkeypatch):
+    # prueba la mecánica del ajuste con n=2 (bajo CALIB_MIN_N): override explícito
+    monkeypatch.setitem(m.EMPIRICAL_OPTS, "allow_below_min", True)
     pts = [(2.0, 1.0), (3.0, 2.3), (4.0, 2.8), (6.0, 5.1)]
     _calib_xy(monkeypatch, pts)
     fit = m.fit_empirical_correction("t", mode="linear")
@@ -821,10 +831,13 @@ def test_mc_calibrated_no_hplus(monkeypatch):
         data_A={"a": 1}, data_neutral_macro={"n": 1}, data_B={"b": 1}, data_C=None,
         f_R=1.0, f_D=0.0, pH_values=[7.0], n_samples=300, seed=5,
         calibrations={"pKa0": n1})
-    assert not r1["mc_pka0"].get("calibrated") and any("n<2" in w for w in r1["warnings"])
+    assert not r1["mc_pka0"].get("calibrated") and any(
+        f"n<{m.CALIB_MIN_N}" in w for w in r1["warnings"])
 
 
 def test_double_difference_class(monkeypatch):
+    # prueba la mecánica del ajuste con n=2 (bajo CALIB_MIN_N): override explícito
+    monkeypatch.setitem(m.EMPIRICAL_OPTS, "allow_below_min", True)
     def pts(mol_pts):
         return [{"mol": f"M{i}", "calc_goodvibes": x, "calc_harmonic": x, "exp": y}
                 for i, (x, y) in enumerate(mol_pts)]
@@ -853,3 +866,61 @@ def test_double_difference_class(monkeypatch):
     monkeypatch.setattr(m, "EMPIRICAL_CALIBRATION", {"amidinium": pts([(10.0, 9.0), (12.0, 11.0)])})
     miss = m.apply_double_difference_correction(16.0)
     assert not miss["ok"] and "ammonium_dianion" in miss["reason"]
+
+
+# ── pka-spec-v2: mínimo de calibradores, inversión de imaginarias, peor caso ──
+
+def test_calib_min_n_rejects_n2_unless_override(monkeypatch):
+    assert m.CALIB_MIN_N == 3
+    _calib_xy(monkeypatch, [(2.0, 1.0), (3.0, 2.2)])
+    monkeypatch.setitem(m.EMPIRICAL_OPTS, "allow_n1", False)
+    monkeypatch.setitem(m.EMPIRICAL_OPTS, "allow_below_min", False)
+    fit = m.fit_empirical_correction("t")
+    assert not fit["ok"] and "CALIB_MIN_N" in fit["reason"]
+    monkeypatch.setitem(m.EMPIRICAL_OPTS, "allow_below_min", True)
+    fit = m.fit_empirical_correction("t")
+    assert fit["ok"] and any("sensibilidad" in w for w in fit["warnings"])
+    # el MC calibrado no usa una clase bajo el mínimo aunque el ajuste pase
+    assert m._calibration_intercept_draw(fit, 10, np.random.default_rng(0)) is None
+
+
+def test_calib_min_n_accepts_n3(monkeypatch):
+    _calib_xy(monkeypatch, [(2.0, 1.0), (2.2, 1.1), (2.4, 1.5)])
+    monkeypatch.setitem(m.EMPIRICAL_OPTS, "allow_below_min", False)
+    fit = m.fit_empirical_correction("t", mode="offset")
+    assert fit["ok"] and fit["n"] == 3
+    assert not any("sensibilidad" in w for w in fit["warnings"])
+
+
+def test_gv_invert_args(monkeypatch):
+    m._GV_INVERT_FLAG.clear()
+    monkeypatch.setitem(m._GV_INVERT_FLAG, "py", "--invert")
+    assert m._gv_invert_args("py") == ["--invert", "50"]
+    monkeypatch.setattr(m, "GV_INVERT_IFREQ", None)
+    assert m._gv_invert_args("py") == []
+
+
+def test_worst_case_m3_test():
+    # pKa1 bajo: B domina a pH 8.1 si pKa2 está alto
+    wc = m.worst_case_m3_test(2.0, 3.5, 15.0, 0.0, 1.0, bias=4.0, pH=8.1)
+    assert wc["robust"] and wc["f_B_shifted"] >= 0.95
+    # b* = sesgo con el que f(B) cae exactamente al 95 %
+    pk_crit = 15.0 - wc["bias_star"]
+    f_at = m.boltzmann_5state(2.0, 3.5, pk_crit, 0.0, 1.0, [8.1]).iloc[0]["f_anion"]
+    assert f_at == pytest.approx(0.95, abs=1e-6)
+    # un sesgo mayor que b* rompe la robustez
+    wc2 = m.worst_case_m3_test(2.0, 3.5, 15.0, 0.0, 1.0, bias=wc["bias_star"] + 0.5, pH=8.1)
+    assert wc2["robust"] is False
+    # sin calibrador −1→−2 se reporta solo b*
+    wc3 = m.worst_case_m3_test(2.0, 3.5, 15.0, 0.0, 1.0, bias=None, pH=8.1)
+    assert wc3["robust"] is None and wc3["bias_star"] is not None
+
+
+def test_worst_case_bias_uses_minus1_minus2_classes(monkeypatch):
+    monkeypatch.setattr(m, "EMPIRICAL_CALIBRATION", {
+        "amino_dianion": [{"mol": "Glu", "calc_goodvibes": 15.7, "calc_harmonic": 15.6, "exp": 9.7}],
+        "ammonium_dianion": [{"mol": "IDA", "calc_goodvibes": 14.0, "calc_harmonic": None, "exp": 9.3}],
+        "amino": [{"mol": "Gly", "calc_goodvibes": 30.0, "calc_harmonic": 30.0, "exp": 9.6}],
+    })
+    b = m.worst_case_bias_m3("goodvibes")
+    assert b["ok"] and b["mol"] == "Glu" and b["bias"] == pytest.approx(6.0) and b["n"] == 2

@@ -9330,7 +9330,7 @@ def run_goodvibes_on_mol(mol_name: str) -> dict[str, dict]:
             "--qs", GV_QS,
             "-f", str(GV_FREQ_CUTOFF),
             "-t", "298.15",
-        ]
+        ] + _gv_invert_args(python_exe)
 
         if use_json:
             # v4+: --output_format json → escribe <stem>_goodvibes.json en cwd
@@ -11240,6 +11240,48 @@ GV_CUTOFF = 100.0      # cm⁻¹, frequency cutoff (default de GoodVibes)
 GV_QH     = False      # aplicar también la corrección cuasi-armónica de
                         # Head-Gordon a la entalpía (si no, H se deja armónica)
 
+# pka-spec-v2: inversión de modos imaginarios pequeños. Sin opción, GoodVibes
+# ELIMINA los modos imaginarios de las sumas vibracionales (cambia el número de
+# grados de libertad y, bajo qRRHO, pierde la entropía de rotor libre de un modo
+# blando: ~1 kcal/mol por confórmero en MGLYVAL B conf_004/005). Con --invert los
+# trata como reales de igual |ν| (Luchini et al. 2020; Bursch et al. 2022). Solo
+# se invierten los modos con ν > GV_INVERT_IFREQ (cm⁻¹, negativo); un modo más
+# negativo indica una optimización a revisar y se deja como lo trata GoodVibes.
+# None = no invertir (comportamiento de pka-spec-v1).
+GV_INVERT_IFREQ: Optional[float] = -50.0
+_GV_INVERT_FLAG: dict = {}
+
+
+def _gv_invert_args(python_exe: str) -> list[str]:
+    """Argumentos de GoodVibes para invertir modos imaginarios pequeños.
+
+    Detecta el nombre de la opción según la versión instalada (`--invert` en
+    v4, `--invertifreq` en v3) y le pasa |GV_INVERT_IFREQ| (GoodVibes lo
+    convierte a negativo). Lista vacía si GV_INVERT_IFREQ es None o si la
+    versión no tiene la opción (con aviso, una sola vez).
+    """
+    if GV_INVERT_IFREQ is None:
+        return []
+    if python_exe not in _GV_INVERT_FLAG:
+        flag = None
+        try:
+            r = subprocess.run([python_exe, "-m", "goodvibes", "--help"],
+                               capture_output=True, text=True, timeout=15, check=False)
+            text = r.stdout + r.stderr
+            if re.search(r"--invert(?!ifreq)\b", text):
+                flag = "--invert"
+            elif "--invertifreq" in text:
+                flag = "--invertifreq"
+        except (subprocess.TimeoutExpired, OSError):
+            flag = None
+        _GV_INVERT_FLAG[python_exe] = flag
+        if flag is None:
+            logging.getLogger("maaqc").warning(
+                "GoodVibes instalado sin opción para invertir modos imaginarios; "
+                "se usa su tratamiento por defecto (los elimina).")
+    flag = _GV_INVERT_FLAG[python_exe]
+    return [flag, f"{abs(GV_INVERT_IFREQ):g}"] if flag else []
+
 # Entorno conda donde está instalado GoodVibes. Igual que en results_collector.py:
 # si se deja en None, se salta el paso 1 de _resolve_gv_python() y se prueba
 # directamente con sys.executable / PATH.
@@ -11467,11 +11509,20 @@ def _ols_fit(x: list[float], y: list[float]) -> dict:
             "r2": float(r2), "rmse": rmse, "residuals": resid.tolist()}
 
 
+# pka-spec-v2: número mínimo de calibradores para aplicar el offset de una clase
+# (manuscrito, Sec. 4.6). Con n=2 el RMSE_LOO es solo |b1−b2| (dispersión entre
+# los dos calibradores, no un error de predicción); las clases por debajo del
+# mínimo se reportan SIN calibrar.
+CALIB_MIN_N = 3
+
 # Opciones globales de la corrección empírica (las fija el parser de `pka`).
-#   allow_n1    : permite correcciones calibradas con 1 solo punto (por defecto no)
-#   force_class : aplica el tipo aunque la clase de carga (q_ácido→q_base) del
-#                 tramo a corregir no coincida con la del calibrador
-EMPIRICAL_OPTS: dict = {"allow_n1": False, "force_class": False}
+#   allow_n1        : permite correcciones calibradas con 1 solo punto (y, con
+#                     ello, cualquier n por debajo del mínimo)
+#   allow_below_min : permite clases con 2 ≤ n < CALIB_MIN_N (solo como análisis
+#                     de sensibilidad; no es la especificación primaria)
+#   force_class     : aplica el tipo aunque la clase de carga (q_ácido→q_base) del
+#                     tramo a corregir no coincida con la del calibrador
+EMPIRICAL_OPTS: dict = {"allow_n1": False, "allow_below_min": False, "force_class": False}
 _WARNED_ONCE: set = set()
 
 
@@ -11562,11 +11613,24 @@ def fit_empirical_correction(group_type: str, gcorr_source: str = "goodvibes",
                           f"(ajuste exacto, sin validación). Añade un calibrador "
                           f"de la misma clase de carga o usa --allow-n1 bajo tu "
                           f"responsabilidad."}
+    below_min = n < CALIB_MIN_N
+    if (below_min and n >= 2 and not EMPIRICAL_OPTS.get("allow_below_min")
+            and not EMPIRICAL_OPTS.get("allow_n1")):
+        return {"ok": False,
+                "reason": f"'{group_type}' tiene n={n} calibradores "
+                          f"({', '.join(p[2] for p in pts)}), menos que el mínimo "
+                          f"CALIB_MIN_N={CALIB_MIN_N} de la especificación: se "
+                          f"reporta sin calibrar. Con n=2 el RMSE_LOO es solo la "
+                          f"dispersión entre los dos calibradores. Usa "
+                          f"--allow-below-min solo como análisis de sensibilidad."}
 
     x = [p[0] for p in pts]
     y = [p[1] for p in pts]
     mols = [p[2] for p in pts]
     warn: list[str] = []
+    if below_min:
+        warn.append(f"n={n} < CALIB_MIN_N={CALIB_MIN_N}: corrección aplicada por "
+                    f"override; repórtala solo como análisis de sensibilidad.")
     x_range = max(x) - min(x)
 
     aicc_off, aicc_lin = _aicc_offset_vs_linear(x, y)
@@ -12293,7 +12357,8 @@ def run_goodvibes(
     # cálculo), por confórmero × T × par × fuente: en `pka` con escaneo de T
     # y Monte Carlo eran cientos de llamadas idénticas.
     st = freq_out.stat()
-    key = f"T={T:.4f}|qs={qs}|cutoff={float(cutoff):.2f}|qh={bool(qh)}"
+    key = (f"T={T:.4f}|qs={qs}|cutoff={float(cutoff):.2f}|qh={bool(qh)}"
+           f"|invert={GV_INVERT_IFREQ}")
     mem_key = (str(freq_out.resolve()), st.st_mtime_ns, st.st_size, key)
     with _GV_CACHE_LOCK:
         hit = _GV_MEM_CACHE.get(mem_key)
@@ -12394,6 +12459,7 @@ def _run_goodvibes_uncached(freq_out: Path, T: float, cutoff: float, qs: str,
     ]
     if qh:
         cmd.append("--qh")
+    cmd += _gv_invert_args(python_exe)
 
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -13744,10 +13810,13 @@ def _calibration_intercept_draw(fit: dict, n_samples: int,
                                 rng: np.random.Generator) -> Optional[np.ndarray]:
     """
     b ~ b̂ + t_{n−1}·s_LOO·√(1+1/n) (CALIBRATION_PLAN.md §3.6). None si la
-    calibración no tiene n≥2 y loo_rmse finito (n=1: sin error estimable).
+    calibración tiene n < CALIB_MIN_N o loo_rmse no finito: esa clase cae al
+    MC crudo (manuscrito, Sec. 4.7). Nota: s_LOO ya incluye un factor
+    √(n/(n−1)) respecto a la desviación estándar muestral de los offsets, así
+    que el √(1+1/n) adicional hace el sorteo algo conservador.
     """
     n, s_loo = fit.get("n", 0), fit.get("loo_rmse", float("nan"))
-    if n < 2 or not np.isfinite(s_loo):
+    if n < CALIB_MIN_N or not np.isfinite(s_loo):
         return None
     return (fit["intercept"]
             + rng.standard_t(n - 1, size=n_samples) * s_loo * np.sqrt(1.0 + 1.0 / n))
@@ -14146,6 +14215,85 @@ def boltzmann_protonation_states(
     return pd.DataFrame(rows)
 
 
+# pka-spec-v2: test de peor caso para pKa(M3) = pKa2 (B⁻ → C²⁻), manuscrito Sec. 2.3.
+WORST_CASE_F_MIN = 0.95          # fracción mínima de B⁻ para llamar "robusta" la conclusión
+WORST_CASE_DQ    = "−1→−2"       # clase de carga de los calibradores que acotan el sesgo
+
+
+def worst_case_bias_m3(gcorr_source: str = "goodvibes") -> dict:
+    """Mayor error (calc − exp) entre los calibradores con cambio de carga −1→−2.
+
+    Recorre EMPIRICAL_CALIBRATION en los tipos cuyo EMPIRICAL_TYPE_META['dq'] es
+    WORST_CASE_DQ (hoy solo el paso −1→−2 de Glu) con pKa calculado disponible.
+    No depende de CALIB_MIN_N: es una cota del sesgo, no una calibración.
+    """
+    calc_key = "calc_goodvibes" if gcorr_source == "goodvibes" else "calc_harmonic"
+    pts = []
+    for gt, meta in EMPIRICAL_TYPE_META.items():
+        if meta.get("dq") != WORST_CASE_DQ or "components" in meta:
+            continue
+        for pt in EMPIRICAL_CALIBRATION.get(gt, []):
+            if pt.get(calc_key) is not None and pt.get("exp") is not None:
+                pts.append((pt[calc_key] - pt["exp"], pt["mol"], gt))
+    if not pts:
+        return {"ok": False, "reason": f"sin calibradores {WORST_CASE_DQ} con pKa calculado"}
+    bias, mol, gt = max(pts)
+    return {"ok": True, "bias": float(bias), "mol": mol, "group_type": gt, "n": len(pts)}
+
+
+def worst_case_m3_test(pKa0: Optional[float], pKa1: float, pKa2_raw: float,
+                       f_R: Optional[float], f_D: Optional[float], bias: Optional[float],
+                       pH: float = PH_ANTARCTIC, f_min: float = WORST_CASE_F_MIN) -> dict:
+    """Test de peor caso de la especiación (manuscrito Sec. 2.3).
+
+    Baja el pKa(M3) SIN calibrar en `bias` (el mayor error de calibrador −1→−2),
+    recalcula la especiación a `pH` y llama robusta la conclusión "B⁻ domina" si
+    f(B⁻) ≥ f_min. Reporta además b*: el sesgo de pKa(M3) con el que f(B⁻) cae
+    exactamente a f_min, para leer el margen cualquiera sea el resultado. pKa0 y
+    pKa1 entran como estén (calibrados o crudos). Unilateral: todas las clases
+    calibradas sobreestiman el pKa.
+    """
+    def f_B(pk2: float) -> float:
+        row = boltzmann_5state(pKa0, pKa1, pk2, f_R, f_D, [pH])
+        return float(row.iloc[0].get("f_anion", float("nan")))
+
+    f_raw = f_B(pKa2_raw)
+    out = {"pH": pH, "f_min": f_min, "pKa2_raw": pKa2_raw, "f_B_raw": f_raw,
+           "bias": bias, "pKa2_shifted": None, "f_B_shifted": None,
+           "robust": None, "bias_star": None}
+    # b*: f(B⁻) crece monótonamente con pKa2 → bisección sobre pKa2. None si
+    # f(B⁻) no alcanza f_min con ningún pKa2 (lo limitan pKa0/pKa1).
+    lo, hi = pH - 30.0, pH + 30.0
+    if f_B(lo) < f_min <= f_B(hi):
+        for _ in range(100):
+            mid = 0.5 * (lo + hi)
+            lo, hi = (mid, hi) if f_B(mid) < f_min else (lo, mid)
+        out["bias_star"] = pKa2_raw - hi
+    if bias is not None:
+        out["pKa2_shifted"] = pKa2_raw - bias
+        out["f_B_shifted"] = f_B(pKa2_raw - bias)
+        out["robust"] = bool(out["f_B_shifted"] >= f_min)
+    return out
+
+
+def _print_worst_case_m3(wc: dict, bias_info: dict) -> None:
+    print(f"\n  ── Test de peor caso para pKa(M3) (B⁻→C²⁻), pH {wc['pH']} ──")
+    print(f"    pKa(M3) sin calibrar = {wc['pKa2_raw']:.2f}  →  "
+          f"f(B⁻) = {wc['f_B_raw']*100:.1f}%")
+    if wc.get("bias") is not None:
+        print(f"    Sesgo restado = {wc['bias']:+.2f} ({bias_info['mol']}, "
+              f"'{bias_info['group_type']}', mayor error {WORST_CASE_DQ})")
+        print(f"    pKa(M3) desplazado = {wc['pKa2_shifted']:.2f}  →  "
+              f"f(B⁻) = {wc['f_B_shifted']*100:.1f}%")
+        verdict = "ROBUSTA" if wc["robust"] else "NO robusta (reportar como sensibilidad)"
+        print(f"    Conclusión 'B⁻ domina' (umbral {wc['f_min']*100:.0f}%): {verdict}")
+    else:
+        print(f"    Sin calibrador {WORST_CASE_DQ}: {bias_info.get('reason')}")
+    if wc.get("bias_star") is not None:
+        print(f"    b* (sesgo con el que f(B⁻) cae a {wc['f_min']*100:.0f}%) = "
+              f"{wc['bias_star']:.2f} unidades de pKa")
+
+
 def boltzmann_5state(
     pKa0: Optional[float],
     pKa1: Optional[float],
@@ -14342,7 +14490,7 @@ def run_chain_montecarlo(
     P1-12d: `calibrations` = {"pKa0"|"pKa1"|"pKa2": fit_empirical_correction(...)}
     activa el MC calibrado en esos tramos (ver compute_pka_montecarlo). El
     sorteo del intercepto es UNO por clase (group_type del fit), compartido
-    entre todos los tramos de esa clase. Tramos sin calibración (o con n<2 /
+    entre todos los tramos de esa clase. Tramos sin calibración (o con n<CALIB_MIN_N /
     LOO indefinido, con aviso) siguen con el MC crudo. Sin `calibrations` el
     resultado es idéntico al anterior (mismo flujo de rng).
 
@@ -14414,7 +14562,7 @@ def run_chain_montecarlo(
                 class_draw[gt] = _calibration_intercept_draw(fit, n_samples, rng_cal)
             if class_draw[gt] is None:
                 out["warnings"].append(
-                    f"{slot}: calibración '{gt}' con n<2 o LOO indefinido; "
+                    f"{slot}: calibración '{gt}' con n<{CALIB_MIN_N} o LOO indefinido; "
                     f"se usa el MC crudo en ese tramo.")
                 continue
             cal_kw[slot] = {"calibration_fit": fit, "calib_intercept_draw": class_draw[gt]}
@@ -15781,6 +15929,11 @@ help="Aplica la corrección empírica calibrada (ver "
                         help="Permite --empirical-correction con tipos calibrados "
                              "con UN solo punto (ajuste exacto, sin validación). "
                              "Por defecto se exige n≥2.")
+    parser.add_argument("--allow-below-min", action="store_true",
+                        help=f"Aplica --empirical-correction a clases con menos "
+                             f"de CALIB_MIN_N={CALIB_MIN_N} calibradores (n≥2). "
+                             f"Solo como análisis de sensibilidad: la "
+                             f"especificación primaria las reporta sin calibrar.")
     parser.add_argument("--allow-builtin-calibration", action="store_true",
                         help="Permite --empirical-correction con la tabla "
                              "EMPIRICAL_CALIBRATION embebida (OBSOLETA) cuando no "
@@ -15793,6 +15946,7 @@ help="Aplica la corrección empírica calibrada (ver "
                              "el sesgo de CPCM crece con la carga del anión).")
     args = parser.parse_args()
     EMPIRICAL_OPTS["allow_n1"] = bool(args.allow_n1)
+    EMPIRICAL_OPTS["allow_below_min"] = bool(args.allow_below_min)
     EMPIRICAL_OPTS["force_class"] = bool(args.force_charge_class)
 
     _calib_path = resolve_calibration_source(
@@ -16451,6 +16605,14 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
             if "f_anion" in row: parts.append(f"f(B⁻)={r0['f_anion']*100:.1f}%")
             if "f_dianion" in row: parts.append(f"f(C²⁻)={r0['f_dianion']*100:.1f}%")
             print(f"    {label}: {', '.join(parts)}")
+
+    # ── Test de peor caso para pKa(M3) (pka-spec-v2, manuscrito Sec. 2.3) ──
+    if pKa2_raw is not None and pKa1 is not None:
+        _wc_bias = worst_case_bias_m3(gcorr_source)
+        _wc = worst_case_m3_test(pKa0, pKa1, pKa2_raw, f_R, f_D,
+                                 _wc_bias["bias"] if _wc_bias.get("ok") else None,
+                                 pH=args.ph)
+        _print_worst_case_m3(_wc, _wc_bias)
 
     # ── Monte Carlo (cadena completa de 5 estados, G(H⁺,aq) correlacionado
     #    entre pKa0/pKa1/pKa2 — ver run_chain_montecarlo()) ─────────────────
