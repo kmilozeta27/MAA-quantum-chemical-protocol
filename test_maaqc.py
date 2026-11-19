@@ -924,3 +924,66 @@ def test_worst_case_bias_uses_minus1_minus2_classes(monkeypatch):
     })
     b = m.worst_case_bias_m3("goodvibes")
     assert b["ok"] and b["mol"] == "Glu" and b["bias"] == pytest.approx(6.0) and b["n"] == 2
+
+
+# ── --censo-refine: lectura de 3_REFINEMENT ────────────────────────────────
+
+def _censo_out(path: Path, rows: list[tuple[str, float, float]]) -> None:
+    """Tabla con el formato de N_PARTE.out de CENSO 3 (Gtot, ΔGtot, peso)."""
+    lines = ["CONF#  E (DFT)  ΔGsolv  GmRRHO  Gtot  ΔGtot  Boltzmann weight"]
+    for name, gtot, w in rows:
+        lines.append(f"{name}  -1.0  0.000000  0.01  {gtot:.6f}  0.00  {w:.2f}")
+    path.write_text("\n".join(lines) + "\n")
+
+
+def _censo_xyz(path: Path, names: list[str], x: float) -> None:
+    path.write_text("".join(f"1\n{n}\nH {x} 0.0 0.0\n" for n in names))
+
+
+def test_find_censo_result_prefers_refinement_geometries(tmp_path, monkeypatch):
+    crest = tmp_path / "crest_conformers.xyz"
+    _censo_xyz(crest, ["CONF1", "CONF2", "CONF3"], 0.0)
+    _censo_out(tmp_path / "1_SCREENING.out", [("CONF1", -2.0, 60), ("CONF2", -1.9, 40)])
+    _censo_xyz(tmp_path / "1_SCREENING.xyz", ["CONF1", "CONF2"], 0.0)
+
+    monkeypatch.setattr(m, "CENSO_REFINE", True)
+    out, ids, geoms = m.find_censo_result(tmp_path, crest)
+    assert out.name == "1_SCREENING.out" and geoms[0] == crest
+    assert not m.censo_result_complete(out)
+
+    _censo_out(tmp_path / "3_REFINEMENT.out", [("CONF2", -3.0, 80), ("CONF1", -2.9, 20)])
+    _censo_xyz(tmp_path / "3_REFINEMENT.xyz", ["CONF2", "CONF1"], 9.0)
+    out, ids, geoms = m.find_censo_result(tmp_path, crest)
+    assert out.name == "3_REFINEMENT.out" and ids == ["CONF2", "CONF1"]
+    # nunca las geometrías GFN2 de CREST para confs ya optimizados con DFT
+    assert geoms == [tmp_path / "3_REFINEMENT.xyz"]
+    assert m.censo_result_complete(out)
+
+
+def test_censo_cli_parts(monkeypatch, tmp_path):
+    monkeypatch.setattr(m, "CENSO_RC", None)
+    monkeypatch.setattr(m, "CENSO_REFINE", False)
+    assert m.censo_cli_parts() == ["--prescreening", "--screening"]
+    monkeypatch.setattr(m, "CENSO_REFINE", True)
+    parts = m.censo_cli_parts(include_prescreening=False)
+    assert parts[:4] == ["--screening", "--optimization", "--refinement", "--ignore-failed"]
+    assert parts[-2:] == ["--inprc", str(m.CENSO_REFINE_RC)]
+    assert m.censo_timeout_hours() == m.CENSO_TIMEOUT_HOURS_REFINE
+
+
+def test_stage_censo_reuses_existing_refinement(tmp_path, monkeypatch):
+    mol_dir = tmp_path / "run"
+    censo_dir = mol_dir / "01b_censo_prescreen"
+    censo_dir.mkdir(parents=True)
+    crest = tmp_path / "crest_conformers.xyz"
+    _censo_xyz(crest, ["CONF1", "CONF2"], 0.0)
+    _censo_out(censo_dir / "3_REFINEMENT.out", [("CONF2", -3.0, 100)])
+    _censo_xyz(censo_dir / "3_REFINEMENT.xyz", ["CONF2"], 9.0)
+    monkeypatch.setattr(m, "CENSO_REFINE", True)
+    monkeypatch.setattr(m, "_run_censo_locked",
+                        lambda *a, **k: pytest.fail("no debía relanzar CENSO"))
+    out = m.stage_censo_prescreen(crest, mol_dir, 0, LOG)
+    assert out.name == "censo_ensemble_sorted.xyz"
+    text = out.read_text()
+    assert "CONF2" in text and "9.0" in text and "CONF1" not in text
+    assert m._find_screening_out(mol_dir) == censo_dir / "3_REFINEMENT.out"

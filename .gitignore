@@ -79,6 +79,11 @@ docs/papers/**/*.pdf
 
 # salidas regenerables de microestados (CREST/xtb)
 MGLYVAL/microstates_new/crest/
+# CENSO de microestados: solo el resumen de la raíz (out/json/xyz/log), no las
+# subcarpetas por confórmero; merged/: all.xyz* es la concatenación cruda regenerable
+MGLYVAL/microstates_new/censo/*/*/
+MGLYVAL/microstates_new/censo/*/.censo_pipeline.lock
+MGLYVAL/microstates_new/merged/*/all.xyz*
 MGLYVAL/microstates_new/xtb_opt/
 
 # === manuscritos (solo local, no se publican) ===

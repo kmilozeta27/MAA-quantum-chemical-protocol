@@ -35,16 +35,36 @@ and atom-count relationship of each pair of states.
 
 ```bash
 crest crest_input.xyz --T <N> --chrg <q> --uhf 0 --alpb water
-censo --prescreening --screening -i <ensemble> -c <q> -u 0 \
+censo --prescreening --screening --optimization --refinement --ignore-failed \
+      --inprc censo2rc_refine -i <ensemble> -c <q> -u 0 \
       --solvent water --maxcores <N> --omp-min 4 -T <temperature>
 ```
 
-Conformers go on to DFT according to their CENSO screening Boltzmann weight. The threshold is
-5 %, with at least three conformers kept. If screening weights are not available, an
-energy-window fallback is used. A multi-temperature mode runs a separate CENSO ensemble for
-each temperature. If CENSO is missing or fails, the pipeline stops with an error instead of
-silently continuing with the unfiltered CREST ensemble; the old behaviour requires the explicit
-`--allow-no-censo` flag.
+CENSO 3 runs four stages (configuration in [`censo2rc_refine`](../censo2rc_refine);
+`maaqc.py run --censo-refine`):
+
+| Stage | Level | Cut-off |
+|---|---|---|
+| Pre-screening | B97-D3/def2-SV(P), gas phase, + ALPB(GFN2) Gsolv | 4.0 kcal/mol |
+| Screening | r²SCAN-3c, CPCM (`gsolv_included = True`) | 3.5 kcal/mol, adjusted automatically |
+| Optimization | r²SCAN-3c, CPCM, ANCOPT macrocycles | 3.0 kcal/mol |
+| Refinement | ωB97X-D3/def2-TZVP, SMD | 95 % cumulative Boltzmann population |
+
+Conformers go on to DFT from the r²SCAN-3c geometries, according to their refined Boltzmann
+weight (threshold 5 %, at least three conformers), never from the CREST geometries. If the
+refinement is missing, the pipeline stops instead of falling back to screening energies. A run
+that already finished screening or optimization is resumed from that stage. The first version
+of the protocol (pre-screening and screening only, selection from single points on GFN2-xTB
+geometries) is still the default without `--censo-refine`. CENSO does not remove duplicates
+after optimization, so refined ensembles must be checked for them. A multi-temperature mode
+runs a separate CENSO ensemble for each temperature. If CENSO is missing or fails, the pipeline
+stops with an error instead of silently continuing with the unfiltered CREST ensemble; the old
+behaviour requires the explicit `--allow-no-censo` flag.
+
+ORCA inside CENSO needs `OMPI_MCA_pml=ob1`, `OMPI_MCA_btl=self,sm`, `OMPI_MCA_osc=^ucx` and
+`PRTE_MCA_hwloc_default_binding_policy=none` (set by `maaqc.py`). Without them, Open MPI 5.0.10
+fills the stderr pipe that CENSO does not read, and ORCA hangs at 0 % CPU; it also binds
+every parallel job to the same four cores.
 
 ## 4. DFT optimisation, frequencies and single points (ORCA 6.1.1)
 

@@ -68,7 +68,7 @@ quantum-mechanical free-energy calculation.
 ```mermaid
 flowchart TD
     A["PubChem record<br/>protonation states A R D B C"] --> B["CREST<br/>conformer search<br/>GFN2 xTB with ALPB water"]
-    B --> C["CENSO<br/>ensemble screening<br/>Boltzmann filter 5 percent"]
+    B --> C["CENSO<br/>screening, r2SCAN-3c opt,<br/>wB97X-D3 refinement"]
     C --> D["DFT optimisation<br/>wB97X D3 with def2 SVP<br/>CPCM water"]
     D --> E["Numerical frequencies<br/>no imaginary modes<br/>thermal corrections"]
     E --> F["Single points<br/>def2 TZVPD<br/>gas phase and CPCM and SMD"]
@@ -82,7 +82,7 @@ flowchart TD
 | Stage | Method | Software |
 |---|---|---|
 | 1. Conformational sampling | iMTD-GC, GFN2-xTB, ALPB(water) | CREST 3.0.2 / xTB 6.7.1 |
-| 2. Ensemble refinement | Pre-screening + screening, Boltzmann selection (5 %, min. 3 conformers) | CENSO 3.0.9 |
+| 2. Ensemble refinement | Pre-screening B97-D3 + ALPB; screening and optimization r²SCAN-3c/CPCM; refinement ωB97X-D3/def2-TZVP/SMD; Boltzmann selection (5 %, min. 3 conformers) from r²SCAN-3c geometries | CENSO 3.0.9 |
 | 3. Geometry optimisation | ωB97X-D3/def2-SVP, CPCM(water), RIJCOSX, TightOpt | ORCA 6.1.1 |
 | 4. Frequency verification | Numerical frequencies; harmonic and quasi-harmonic (Grimme, 100 cm⁻¹) free energies | ORCA, GoodVibes |
 | 5. Single-point energies | ωB97X-D3/def2-TZVPD, gas phase, CPCM(water) and SMD(water) | ORCA |
@@ -298,7 +298,7 @@ These limits are stated up front:
 | Automated pipeline, all stages | ✅ Built and running |
 | Calibration set (Asp, Glu, Gly, Val, 4-aminopyridine) | ✅ All stages, including SMD single points |
 | MGLYVAL A / R / D / B / C | ✅ CREST, CENSO, optimisation, frequencies, CPCM and gas single points, TD-DFT; SMD for dominant conformers only (two B conformers carry extremely small imaginary frequencies, ignored for now) |
-| MGLYVAL new microstates D′ / R′ / C′ / 010 / 100 ([`MGLYVAL/microstates_new/`](MGLYVAL/microstates_new/)) | 🔄 CREST running; CENSO and DFT next |
+| MGLYVAL new microstates D′ / R′ / C′ / 010 / 100 ([`MGLYVAL/microstates_new/`](MGLYVAL/microstates_new/)) | 🔄 CREST done; four-stage CENSO running on C′, others next; DFT after |
 | Shinorine | 🔄 Partial: two states optimised, monoanion through TD-DFT |
 | 4-Deoxygadusol (DG, GADUSOL) | 🔄 Partial: most states optimised, four through TD-DFT; CPCM single points only |
 | Palythine / porphyra-334 / mycosporine-glycine | ⏳ CREST only or starting structures |
