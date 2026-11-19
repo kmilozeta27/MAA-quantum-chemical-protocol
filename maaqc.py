@@ -374,6 +374,16 @@ MULT       = 1                      # multiplicidad siempre 1
 CREST_TIMEOUT_HOURS = 24.0          # timeout CREST (horas)
 CENSO_TIMEOUT_HOURS = 24.0          # timeout CENSO pre-screening (horas)
 
+# --censo-refine (2026-11-19): además de prescreening + screening, CENSO
+# corre optimización (r2SCAN-3c/CPCM, macrociclos ANCOPT) y refinamiento
+# (ωB97X-D3/def2-TZVP SMD, 95 % Boltzmann). El ensemble que pasa a OPT sale
+# entonces de 3_REFINEMENT (geometrías r2SCAN-3c), no de 1_SCREENING
+# (geometrías GFN2 de CREST). Ver find_censo_result().
+CENSO_REFINE = False
+CENSO_RC: Optional[Path] = None     # --censo-rc; None → ~/.censo2rc, o CENSO_REFINE_RC con --censo-refine
+CENSO_REFINE_RC = PAPER_ROOT / "censo2rc_refine"
+CENSO_TIMEOUT_HOURS_REFINE = 120.0  # P+S+O+R sobre ~200 confs de ~46 átomos tarda días
+
 # ── Convención de carga por sufijo de estado de protonación ────────────
 # En todos los proyectos de la serie MAA, el nombre del archivo .xyz
 # (su stem, sin importar el prefijo de la molécula: A, SA, PA, mol_A...)
@@ -2574,6 +2584,21 @@ def _run_censo_locked(cmd: list[str], censo_dir: Path, log_file: Path,
         cpu_str = ",".join(str(c) for c in cpu_list)
         cmd = ["taskset", "-c", cpu_str] + cmd
 
+    # [CENSO-MPI] (2026-11-19) CENSO lanza ORCA con stderr=PIPE y no lee la
+    # tubería hasta que ORCA termina. Open MPI 5.0.10 escribe ~260 KB de
+    # avisos (osc/ucx "priority ... failed", btl/tcp "reachable pairing") por
+    # SP: la tubería (64 KB) se llena, prterun se bloquea en write() y el
+    # SP no termina nunca (CPU a 0 %). Además, sin MAAQC_PE_LIST cada mpirun
+    # ata sus ranks a los núcleos L0-L3, así que los N sub-jobs de CENSO se
+    # apilan sobre los mismos 4 núcleos (SP de Cp: 85 s en paralelo vs 15 s
+    # sin binding). Un solo nodo: solo memoria compartida, sin UCX ni TCP, y
+    # sin binding (el kernel reparte dentro del pool de taskset).
+    env = dict(env)
+    env.setdefault("OMPI_MCA_pml", "ob1")
+    env.setdefault("OMPI_MCA_btl", "self,sm")
+    env.setdefault("OMPI_MCA_osc", "^ucx")
+    env.setdefault("PRTE_MCA_hwloc_default_binding_policy", "none")
+
     lock = _censo_lock_file(censo_dir)
     with open(log_file, "w") as flog:
         proc = subprocess.Popen(
@@ -2602,6 +2627,57 @@ def _run_censo_locked(cmd: list[str], censo_dir: Path, log_file: Path,
             except OSError:
                 pass
     return subprocess.CompletedProcess(cmd, returncode)
+
+
+def _censo_resume_refine(done_out: Path, charge: int, temperature: float,
+                          log: logging.Logger):
+    """
+    Completa optimización/refinamiento (--censo-refine) a partir de una parte
+    ya terminada: 1_SCREENING → corre -O -R, 2_OPTIMIZATION → corre -R, con
+    el .xyz de esa parte como input (CENSO conserva los nombres CONF# del
+    comentario). Salida de consola en censo_refine.log para no pisar el
+    censo.log original. Devuelve find_censo_result() tras correr, o None si
+    no se pudo lanzar.
+    """
+    censo_dir = done_out.parent
+    input_xyz = done_out.with_suffix(".xyz")
+    if not input_xyz.exists() or input_xyz.stat().st_size == 0:
+        log.error(f"[CENSO-REFINE]  ✗  falta {input_xyz.name} para reanudar")
+        return None
+    parts = (["--refinement"] if done_out.stem == "2_OPTIMIZATION"
+             else ["--optimization", "--refinement"])
+    rc = CENSO_RC or CENSO_REFINE_RC
+    cpu_pool = _acquire_cpu_pool(NPROCS_CREST, log, "CENSO-REFINE")
+    eff_maxcores, eff_omp_min = _reconcile_censo_budget(
+        NPROCS_CREST, CENSO_OMP_MIN, cpu_pool, log, "CENSO-REFINE"
+    )
+    if eff_maxcores == 0:
+        _cpu_lock_release()
+        log.error("[CENSO-REFINE]  ✗  sin CPUs disponibles")
+        return None
+    cmd = [
+        str(CENSO_BIN), *parts, "--ignore-failed", "--inprc", str(rc),
+        "-i", input_xyz.name,
+        "-c", str(charge), "-u", "0", "--solvent", "water",
+        "--maxcores", str(eff_maxcores), "--omp-min", str(eff_omp_min),
+        "-T", f"{temperature:.2f}",
+    ]
+    log.info(f"[CENSO-REFINE]  ▶  {done_out.name} ya está — reanudando con "
+             f"{' '.join(parts)} sobre {input_xyz.name}")
+    try:
+        _run_censo_locked(
+            cmd, censo_dir, censo_dir / "censo_refine.log",
+            build_omp_env(censo_threads_per_job(eff_maxcores, eff_omp_min),
+                           cpu_list=cpu_pool, set_pe_list=False),
+            CENSO_TIMEOUT_HOURS_REFINE,
+            cpu_list=cpu_pool,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        log.error(f"[CENSO-REFINE]  ✗  {e}")
+        return None
+    finally:
+        _cpu_lock_release()
+    return find_censo_result(censo_dir)
 
 
 def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
@@ -2664,27 +2740,32 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
     # antes de considerar el run completo. Si solo hay prescreening (p.ej.
     # de un run anterior con --prescreening sin --screening), se trata como
     # incompleto y se relanza CENSO con --screening incluido.
-    _screening_out_candidates = [
-        censo_dir / "1_SCREENING.out",
-        censo_dir / "CENSO" / "1_SCREENING.out",
-        censo_dir / "prescreening" / "1_SCREENING.out",
-    ]
-    _screening_conf_ids: Optional[list[str]] = None
-    for _p in _screening_out_candidates:
-        _parsed = parse_censo_screening_out(_p)
-        if _parsed:
-            _screening_conf_ids = _parsed
-            break
+    #
+    # Con --censo-refine "completo" significa 3_REFINEMENT.out; si el run
+    # previo solo llegó a screening/optimización se reanuda desde ahí
+    # (CENSO -O -R / -R sobre el .xyz de esa parte) en vez de rehacer P+S.
+    _censo_res = find_censo_result(censo_dir, conformers_xyz)
+    if _censo_res is not None and not censo_result_complete(_censo_res[0]):
+        _resumed_from = _censo_res[0]
+        _censo_res = _censo_resume_refine(_resumed_from, charge, temperature, log)
+        if _censo_res is None or not censo_result_complete(_censo_res[0]):
+            return _censo_fallback(
+                log, conformers_xyz,
+                f"no se pudo completar optimización/refinamiento desde "
+                f"{_resumed_from.name} (revisa {censo_dir / 'censo_refine.log'})")
+        _censo_res = find_censo_result(censo_dir, conformers_xyz)
+    _screening_conf_ids: Optional[list[str]] = _censo_res[1] if _censo_res else None
     _has_screening = _screening_conf_ids is not None
 
-    # ── Reconstrucción DIRECTA desde 1_SCREENING.out + 1_SCREENING.xyz ───────
+    # ── Reconstrucción DIRECTA desde el .out + .xyz de CENSO ─────────────────
     # FIX (2026-07-14): si el SCREENING (no solo el prescreening) ya terminó
     # — es decir, _has_screening es True —, NO hace falta invocar CENSO de
     # nuevo bajo ninguna forma (ni limpio, ni --reload): las energías
     # Gtot/ΔGtot/Boltzmann y las geometrías de los confórmeros sobrevivientes
-    # YA están en disco (1_SCREENING.out + 1_SCREENING.xyz). Este bloque se
-    # ejecuta ANTES de la verificación de output_xyz y ANTES del bloque de
-    # diagnóstico/--reload sobre 0_PRESCREENING/ más abajo.
+    # YA están en disco (1_SCREENING.out + 1_SCREENING.xyz, o 3_REFINEMENT.*
+    # con --censo-refine). Este bloque se ejecuta ANTES de la verificación
+    # de output_xyz y ANTES del bloque de diagnóstico/--reload sobre
+    # 0_PRESCREENING/ más abajo.
     #
     # Bug real que esto corrige: con prescreening Y screening ya 100%
     # completos en disco, el flujo anterior igual llegaba al bloque de
@@ -2692,32 +2773,15 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
     # sobre 0_PRESCREENING/), que diagnostica sobre las carpetas CONF* del
     # PRESCREENING — no sabe nada de que el SCREENING ya terminó — y podía
     # terminar relanzando CENSO (limpio o con --reload) para un trabajo que
-    # ya estaba hecho y disponible en 1_SCREENING.out. Ahora, apenas se
-    # confirma que 1_SCREENING.out es parseable, se intenta reconstruir el
-    # ensemble directamente desde los archivos existentes y se retorna sin
-    # tocar CENSO en absoluto.
+    # ya estaba hecho y disponible en 1_SCREENING.out.
     if _has_screening:
-        _screening_out_path = next(
-            (p for p in _screening_out_candidates if parse_censo_screening_out(p)),
-            None,
-        )
-        # Fuentes de geometría en orden de prioridad:
-        #   1. conformers_xyz original de CREST (comentarios "CONF7  -E")
-        #   2. 1_SCREENING.xyz generado por CENSO (comentarios = solo CONF#)
-        _geom_sources = [conformers_xyz]
-        if _screening_out_path is not None:
-            for _cand in (
-                _screening_out_path.parent / "1_SCREENING.xyz",
-                _screening_out_path.parent.parent / "1_SCREENING.xyz",
-            ):
-                if _cand.exists() and _cand.stat().st_size > 0 and _cand not in _geom_sources:
-                    _geom_sources.append(_cand)
+        _screening_out_path, _, _geom_sources = _censo_res
         _rebuilt_direct = False
         for _geom_src in _geom_sources:
             if extract_conformers_by_id(_geom_src, _screening_conf_ids, output_xyz, log):
                 log.info(
-                    f"[CENSO]  ✓  screening ya completo en disco "
-                    f"({(_screening_out_path.relative_to(censo_dir) if _screening_out_path else '1_SCREENING.out')}) "
+                    f"[CENSO]  ✓  CENSO ya completo en disco "
+                    f"({_screening_out_path.relative_to(censo_dir)}) "
                     f"— {len(_screening_conf_ids)} confórmero(s), ensemble reconstruido "
                     f"SIN invocar CENSO (geometrías: {_geom_src.name}) → {output_xyz.name}"
                 )
@@ -2725,12 +2789,12 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
                 break
             log.debug(
                 f"[CENSO]  fuente {_geom_src.name} no contiene los CONF# de "
-                f"1_SCREENING.out — probando siguiente fuente de geometrías"
+                f"{_screening_out_path.name} — probando siguiente fuente de geometrías"
             )
         if _rebuilt_direct:
             return output_xyz
         log.warning(
-            f"[CENSO]  ⚠  1_SCREENING.out parseable ({len(_screening_conf_ids)} conf(s)) "
+            f"[CENSO]  ⚠  {_screening_out_path.name} parseable ({len(_screening_conf_ids)} conf(s)) "
             f"pero ninguna fuente de geometría disponible ({', '.join(g.name for g in _geom_sources)}) "
             f"contiene esos CONF# — se continúa con la verificación de "
             f"{output_xyz.name} / recovery de prescreening más abajo"
@@ -2925,7 +2989,7 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
                     # Con solo "--screening" + "--reload", CENSO toma el
                     # prescreening ya resuelto como dado y arranca directo
                     # en screening.
-                    "--screening",
+                    *censo_cli_parts(include_prescreening=False),
                     "-i", local_input.name,
                     "-c", str(charge),
                     "-u", "0",
@@ -2966,7 +3030,7 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
                         build_omp_env(censo_threads_per_job(NPROCS_CREST),
                                        cpu_list=_recover_cpu_pool,
                                        set_pe_list=False),
-                        CENSO_TIMEOUT_HOURS,
+                        censo_timeout_hours(),
                         cpu_list=_recover_cpu_pool,
                     )
                     # Buscar el ensemble de salida (mismo esquema que abajo)
@@ -3021,59 +3085,35 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
                 log.warning(f"[CENSO]  no se pudo eliminar {_cd.name}: {_e}")
         log.info("[CENSO]  ✓  limpieza completada — relanzando CENSO limpio")
 
-    # ── Intento de recuperación desde 1_SCREENING.out existente ─────────────
-    # Si CENSO ya corrió manualmente (o en un run previo) y dejó el archivo
-    # de resultados del pre-screening, parsear directamente en vez de
-    # relanzar CENSO (que puede no estar en PATH o estar en otro entorno).
-    # Busca en las ubicaciones más habituales que CENSO 2.x / 3.x produce.
-    _screening_candidates = [
-        censo_dir / "1_SCREENING.out",
-        censo_dir / "CENSO" / "1_SCREENING.out",
-        censo_dir / "prescreening" / "1_SCREENING.out",
-    ]
-    for _sc in _screening_candidates:
-        _conf_ids = parse_censo_screening_out(_sc)
-        if _conf_ids:
-            log.info(
-                f"[CENSO]  📄  encontrado {_sc.relative_to(censo_dir)} "
-                f"con {len(_conf_ids)} conf(s) — reconstruyendo ensemble "
-                f"filtrado sin relanzar CENSO"
-            )
-            # Fuentes de geometría en orden de prioridad:
-            #   1. conformers_xyz original de CREST (comentarios = solo energía)
-            #   2. 1_SCREENING.xyz generado por CENSO (comentarios = CONF#)
-            #      CENSO renombra los frames con CONF# al leerlos; es el único
-            #      archivo que contiene los tokens CONF# como comentario XYZ.
-            _geom_sources = [conformers_xyz]
-            for _screening_xyz_candidate in [
-                _sc.parent / "1_SCREENING.xyz",
-                _sc.parent.parent / "1_SCREENING.xyz",
-            ]:
-                if _screening_xyz_candidate.exists() and _screening_xyz_candidate.stat().st_size > 0:
-                    _geom_sources.append(_screening_xyz_candidate)
-
-            _rebuilt = False
-            for _geom_src in _geom_sources:
-                if extract_conformers_by_id(_geom_src, _conf_ids, output_xyz, log):
-                    log.info(
-                        f"[CENSO]  ✓  ensemble reconstruido desde {_sc.name} "
-                        f"(geometrías: {_geom_src.name}) "
-                        f"→ {output_xyz.name} ({len(_conf_ids)} conf(s))"
-                    )
-                    _rebuilt = True
-                    break
-                log.debug(
-                    f"[CENSO]  fuente {_geom_src.name} no contiene los CONF# — "
-                    f"probando siguiente fuente de geometrías"
+    # ── Intento de recuperación desde un .out de CENSO existente ────────────
+    # Si CENSO ya corrió manualmente (o en un run previo, p.ej. el --reload
+    # de arriba) y dejó resultados, parsear directamente en vez de relanzar
+    # CENSO. find_censo_result() prefiere 3_REFINEMENT > 2_OPTIMIZATION >
+    # 1_SCREENING y elige las geometrías que corresponden a esa parte.
+    _censo_res = find_censo_result(censo_dir, conformers_xyz)
+    if _censo_res is not None and censo_result_complete(_censo_res[0]):
+        _sc, _conf_ids, _geom_sources = _censo_res
+        log.info(
+            f"[CENSO]  📄  encontrado {_sc.relative_to(censo_dir)} "
+            f"con {len(_conf_ids)} conf(s) — reconstruyendo ensemble "
+            f"filtrado sin relanzar CENSO"
+        )
+        for _geom_src in _geom_sources:
+            if extract_conformers_by_id(_geom_src, _conf_ids, output_xyz, log):
+                log.info(
+                    f"[CENSO]  ✓  ensemble reconstruido desde {_sc.name} "
+                    f"(geometrías: {_geom_src.name}) "
+                    f"→ {output_xyz.name} ({len(_conf_ids)} conf(s))"
                 )
-
-            if _rebuilt:
                 return output_xyz
-            log.warning(
-                f"[CENSO]  ⚠  no se pudo reconstruir desde {_sc.name} "
-                f"— continuando con intento de relanzar CENSO"
+            log.debug(
+                f"[CENSO]  fuente {_geom_src.name} no contiene los CONF# — "
+                f"probando siguiente fuente de geometrías"
             )
-            break
+        log.warning(
+            f"[CENSO]  ⚠  no se pudo reconstruir desde {_sc.name} "
+            f"— continuando con intento de relanzar CENSO"
+        )
     # ─────────────────────────────────────────────────────────────────────────
 
     # CENSO escribe en cwd; copiar el ensemble de entrada ahí y referenciarlo
@@ -3105,10 +3145,9 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
 
         cmd = [
             str(CENSO_BIN),
-            "--prescreening",
-            "--screening",               # FIX: faltaba — sin esto CENSO 3.x corre
-                                          # SOLO prescreening y nunca llega a
-                                          # screening (1_SCREENING.out nunca existe).
+            *censo_cli_parts(),          # --prescreening --screening [-O -R] [--inprc]
+                                          # (sin --screening CENSO 3.x corre SOLO
+                                          # prescreening y 1_SCREENING.out nunca existe)
             "-i", local_input.name,
             "-c", str(charge),
             "-u", "0",                  # MULT global siempre 1 → singlete, capa cerrada
@@ -3150,13 +3189,13 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
             build_omp_env(censo_threads_per_job(eff_maxcores, eff_omp_min),
                            cpu_list=censo_cpu_pool,
                            set_pe_list=False),
-            CENSO_TIMEOUT_HOURS,
+            censo_timeout_hours(),
             cpu_list=censo_cpu_pool,
         )
         returncode = proc.returncode
     except subprocess.TimeoutExpired:
         return _censo_fallback(log, conformers_xyz,
-                               f"TIMEOUT ({CENSO_TIMEOUT_HOURS} h)")
+                               f"TIMEOUT ({censo_timeout_hours()} h)")
     except FileNotFoundError as e:
         if "taskset" in str(e):
             log.error("  ✗  no se encontró 'taskset' en PATH — instálalo "
@@ -3205,6 +3244,27 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
     # Por eso, antes de copiar cualquier .xyz crudo, intentamos reconstruir el
     # ensemble vía parse_censo_screening_out() + extract_conformers_by_id(),
     # que sí preserva el orden por Gtot y permite recuperar energías después.
+    _censo_res = find_censo_result(censo_dir, conformers_xyz)
+    if _censo_res is not None and censo_result_complete(_censo_res[0]):
+        _po, _conf_ids, _geom_sources = _censo_res
+        for _geom_src in _geom_sources:
+            if extract_conformers_by_id(_geom_src, _conf_ids, output_xyz, log):
+                log.info(
+                    f"[CENSO]  ✓  CENSO terminó en {elapsed:.1f} min — "
+                    f"{len(_conf_ids)} confórmero(s) sobreviven, ensemble "
+                    f"reconstruido desde {_po.relative_to(censo_dir)} "
+                    f"(geometrías: {_geom_src.name}, ordenado por Gtot)"
+                )
+                return output_xyz
+    if CENSO_REFINE:
+        # Sin 3_REFINEMENT no hay que caer al screening en silencio: el
+        # protocolo pedido era otro.
+        return _censo_fallback(
+            log, conformers_xyz,
+            f"--censo-refine: CENSO no produjo un 3_REFINEMENT.out utilizable "
+            f"(returncode={returncode})"
+            + (f"; {_censo_log_snippet}" if _censo_log_snippet else ""))
+
     _post_out_candidates = [
         censo_dir / "1_SCREENING.out",
         censo_dir / "CENSO" / "1_SCREENING.out",
@@ -3291,6 +3351,76 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
 # ─────────────────────────────────────────────
 #  PARSEO DE 1_SCREENING.out DE CENSO
 # ─────────────────────────────────────────────
+
+def censo_cli_parts(include_prescreening: bool = True) -> list[str]:
+    """Flags de partes de CENSO (+ --inprc) según CENSO_REFINE / CENSO_RC."""
+    parts = ["--prescreening"] if include_prescreening else []
+    parts.append("--screening")
+    if CENSO_REFINE:
+        # --ignore-failed es store_true en CENSO y su False pisa el
+        # ignore_failed = True del rc: en corridas de días un SCF que no
+        # converge no debe abortar todo.
+        parts += ["--optimization", "--refinement", "--ignore-failed"]
+    rc = CENSO_RC or (CENSO_REFINE_RC if CENSO_REFINE else None)
+    if rc is not None:
+        parts += ["--inprc", str(rc)]
+    return parts
+
+
+def censo_timeout_hours() -> float:
+    return CENSO_TIMEOUT_HOURS_REFINE if CENSO_REFINE else CENSO_TIMEOUT_HOURS
+
+
+# Partes de CENSO cuyo .out tiene la tabla CONF#/E/ΔGsolv/GmRRHO/Gtot/ΔGtot/
+# Boltzmann, de la más refinada a la menos. El bool indica si el .xyz de esa
+# parte trae geometrías DFT-optimizadas (y entonces NO se puede tomar la
+# geometría del ensemble CREST para esos CONF#).
+CENSO_RESULT_PARTS = (
+    ("3_REFINEMENT", True),
+    ("2_OPTIMIZATION", True),
+    ("1_SCREENING", False),
+)
+
+
+def find_censo_result(
+    censo_dir: Path,
+    conformers_xyz: Optional[Path] = None,
+) -> Optional[tuple[Path, list[str], list[Path]]]:
+    """
+    Busca el resultado CENSO más avanzado parseable en censo_dir (o en sus
+    subcarpetas CENSO/ y prescreening/ de versiones viejas).
+
+    Devuelve (out, conf_ids ordenados por Gtot, fuentes de geometría en
+    orden de prioridad) o None. Para refinamiento/optimización la única
+    fuente válida es el .xyz de esa parte (geometrías r2SCAN-3c); para
+    screening se mantiene el orden histórico (CREST primero, luego
+    1_SCREENING.xyz).
+    """
+    dirs = [censo_dir, censo_dir / "CENSO", censo_dir / "prescreening"]
+    for stem, optimized in CENSO_RESULT_PARTS:
+        for d in dirs:
+            out = d / f"{stem}.out"
+            conf_ids = parse_censo_screening_out(out)
+            if not conf_ids:
+                continue
+            if optimized:
+                candidates = [d / f"{stem}.xyz"]
+            else:
+                candidates = [conformers_xyz, d / f"{stem}.xyz",
+                              d.parent / f"{stem}.xyz"]
+            geoms: list[Path] = []
+            for g in candidates:
+                if (g is not None and g not in geoms and g.exists()
+                        and g.stat().st_size > 0):
+                    geoms.append(g)
+            return out, conf_ids, geoms
+    return None
+
+
+def censo_result_complete(out: Path) -> bool:
+    """¿El resultado `out` es la última parte pedida (refinamiento con --censo-refine)?"""
+    return out.stem == "3_REFINEMENT" or not CENSO_REFINE
+
 
 def parse_censo_screening_out(screening_out: Path) -> list[str] | None:
     """
@@ -3457,7 +3587,7 @@ def run_censo_standalone(input_xyz: Path, charge: int, out_dir: Path,
 
     cmd = [
         str(CENSO_BIN),
-        "--prescreening", "--screening",   # sin --screening, CENSO 3.x se
+        *censo_cli_parts(),               # sin --screening, CENSO 3.x se
                                             # detiene tras prescreening
         "-i", local_input.name,
         "-c", str(charge),
@@ -3486,11 +3616,11 @@ def run_censo_standalone(input_xyz: Path, charge: int, out_dir: Path,
             cmd, out_dir, out_dir / "censo.log",
             build_omp_env(censo_threads_per_job(eff_maxcores, eff_omp_min),
                            cpu_list=cpu_pool, set_pe_list=False),
-            CENSO_TIMEOUT_HOURS,
+            censo_timeout_hours(),
             cpu_list=cpu_pool,
         )
     except subprocess.TimeoutExpired:
-        log.error(f"[CENSO-STANDALONE]  ✗  TIMEOUT ({CENSO_TIMEOUT_HOURS} h)")
+        log.error(f"[CENSO-STANDALONE]  ✗  TIMEOUT ({censo_timeout_hours()} h)")
         return False
     except FileNotFoundError as e:
         if "taskset" in str(e):
@@ -3508,6 +3638,16 @@ def run_censo_standalone(input_xyz: Path, charge: int, out_dir: Path,
                   f"{proc.returncode} — revisa {out_dir / 'censo.log'}")
         return False
 
+    _res = find_censo_result(out_dir)
+    if _res is not None:
+        log.info(f"[CENSO-STANDALONE]  ✓  {_res[0].name}: {len(_res[1])} conf(s) "
+                 f"(geometrías: {', '.join(g.name for g in _res[2])})")
+        if not censo_result_complete(_res[0]):
+            log.warning("[CENSO-STANDALONE]  ⚠  --censo-refine pedido pero no "
+                        "hay 3_REFINEMENT.out — revisa censo.log")
+            return False
+        return True
+
     for _name in ("censo_ensemble_sorted.xyz", "censo_ensemble.xyz",
                   "crest_conformers_sorted.xyz", "crest_conformers.xyz.sorted"):
         _p = out_dir / _name
@@ -3523,6 +3663,17 @@ def run_censo_standalone(input_xyz: Path, charge: int, out_dir: Path,
     return True
 
 
+def _apply_censo_args(args) -> None:
+    """Fija CENSO_REFINE / CENSO_RC desde --censo-refine / --censo-rc."""
+    global CENSO_REFINE, CENSO_RC
+    CENSO_REFINE = bool(getattr(args, "censo_refine", False))
+    rc = getattr(args, "censo_rc", None)
+    CENSO_RC = rc.resolve() if rc else None
+    effective = CENSO_RC or (CENSO_REFINE_RC if CENSO_REFINE else None)
+    if effective is not None and not effective.is_file():
+        raise SystemExit(f"ERROR: no existe la configuración de CENSO {effective}")
+
+
 def _run_censo_standalone_cli(args) -> None:
     """Punto de entrada de --censo-standalone: valida args, prepara out_dir
     y logger, y delega en run_censo_standalone(). Sale del proceso con
@@ -3536,6 +3687,7 @@ def _run_censo_standalone_cli(args) -> None:
                else input_xyz.parent / f"{input_xyz.stem}_censo")
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    _apply_censo_args(args)
     log = setup_logging(out_dir)
     check_required_bins(log)
 
@@ -4458,19 +4610,13 @@ def stage_sp_gas(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
 
 def _find_screening_out(mol_dir: Path) -> Optional[Path]:
     """
-    Busca 1_SCREENING.out de CENSO para mol_dir, probando las mismas rutas
-    candidatas que usa stage_censo_prescreen() (base, CENSO/, prescreening/).
-    Devuelve la primera candidata parseable, o None si ninguna lo es.
+    Busca el .out de CENSO con pesos Boltzmann para mol_dir: el más avanzado
+    entre 3_REFINEMENT, 2_OPTIMIZATION y 1_SCREENING (ver find_censo_result).
+    Devuelve None si ninguno es parseable.
     """
-    censo_dir = mol_dir / "01b_censo_prescreen"
-    candidates = [
-        censo_dir / "1_SCREENING.out",
-        censo_dir / "CENSO" / "1_SCREENING.out",
-        censo_dir / "prescreening" / "1_SCREENING.out",
-    ]
-    for p in candidates:
-        if parse_boltzmann_weights(p):
-            return p
+    res = find_censo_result(mol_dir / "01b_censo_prescreen")
+    if res is not None and parse_boltzmann_weights(res[0]):
+        return res[0]
     return None
 
 
@@ -6167,6 +6313,7 @@ def _setup_run_resources(args):
            NUMFREQ_BATCH_SIZE, ALLOW_NO_CENSO
 
     ALLOW_NO_CENSO = bool(getattr(args, "allow_no_censo", False))
+    _apply_censo_args(args)
 
     # ── Validar --multitemp / --trange ───────────────────────────────────────
     if args.trange is not None and not args.multitemp:
@@ -6627,16 +6774,10 @@ def _run_downstream_from_crest(args, conformers_xyz, mol_dir, charge,
         if args.start == "opt":
             nconf = 1
         elif args.boltzmann_threshold is not None:
-            # Buscar 1_SCREENING.out en las ubicaciones estándar de CENSO
+            # Pesos del resultado CENSO más avanzado (3_REFINEMENT >
+            # 2_OPTIMIZATION > 1_SCREENING), ver _find_screening_out
             _censo_prescreen_dir = mol_dir / "01b_censo_prescreen"
-            _screening_candidates = [
-                _censo_prescreen_dir / "1_SCREENING.out",
-                _censo_prescreen_dir / "CENSO" / "1_SCREENING.out",
-                _censo_prescreen_dir / "prescreening" / "1_SCREENING.out",
-            ]
-            _screening_out = next(
-                (p for p in _screening_candidates if p.exists()), None
-            )
+            _screening_out = _find_screening_out(mol_dir)
             if _screening_out:
                 nconf, boltz_conf_ids = select_nconf_boltzmann(
                     conformers_xyz, _screening_out, log,
@@ -6965,6 +7106,21 @@ Ejemplos (modo multi-molécula, --mol repetido):
     parser.add_argument(
         "--out", type=Path, default=None, metavar="DIR",
         help="(solo con --censo-standalone) directorio de salida.",
+    )
+    parser.add_argument(
+        "--censo-refine", action="store_true",
+        help=(
+            "CENSO corre además optimización (r2SCAN-3c/CPCM) y refinamiento "
+            "(ωB97X-D3/def2-TZVP SMD, 95 %% Boltzmann); el ensemble que pasa a "
+            "OPT sale de 3_REFINEMENT con geometrías r2SCAN-3c. Si ya hay un "
+            "1_SCREENING/2_OPTIMIZATION terminado, se reanuda desde ahí. "
+            "Usa censo2rc_refine de la raíz del proyecto salvo --censo-rc."
+        ),
+    )
+    parser.add_argument(
+        "--censo-rc", type=Path, default=None, metavar="RCFILE",
+        help="configuración de CENSO (--inprc). Default: ~/.censo2rc, o "
+             "censo2rc_refine con --censo-refine.",
     )
     parser.add_argument(
         "--omp-min", type=int, default=CENSO_OMP_MIN, metavar="N",
