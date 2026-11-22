@@ -710,14 +710,14 @@ def test_adc2_requires_normal_termination(tmp_path):
 # ── P1-11 / P1-12: calibración, N microestados, MC calibrado ─────────────────
 
 def test_pka_exp_single_source():
-    # Asp: fuente [W] verificada (2.09/3.86/9.82), no McMurry (1.88/3.65/9.60)
-    assert m.PKA_EXP["Aspartic"] == {"carboxyl": 2.09, "carboxyl_2": 3.86, "amino": 9.82}
+    # Asp: IUPAC Reliable (1.99/3.90/9.84), no McMurry (1.88/3.65/9.60)
+    assert m.PKA_EXP["Aspartic"] == {"carboxyl": 1.99, "carboxyl_2": 3.90, "amino": 9.84}
     asp = {p["mol"]: p["exp"] for p in m.EMPIRICAL_CALIBRATION["carboxyl"]}
     assert asp["Aspartic"] == m.PKA_EXP["Aspartic"]["carboxyl"]
     assert m.EMPIRICAL_CALIBRATION["carboxyl_2"][0]["exp"] == m.PKA_EXP["Aspartic"]["carboxyl_2"]
     tr = {(mol, t["type"]): t["exp"] for mol, spec in m.CALIBRATION_SETS.items()
           for t in spec["transitions"]}
-    assert tr[("ASPARTIC", "carboxyl")] == 2.09 and tr[("ASPARTIC", "carboxyl_2")] == 3.86
+    assert tr[("ASPARTIC", "carboxyl")] == 1.99 and tr[("ASPARTIC", "carboxyl_2")] == 3.90
     # toda 'exp' de CALIBRATION_SETS coincide con PKA_EXP
     for mol, spec in m.CALIBRATION_SETS.items():
         for t in spec["transitions"]:
@@ -987,3 +987,17 @@ def test_stage_censo_reuses_existing_refinement(tmp_path, monkeypatch):
     text = out.read_text()
     assert "CONF2" in text and "9.0" in text and "CONF1" not in text
     assert m._find_screening_out(mol_dir) == censo_dir / "3_REFINEMENT.out"
+
+
+def test_cli_flags_pka_calibrate(capsys, monkeypatch):
+    # el parser de `pka` expone --mc-calibrated, --mc-seed, --mc-samples y modo aicc
+    m.main(["pka", "--help"])        # main captura el SystemExit de argparse
+    h = capsys.readouterr().out
+    assert all(f in h for f in ("--mc-calibrated", "--mc-seed", "--mc-samples", "aicc"))
+    # `calibrate --fit-mode aicc` llega a la tabla de ajustes
+    m.main(["calibrate", "--help"])
+    assert "--fit-mode" in capsys.readouterr().out
+    _calib_xy(monkeypatch, [(2, 1), (5, 3), (8, 4.5), (11, 7)])
+    monkeypatch.setitem(m.EMPIRICAL_OPTS, "allow_below_min", True)
+    m._calib_print_fits(["t"], "aicc")
+    assert "modo aicc" in capsys.readouterr().out

@@ -11542,20 +11542,26 @@ PH_STANDARD    = 7.0
 # P1-11: FUENTE ÚNICA de pKa experimentales. EMPIRICAL_CALIBRATION y
 # CALIBRATION_SETS leen de aquí (no repetir literales). Valores verificados el
 # 2026-11-17 contra la compilación de Williams/Evans (ACS Org. Div., 4/2022,
-# pka-compilation-williams.pdf): Gly 2.34/9.6, Val 2.32/9.62, Asp 2.09/3.86/9.82,
-# Glu 2.19/4.25/9.67, IDA 2.98/9.89, MeIDA 2.81/10.18, Tris 8.10, benzamidina
-# 11.6, acetamidina 12.52. PENDIENTE: contrastar contra IUPAC / NIST SRD 46
-# (no accesible desde aquí); si difieren, cambiar SOLO esta tabla.
+# pka-compilation-williams.pdf) y contrastados el 2026-11-22 con el IUPAC
+# Digitized pKa Dataset (github.com/IUPAC/Dissociation-Constants,
+# iupac_high-confidence_v2_4.csv, 25 °C, sin cosolvente). Regla: entrada
+# "Reliable" (constante termodinámica, I→0) → valor IUPAC; si no, Williams/Evans.
+# IUPAC: Gly 2.35/9.78, Val 2.29/9.72, Asp 1.99/3.90/9.84, AP 9.11. Williams/Evans
+# (sin entrada Reliable): Glu 2.19/4.25/9.67 (IUPAC K34 aprox. 2.13/4.31/9.76),
+# IDA 2.98/9.89, MeIDA 2.81/10.18 (IUPAC N11 9.57 a I=0.1, constante de
+# concentración: difiere 0.6, a revisar), Tris 8.10, benzamidina 11.6,
+# acetamidina 12.52. Cambiar SOLO esta tabla.
 # El Asp anterior (1.88/3.65/9.60) venía de McMurry y se descarta.
 _REF_W = "Williams/Evans pKa compilation (ACS Org. Div., 4/2022)"
-_REF_AA = _REF_W
-_REF_AP = "4-aminopiridina, 9.17 a 25 °C (dato del proyecto; [W] ref. 41)"
+_REF_IUPAC = "IUPAC Digitized pKa Dataset v2.4 (Reliable, 25 °C)"
+_REF_AA = _REF_IUPAC + "; Glu: " + _REF_W
+_REF_AP = "4-aminopiridina, 9.11 a 25 °C (IUPAC Digitized pKa Dataset v2.4, B29 Reliable)"
 PKA_EXP: dict[str, dict[str, float]] = {
-    "Glycine":  {"carboxyl": 2.34, "amino": 9.60},
-    "Valine":   {"carboxyl": 2.32, "amino": 9.62},
-    "Aspartic": {"carboxyl": 2.09, "carboxyl_2": 3.86, "amino": 9.82},
+    "Glycine":  {"carboxyl": 2.35, "amino": 9.78},
+    "Valine":   {"carboxyl": 2.29, "amino": 9.72},
+    "Aspartic": {"carboxyl": 1.99, "carboxyl_2": 3.90, "amino": 9.84},
     "Glutamic": {"carboxyl": 2.19, "carboxyl_2": 4.25, "amino_dianion": 9.67},
-    "AP":       {"pyridinium": 9.17},
+    "AP":       {"pyridinium": 9.11},
     "IDA":      {"ammonium_dianion": 9.89},
     "MeIDA":    {"ammonium_dianion": 10.18},
     "Benzamidine": {"amidinium": 11.6},
@@ -16047,6 +16053,13 @@ Ejemplos:
     parser.add_argument("--mc-seed", type=int, default=None, metavar="N",
                         help="Semilla para reproducibilidad del Monte Carlo "
                              "(default: sin fijar)")
+    parser.add_argument("--mc-calibrated", action="store_true",
+                        help="Con --montecarlo y --empirical-correction: el MC "
+                             "muestrea el error de calibración (intercepto "
+                             "t_{n−1}·s_LOO) en los tramos corregidos, en vez "
+                             "de σ_H⁺/σ_elec/σ_gcorr (clases con n<CALIB_MIN_N "
+                             "caen al MC crudo con aviso). Usa --mc-seed y "
+                             "--mc-samples.")
     parser.add_argument("--pair", nargs=2, metavar=("ACIDO", "BASE"), default=None,
                         help="Modo par: calcula UN pKa entre dos carpetas de "
                              "runs/ (ácido → base + H⁺), sin cadena ni "
@@ -16073,9 +16086,12 @@ help="Aplica la corrección empírica calibrada (ver "
                              "pI y los gráficos; el crudo se sigue imprimiendo y "
                              "exportando. Sin este flag no hay corrección.")
     parser.add_argument("--empirical-correction-mode",
-                        choices=["auto", "linear", "offset"], default="auto",
+                        choices=["auto", "linear", "offset", "aicc"], default="aicc",
                         help="Modo de ajuste de --empirical-correction (ver "
-                             "fit_empirical_correction()). 'auto' (default): "
+                             "fit_empirical_correction()). 'aicc' (default): "
+                             "criterio de pka-spec-v1 (lineal solo con n≥5, "
+                             "rango≥3 y ΔAICc>2; si no, offset); 'linear' "
+                             "fuerza LOO lineal. 'auto': "
                              "regresión lineal si hay ≥3 puntos de "
                              "calibración para ese tipo, desplazamiento puro "
                              "si hay exactamente 2 (recomendado — con 2 "
@@ -16249,7 +16265,7 @@ def _run_pair(args, gcorr_source: str = "harmonic"):
         raw = res["pKa"] if (res and res["ok"]) else None
         corr = apply_empirical_correction(raw, ec_spec["pair"],
                                           gcorr_source=gcorr_source,
-                                          mode=getattr(args, "empirical_correction_mode", "auto"),
+                                          mode=getattr(args, "empirical_correction_mode", "aicc"),
                                           pka_result=res)
         _print_empirical_correction(corr, label)
     return {"pka": res}
@@ -16318,7 +16334,7 @@ def _run_classic(args, gcorr_source: str = "harmonic"):
 
     # ── Corrección empírica (--empirical-correction) ───────────────────────
     ec_spec = getattr(args, "empirical_correction_spec", {}) or {}
-    ec_mode = getattr(args, "empirical_correction_mode", "auto")
+    ec_mode = getattr(args, "empirical_correction_mode", "aicc")
     corr1 = corr2 = None
     if ec_spec:
         if "pKa1" in ec_spec:
@@ -16402,6 +16418,8 @@ def _run_classic(args, gcorr_source: str = "harmonic"):
                 sigma_gcorr_kcal=args.mc_sigma_gcorr,
                 sigma_hplus_kcal=args.mc_sigma_hplus,
                 seed=args.mc_seed,
+                calibrations=({k: c for k, c in (("pKa1", corr1), ("pKa2", corr2))
+                               if c and c.get("ok")} if args.mc_calibrated else None),
             )
             print_mc_summary(chain_mc, [
                 ("pKa1", pka1_result, "pKa₁"),
@@ -16684,7 +16702,7 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
 
     # ── Corrección empírica (--empirical-correction) ───────────────────────
     ec_spec = getattr(args, "empirical_correction_spec", {}) or {}
-    ec_mode = getattr(args, "empirical_correction_mode", "auto")
+    ec_mode = getattr(args, "empirical_correction_mode", "aicc")
     corr0 = corr1 = corr2 = None
     if ec_spec:
         if "pKa0" in ec_spec:
@@ -16785,6 +16803,8 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
             sigma_gcorr_kcal=args.mc_sigma_gcorr,
             sigma_hplus_kcal=args.mc_sigma_hplus,
             seed=args.mc_seed,
+            calibrations=({k: c for k, c in (("pKa0", corr0), ("pKa1", corr1), ("pKa2", corr2))
+                           if c and c.get("ok")} if args.mc_calibrated else None),
         )
         print_mc_summary(chain_mc, [
             ("pKa0", pka0_result, "pKa₀ (A→R/D)"),
@@ -17910,11 +17930,11 @@ def _calib_compute_mol(mol: str, spec: dict, base: Path, T: float,
     return out
 
 
-def _calib_print_fits(types: list[str]) -> None:
+def _calib_print_fits(types: list[str], mode: str = "aicc") -> None:
     _prev_n1 = EMPIRICAL_OPTS.get("allow_n1")
     EMPIRICAL_OPTS["allow_n1"] = True   # la tabla muestra también n=1 (marcado)
     try:
-        _calib_print_fits_inner(types)
+        _calib_print_fits_inner(types, mode)
     finally:
         EMPIRICAL_OPTS["allow_n1"] = _prev_n1
     print("\n  Nota: tipos con n=1 NO se aplican en `pka` salvo --allow-n1; y "
@@ -17922,13 +17942,13 @@ def _calib_print_fits(types: list[str]) -> None:
           "(q_ácido→q_base), salvo --force-charge-class.")
 
 
-def _calib_print_fits_inner(types: list[str]) -> None:
+def _calib_print_fits_inner(types: list[str], mode: str = "aicc") -> None:
     sep = "─" * 100
-    print(f"\n{'═' * 100}\n  AJUSTE POR TIPO  (modo auto; offset salvo rango≥1.0 y n≥3)\n{'═' * 100}")
+    print(f"\n{'═' * 100}\n  AJUSTE POR TIPO  (modo {mode}; auto: offset salvo rango≥1.0 y n≥3; aicc: n≥5, rango≥3, ΔAICc>2)\n{'═' * 100}")
     for gsrc in ("harmonic", "goodvibes"):
         shown = False
         for t in types:
-            fit = fit_empirical_correction(t, gcorr_source=gsrc, mode="auto")
+            fit = fit_empirical_correction(t, gcorr_source=gsrc, mode=mode)
             if not fit.get("ok"):
                 continue
             if not shown:
@@ -17989,6 +18009,12 @@ Ejemplos:
                          "de Born están calibradas para CPCM. Se guarda en el JSON.")
     ap.add_argument("--override", nargs="*", default=[], metavar="MOL.rol=CARPETA",
                     help="renombra una carpeta de estado, p. ej. GLYCINE.neutral=glycine")
+    ap.add_argument("--fit-mode", choices=["auto", "linear", "offset", "aicc"],
+                    default="aicc",
+                    help="modo del ajuste por tipo mostrado (default aicc). "
+                         "'aicc': pendiente libre solo con n≥5, rango≥3 y "
+                         "ΔAICc>2 (pka-spec-v1); 'linear': fuerza lineal con "
+                         "LOO. Se imprimen RMSE y LOO; el JSON no cambia.")
     ap.add_argument("--out", default="calibration.json", metavar="JSON")
     ap.add_argument("--csv", default=None, metavar="CSV",
                     help="además, tabla plana de transiciones en CSV")
@@ -18088,7 +18114,7 @@ Ejemplos:
     # Instala en memoria para que los ajustes de abajo usen estos valores.
     EMPIRICAL_CALIBRATION.clear()
     EMPIRICAL_CALIBRATION.update(cal)
-    _calib_print_fits(list(cal))
+    _calib_print_fits(list(cal), args.fit_mode)
 
     blob = {
         "meta": {"created": datetime.datetime.now().isoformat(timespec="seconds"),
