@@ -1023,3 +1023,41 @@ def test_fit_harmonic_none_not_ok(monkeypatch):
     monkeypatch.setattr(m, "EMPIRICAL_CALIBRATION", {"t": [
         {"mol": "M", "calc_goodvibes": 3.0, "calc_harmonic": None, "exp": 2.0}]})
     assert not m.fit_empirical_correction("t", gcorr_source="harmonic")["ok"]
+
+
+def test_mc_linear_slope_uncertainty(monkeypatch):
+    # fit lineal sintético (n=6): la std del MC crece con |x0 − x̄| según la fórmula
+    xs = [2.0, 3.0, 4.5, 6.0, 8.0, 10.0]
+    ys = [1.0, 2.4, 3.0, 4.9, 6.1, 7.2]
+    _calib_xy(monkeypatch, list(zip(xs, ys)))
+    fit = m.fit_empirical_correction("t", mode="linear")
+    fit["group_type"] = "t"
+    n, xb = fit["n"], float(np.mean(xs))
+    sxx = float(np.sum((np.array(xs) - xb) ** 2))
+    N = 40000
+    draw = m._calibration_intercept_draw(fit, N, np.random.default_rng(11))
+    stds = {}
+    for dG in (13.0, 40.0):            # pKa crudo ≈ 9.5 (cerca de x̄=5.6) y ≈ 29 (lejos)
+        monkeypatch.setattr(m, "compute_pka", lambda *a, dG=dG, **k:
+                            {"ok": True, "dG_aq_kcal": dG, "method": "direct", "warnings": []})
+        r = m.compute_pka_montecarlo({}, {}, calibration_fit=fit, calib_intercept_draw=draw,
+                                     rng=np.random.default_rng(1), n_samples=N)
+        x0 = dG / (m.R_KCAL * m.T_STD * m.LN10)
+        scale = fit["loo_rmse"] * math.sqrt(1 + 1 / n + (x0 - xb) ** 2 / sxx)
+        mad = float(np.median(np.abs(r["pka_samples"] - r["pka_median"])))
+        # mediana del |t_{n-2}| · escala (robusto a la cola pesada)
+        t_med = float(np.median(np.abs(np.random.default_rng(5).standard_t(n - 2, size=400000))))
+        assert mad == pytest.approx(t_med * scale, rel=0.08)
+        stds[dG] = mad
+    assert stds[40.0] > 2 * stds[13.0]
+
+
+def test_cli_extra_micro_degeneracy_flags(capsys):
+    m.main(["pka", "--help"])
+    h = capsys.readouterr().out
+    assert "--extra-micro" in h and "--degeneracy" in h
+    members = ["GR", "GD", "GD2"]
+    assert m._parse_degeneracy(["GD=2", "GR=0.5"], members) == {"GD": 2.0, "GR": 0.5}
+    for bad in (["GD"], ["GD=x"], ["GD=0"], ["GD=-1"], ["ZZ=2"]):
+        with pytest.raises(SystemExit):
+            m._parse_degeneracy(bad, members)

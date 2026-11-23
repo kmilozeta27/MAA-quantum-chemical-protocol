@@ -13980,6 +13980,10 @@ def _calibration_intercept_draw(fit: dict, n_samples: int,
     n, s_loo = fit.get("n", 0), fit.get("loo_rmse", float("nan"))
     if n < CALIB_MIN_N or not np.isfinite(s_loo):
         return None
+    if fit.get("mode") == "linear":
+        # modo lineal: devuelve t_{n−2} ESTÁNDAR; compute_pka_montecarlo lo escala
+        # con el error de predicción en x0 (depende del pKa crudo de cada tramo).
+        return rng.standard_t(n - 2, size=n_samples)
     return (fit["intercept"]
             + rng.standard_t(n - 1, size=n_samples) * s_loo * np.sqrt(1.0 + 1.0 / n))
 
@@ -14007,8 +14011,8 @@ def compute_pka_montecarlo(
     es slope·pKa_crudo + b_draw. En ese modo NO se muestrean σ_H⁺ ni
     σ_elec/σ_gcorr (el residuo de calibración ya los contiene) y
     `hplus_draw` queda en None. Pendiente: incertidumbre conformacional
-    (bootstrap sobre conformeros), que el plan pide sumar. Con modo lineal solo
-    se sortea el intercepto (la incertidumbre de la pendiente no se propaga).
+    (bootstrap sobre conformeros), que el plan pide sumar. Modo lineal: error
+    de predicción en x0 (pendiente incluida, ver más abajo); offset: solo b.
 
     Propaga incertidumbre en el pKa de AH → A⁻ + H⁺ vía Monte Carlo,
     reusando compute_pka() como fuente única de verdad para el valor
@@ -14107,7 +14111,16 @@ def compute_pka_montecarlo(
             raise ValueError("calibration_fit requiere calib_intercept_draw con "
                              f"{n_samples} muestras.")
         pka_raw = base_result["dG_aq_kcal"] / (R_KCAL * T * LN10)
-        pka_samples = calibration_fit["slope"] * pka_raw + np.asarray(calib_intercept_draw)
+        if calibration_fit.get("mode") == "linear":
+            # δ ~ t_{n−2}·s_LOO·√(1 + 1/n + (x0−x̄)²/Sxx) (s_LOO en vez de s: conservador)
+            cx = np.asarray(calibration_fit["calib_x"], dtype=float)
+            n_c, sxx = len(cx), float(np.sum((cx - cx.mean()) ** 2))
+            scale = calibration_fit["loo_rmse"] * np.sqrt(
+                1.0 + 1.0 / n_c + (pka_raw - cx.mean()) ** 2 / sxx)
+            pka_samples = (calibration_fit["slope"] * pka_raw + calibration_fit["intercept"]
+                           + np.asarray(calib_intercept_draw) * scale)
+        else:
+            pka_samples = calibration_fit["slope"] * pka_raw + np.asarray(calib_intercept_draw)
         ci_lo, ci_hi = np.percentile(pka_samples, [2.5, 97.5])
         out["warnings"].append(
             "MC calibrado: sin σ_H⁺/σ_elec/σ_gcorr genéricos (el residuo de "
@@ -16060,6 +16073,15 @@ Ejemplos:
                              "de σ_H⁺/σ_elec/σ_gcorr (clases con n<CALIB_MIN_N "
                              "caen al MC crudo con aviso). Usa --mc-seed y "
                              "--mc-samples.")
+    parser.add_argument("--extra-micro", action="append", default=[], metavar="DIR",
+                        help="Microestado neutro adicional del macroestado R/D "
+                             "(misma carga y N° de átomos que --neutral; se carga "
+                             "como --neutral). Repetible. Solo cadena extendida "
+                             "(--protonated/--zwitterion). Ej.: D′ de MGLYVAL.")
+    parser.add_argument("--degeneracy", action="append", default=[], metavar="NAME=g",
+                        help="Degeneración g>0 de un microestado del macroestado "
+                             "(NAME = --neutral, --zwitterion o un --extra-micro). "
+                             "Repetible. Entra como g·exp(−G/RT); default 1.")
     parser.add_argument("--pair", nargs=2, metavar=("ACIDO", "BASE"), default=None,
                         help="Modo par: calcula UN pKa entre dos carpetas de "
                              "runs/ (ácido → base + H⁺), sin cadena ni "
@@ -16550,6 +16572,9 @@ def _build_neutral_macrostate(data_R: dict, data_D: dict, neutral: str,
         if micro_res["ok"]:
             taut_result["G_macro_Eh"] = micro_res["G_macro_Eh"]
             taut_result["micro"] = micro_res
+            taut_result["f_micro"] = micro_res["fractions"]
+            print("\n  Fracciones en el macroestado de N microestados (con degeneración): "
+                  + ", ".join(f"{k}={v*100:.2f}%" for k, v in micro_res["fractions"].items()))
         else:
             print(f"\n  ⚠  Macroestado de N microestados no calculable; se usa el "
                   f"par {neutral}/{zwitterion}.")
@@ -16585,6 +16610,24 @@ def _build_neutral_macrostate(data_R: dict, data_D: dict, neutral: str,
     }
 
     return taut_result, data_neutral_macro
+
+
+def _parse_degeneracy(specs: list, members: list) -> dict:
+    """['NAME=g', ...] → {NAME: g}; SystemExit si el formato, g≤0 o NAME no es miembro."""
+    out: dict = {}
+    for sp in specs or []:
+        name, sep, val = sp.partition("=")
+        try:
+            g = float(val)
+        except ValueError:
+            g = None
+        if not sep or g is None or not np.isfinite(g) or g <= 0:
+            raise SystemExit(f"ERROR: --degeneracy '{sp}': se espera NAME=g con g>0.")
+        if name not in members:
+            raise SystemExit(f"ERROR: --degeneracy '{sp}': '{name}' no es un microestado "
+                             f"del macroestado (miembros: {', '.join(members)}).")
+        out[name] = g
+    return out
 
 
 def _run_extended(args, gcorr_source: str = "harmonic"):
@@ -16628,9 +16671,23 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
                                   gcorr_source=gcorr_source, use_smd=args.spsmd)
         print_mol_summary(data_C, verbose=args.verbose)
 
+    extra_micro = []
+    for ex in args.extra_micro:
+        if ex in (args.neutral, args.zwitterion) or ex in args.extra_micro[:len(extra_micro)]:
+            raise SystemExit(f"ERROR: --extra-micro '{ex}' repite un microestado ya incluido.")
+        print(f"\n▸ Cargando microestado adicional: {ex}")
+        extra_micro.append(collect_mol_data(ex, verbose=args.verbose,
+                                            gcorr_source=gcorr_source, use_smd=args.spsmd))
+    degeneracy = _parse_degeneracy(args.degeneracy,
+                                   [args.neutral, args.zwitterion, *args.extra_micro])
+
     taut_result, data_neutral_macro = _build_neutral_macrostate(
         data_R, data_D, args.neutral, args.zwitterion, args.temp,
-        verbose=args.verbose, gcorr_source=gcorr_source)
+        verbose=args.verbose, gcorr_source=gcorr_source,
+        extra_micro=extra_micro or None, degeneracy=degeneracy or None)
+    if (extra_micro or degeneracy) and "micro" not in taut_result:
+        raise SystemExit("ERROR: --extra-micro/--degeneracy: macroestado de N microestados "
+                         "no calculable (ver avisos arriba).")
 
     # ── Cadena de pKa: A→[R/D], [R/D]→B, B→C ───────────────────────────────
     pka0_result = pka1_result = pka2_result = None
