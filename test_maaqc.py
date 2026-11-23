@@ -895,7 +895,7 @@ def test_calib_min_n_accepts_n3(monkeypatch):
 def test_gv_invert_args(monkeypatch):
     m._GV_INVERT_FLAG.clear()
     monkeypatch.setitem(m._GV_INVERT_FLAG, "py", "--invert")
-    assert m._gv_invert_args("py") == ["--invert", "50"]
+    assert m._gv_invert_args("py") == ["--invert", "20"]
     monkeypatch.setattr(m, "GV_INVERT_IFREQ", None)
     assert m._gv_invert_args("py") == []
 
@@ -1001,3 +1001,25 @@ def test_cli_flags_pka_calibrate(capsys, monkeypatch):
     monkeypatch.setitem(m.EMPIRICAL_OPTS, "allow_below_min", True)
     m._calib_print_fits(["t"], "aicc")
     assert "modo aicc" in capsys.readouterr().out
+
+
+def test_calibrate_no_stale_builtin_points(monkeypatch, tmp_path):
+    import copy, json
+    monkeypatch.setattr(m, "EMPIRICAL_CALIBRATION", copy.deepcopy(m.EMPIRICAL_CALIBRATION))
+    monkeypatch.setattr(m, "_calib_compute_mol", lambda mol, spec, base, T, meth, gsrc, use_smd=False:
+                        {t["slot"]: {"ok": True, "pKa": 3.5, "method": "born"}
+                         for t in spec["transitions"]})
+    out = tmp_path / "c.json"
+    m.main(["calibrate", "--base", str(tmp_path), "--mols", "VALINE", "--gcorr", "goodvibes",
+            "--out", str(out)])
+    cal = json.loads(out.read_text())["EMPIRICAL_CALIBRATION"]
+    gly = next(p for p in cal["carboxyl"] if p["mol"] == "Glycine")
+    val = next(p for p in cal["carboxyl"] if p["mol"] == "Valine")
+    assert gly["calc_goodvibes"] is None and gly["calc_harmonic"] is None
+    assert val["calc_goodvibes"] == 3.5 and val["calc_harmonic"] is None
+
+
+def test_fit_harmonic_none_not_ok(monkeypatch):
+    monkeypatch.setattr(m, "EMPIRICAL_CALIBRATION", {"t": [
+        {"mol": "M", "calc_goodvibes": 3.0, "calc_harmonic": None, "exp": 2.0}]})
+    assert not m.fit_empirical_correction("t", gcorr_source="harmonic")["ok"]

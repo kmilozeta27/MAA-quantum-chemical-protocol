@@ -11396,7 +11396,7 @@ GV_CUTOFF = 100.0      # cm⁻¹, frequency cutoff (default de GoodVibes)
 GV_QH     = False      # aplicar también la corrección cuasi-armónica de
                         # Head-Gordon a la entalpía (si no, H se deja armónica)
 
-# pka-spec-v2: inversión de modos imaginarios pequeños. Sin opción, GoodVibes
+# pka-spec-v1.1: inversión de modos imaginarios pequeños. Sin opción, GoodVibes
 # ELIMINA los modos imaginarios de las sumas vibracionales (cambia el número de
 # grados de libertad y, bajo qRRHO, pierde la entropía de rotor libre de un modo
 # blando: ~1 kcal/mol por confórmero en MGLYVAL B conf_004/005). Con --invert los
@@ -11404,7 +11404,7 @@ GV_QH     = False      # aplicar también la corrección cuasi-armónica de
 # se invierten los modos con ν > GV_INVERT_IFREQ (cm⁻¹, negativo); un modo más
 # negativo indica una optimización a revisar y se deja como lo trata GoodVibes.
 # None = no invertir (comportamiento de pka-spec-v1).
-GV_INVERT_IFREQ: Optional[float] = -50.0
+GV_INVERT_IFREQ: Optional[float] = -20.0
 _GV_INVERT_FLAG: dict = {}
 
 
@@ -11671,7 +11671,7 @@ def _ols_fit(x: list[float], y: list[float]) -> dict:
             "r2": float(r2), "rmse": rmse, "residuals": resid.tolist()}
 
 
-# pka-spec-v2: número mínimo de calibradores para aplicar el offset de una clase
+# pka-spec-v1.1: número mínimo de calibradores para aplicar el offset de una clase
 # (manuscrito, Sec. 4.6). Con n=2 el RMSE_LOO es solo |b1−b2| (dispersión entre
 # los dos calibradores, no un error de predicción); las clases por debajo del
 # mínimo se reportan SIN calibrar.
@@ -12006,7 +12006,7 @@ def _print_empirical_correction(corr: Optional[dict], label: str):
 def _parse_empirical_correction_spec(spec: Optional[str]) -> dict[str, str]:
     """
     Parsea el argumento --empirical-correction, formato
-    'pKa0=carboxyl,pKa1=carboxyl_2,pKa2=pyridinium' (o 'pair=pyridinium' con
+    'pKa0=carboxyl,pKa1=carboxyl_2,pKa2=amino_dianion' (o 'pair=pyridinium' con
     --pair). Retorna {} si spec es None/vacío. Aborta con SystemExit si el
     formato, el slot o el tipo de grupo no son válidos. Si el tipo se aplica
     a un slot distinto de su(s) slot(s) natural(es) (EMPIRICAL_TYPE_META) solo
@@ -14377,7 +14377,7 @@ def boltzmann_protonation_states(
     return pd.DataFrame(rows)
 
 
-# pka-spec-v2: test de peor caso para pKa(M3) = pKa2 (B⁻ → C²⁻), manuscrito Sec. 2.3.
+# pka-spec-v1.1: test de peor caso para pKa(M3) = pKa2 (B⁻ → C²⁻), manuscrito Sec. 2.3.
 WORST_CASE_F_MIN = 0.95          # fracción mínima de B⁻ para llamar "robusta" la conclusión
 WORST_CASE_DQ    = "−1→−2"       # clase de carga de los calibradores que acotan el sesgo
 
@@ -16077,7 +16077,7 @@ Ejemplos:
 help="Aplica la corrección empírica calibrada (ver "
                              "EMPIRICAL_CALIBRATION) a los slots indicados. "
                              "Formato: 'pKa0=carboxyl,pKa1=carboxyl_2,"
-                             "pKa2=pyridinium' (con --pair: 'pair=pyridinium'). "
+                             "pKa2=amino_dianion' (con --pair: 'pair=pyridinium'). "
                              "Tipos: 'carboxyl' [1er COOH, +1→0], 'carboxyl_2' "
                              "[2º COOH, 0→−1], 'amino' [NH₃⁺ sin carga vecina, "
                              "0→−1], 'amino_dianion' [NH₃⁺ con 2×COO⁻, −1→−2], "
@@ -16144,6 +16144,12 @@ help="Aplica la corrección empírica calibrada (ver "
             print(f"AVISO: la calibración es a T={_ct} K y corres a "
                   f"T={args.temp} K; la corrección empírica se ajustó solo a "
                   f"la T de calibración.", file=sys.stderr)
+        _cg = _meta.get("gcorr")
+        _used = ["harmonic"] + (["goodvibes"] if args.goodvibes else [])
+        if _cg and any(g not in _cg for g in _used):
+            print(f"AVISO: la calibración se calculó con gcorr={_cg} y `pka` usa "
+                  f"gcorr_source={_used} (añade --goodvibes o recalibra con --gcorr both).",
+                  file=sys.stderr)
 
     args.empirical_correction_spec = _parse_empirical_correction_spec(
         args.empirical_correction)
@@ -16353,11 +16359,17 @@ def _run_classic(args, gcorr_source: str = "harmonic"):
                   "EMPÍRICAMENTE donde se pidió corrección (ver arriba). "
                   "El escaneo de temperatura (arriba) sigue mostrando "
                   "valores CRUDOS Born/CPCM sin corregir: la calibración "
-                  "empírica solo se ajustó a T=298.15 K. Si además usas "
+                  "empírica solo se ajustó a T=298.15 K. " + ((
+                  "Si además usas "
                   "--montecarlo, esa propagación de incertidumbre corre "
                   "sobre el ciclo de Born crudo (no conoce la corrección "
                   "empírica); súmale el RMSE de calibración reportado "
-                  "arriba como una fuente de error sistemático aparte.")
+                  "arriba como una fuente de error sistemático aparte."
+                  ) if not args.mc_calibrated else (
+                  "Con --mc-calibrated el MC muestrea el error de calibración "
+                  "(intercepto t_{n−1}·s_LOO) en los tramos corregidos; los de "
+                  "n<CALIB_MIN_N caen al MC crudo (ver avisos arriba).")
+                  ))
         for c, pka_result in ((corr1, pka1_result), (corr2, pka2_result)):
             if c and c.get("ok") and pka_result is not None:
                 pka_result["pKa_raw"] = c["pKa_raw"]
@@ -16726,11 +16738,17 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
                   "EMPÍRICAMENTE donde se pidió corrección (ver arriba). "
                   "El escaneo de temperatura (arriba) sigue mostrando "
                   "valores CRUDOS Born/CPCM sin corregir: la calibración "
-                  "empírica solo se ajustó a T=298.15 K. Si además usas "
+                  "empírica solo se ajustó a T=298.15 K. " + ((
+                  "Si además usas "
                   "--montecarlo, esa propagación de incertidumbre corre "
                   "sobre el ciclo de Born crudo (no conoce la corrección "
                   "empírica); súmale el RMSE de calibración reportado "
-                  "arriba como una fuente de error sistemático aparte.")
+                  "arriba como una fuente de error sistemático aparte."
+                  ) if not args.mc_calibrated else (
+                  "Con --mc-calibrated el MC muestrea el error de calibración "
+                  "(intercepto t_{n−1}·s_LOO) en los tramos corregidos; los de "
+                  "n<CALIB_MIN_N caen al MC crudo (ver avisos arriba).")
+                  ))
         for c, pka_result in ((corr0, pka0_result), (corr1, pka1_result), (corr2, pka2_result)):
             if c and c.get("ok") and pka_result is not None:
                 pka_result["pKa_raw"] = c["pKa_raw"]
@@ -16780,7 +16798,7 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
             if "f_dianion" in row: parts.append(f"f(C²⁻)={r0['f_dianion']*100:.1f}%")
             print(f"    {label}: {', '.join(parts)}")
 
-    # ── Test de peor caso para pKa(M3) (pka-spec-v2, manuscrito Sec. 2.3) ──
+    # ── Test de peor caso para pKa(M3) (pka-spec-v1.1, manuscrito Sec. 2.3) ──
     if pKa2_raw is not None and pKa1 is not None:
         _wc_bias = worst_case_bias_m3(gcorr_source)
         _wc = worst_case_m3_test(pKa0, pKa1, pKa2_raw, f_R, f_D,
@@ -18099,6 +18117,9 @@ Ejemplos:
 
     # ── EMPIRICAL_CALIBRATION actualizada ──────────────────────────────────
     cal = copy.deepcopy(EMPIRICAL_CALIBRATION)
+    for _pts in cal.values():       # los calc embebidos son obsoletos: solo valen los de esta corrida
+        for _pt in _pts:
+            _pt["calc_harmonic"] = _pt["calc_goodvibes"] = None
     for r in rows:
         pts = cal.setdefault(r["type"], [])
         pt = next((p_ for p_ in pts if p_["mol"] == r["label"]), None)
@@ -18139,8 +18160,7 @@ Ejemplos:
           f"    maaqc.py pka --mol MGLYVAL --protonated A --neutral R --zwitterion D \\\n"
           f"        --anion B --dianion C --method {method_resolved if method_resolved != 'mixed' else '<born|direct>'} \\\n"
           f"        --calibration-file {outp} \\\n"
-          f"        --empirical-correction pKa0=carboxyl,pKa1=carboxyl_2,pKa2=pyridinium \\\n"
-          f"        --empirical-correction-mode offset\n")
+          f"        --empirical-correction pKa0=carboxyl,pKa1=carboxyl_2,pKa2=amino_dianion\n")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -18190,7 +18210,7 @@ Cada subcomando conserva exactamente los flags de su script de origen:
   maaqc.py pka --mol AP --pair APA APR --method born
   maaqc.py pka --mol MGLYVAL --protonated A --neutral R --zwitterion D --anion B \\
                --dianion C --calibration-file calibration.json \\
-               --empirical-correction pKa0=carboxyl,pKa1=carboxyl_2,pKa2=pyridinium
+               --empirical-correction pKa0=carboxyl,pKa1=carboxyl_2,pKa2=amino_dianion
 
 Ayuda de cada uno:  maaqc.py <subcomando> --help
 """
