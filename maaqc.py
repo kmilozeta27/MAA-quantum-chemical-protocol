@@ -43,14 +43,10 @@ Colisiones de nombres resueltas (19 detectadas por AST):
     RC_WORK_ROOT y PC_WORK_ROOT. Esta era la colisión que rompía en
     silencio al concatenar los archivos.
 
-  · 5 funciones homónimas pero divergentes. Se conserva la versión de
+  · Funciones homónimas pero divergentes. Se conserva la versión de
     protonation_cycle.py (la más evolucionada, y la que el test de Monte
     Carlo parchea por nombre) y la de results_collector.py pasa a rc_*:
-        compute_pka        → rc_compute_pka        (nombres vs dicts de estado)
-        parse_thermochem   → rc_parse_thermochem   (220 vs 117 líneas)
-        parse_sp_energy    → rc_parse_sp_energy
         export_results     → rc_export_results
-        _resolve_gv_python → _rc_resolve_gv_python
 
   · main() ×4 → _main_run / _main_collect / _main_pka / _main_cubes,
     despachadas por el CLI del final.
@@ -88,6 +84,7 @@ import argparse
 import csv
 import datetime
 import fcntl
+import functools
 import json
 import logging
 import math
@@ -369,7 +366,6 @@ PIPE_WORK_ROOT  = PAPER_ROOT                        # alias, usado solo por prin
 # están ahí, en la raíz del proyecto — antes solo en el cwd, así que el
 # resultado dependía de desde dónde se lanzara el script.
 TMPL_DIRS  = [Path.cwd() / "templates", PAPER_ROOT / "templates"]
-TMPL_DIR   = TMPL_DIRS[0]   # alias retro-compatible
 MULT       = 1                      # multiplicidad siempre 1
 CREST_TIMEOUT_HOURS = 24.0          # timeout CREST (horas)
 CENSO_TIMEOUT_HOURS = 24.0          # timeout CENSO pre-screening (horas)
@@ -452,9 +448,8 @@ def resolve_charge(mol_name: str, explicit_charge: Optional[int],
          se loggea un warning (probable error de tipeo) pero se respeta
          igual lo que pidió el usuario.
       2. Si no se pasó --charge, se usa la carga inferida por sufijo.
-      3. Si no se pasó --charge y no se pudo inferir nada, se cae al
-         default histórico (0) y se avisa por log — igual que el
-         comportamiento previo del script (default=0 en argparse).
+      3. Si no se pasó --charge y no se pudo inferir nada, se aborta con
+         sys.exit (antes caía en silencio a carga 0).
     """
     inferred = infer_charge_from_name(mol_name)
 
@@ -474,11 +469,11 @@ def resolve_charge(mol_name: str, explicit_charge: Optional[int],
         log.info(msg) if log else print(msg)
         return inferred
 
-    msg = (f"No se pudo inferir la carga de '{mol_name}' por su nombre "
-           f"(no termina en A/B/C/D/R). Usando default 0 — pasa --charge "
-           f"explícitamente si no es correcto.")
-    log.warning(msg) if log else print(f"AVISO: {msg}", file=sys.stderr)
-    return 0
+    msg = (f"ERROR: no se pudo inferir la carga de '{mol_name}' por su nombre "
+           f"(no termina en A/B/C/D/R) — pasa --charge explícitamente.")
+    if log:
+        log.error(msg)
+    sys.exit(msg)
 
 # Ver [CENSO-BUDGET] en el CHANGELOG: OMP_NUM_THREADS debe reflejar los
 # hilos que le tocan a CADA sub-job paralelo de CENSO, no el pool
@@ -499,18 +494,6 @@ def censo_threads_per_job(maxcores: int, omp_min: int = CENSO_OMP_MIN) -> int:
     """
     n_parallel = max(1, maxcores // max(omp_min, 1))
     return max(1, maxcores // n_parallel)
-
-
-def censo_n_parallel_jobs(maxcores: int, omp_min: int = CENSO_OMP_MIN) -> int:
-    """
-    Cuántos sub-jobs corre CENSO en paralelo dado maxcores/omp_min (ver
-    get_cluster() en censo/parallel.py: threads_per_worker = ncores //
-    ompmin, y Dask solo admite tantas tareas concurrentes como el
-    presupuesto de recursos "CPU" alcance). Usado para dimensionar
-    MAAQC_CENSO_SLOTS -- necesitamos exactamente un slot de CPUs por
-    sub-job concurrente posible, ni más ni menos.
-    """
-    return max(1, maxcores // max(omp_min, 1))
 
 
 # Ver [CENSO-BUDGET] en el CHANGELOG (segunda mitad): reconcilia
@@ -546,17 +529,6 @@ def _reconcile_censo_budget(requested_cores: int, omp_min: int,
         )
     return n_reserved, min(omp_min, n_reserved)
 
-
-# DEPRECADO (2026-07): reparto manual de slots de cores para los SP/OPT
-# paralelos internos de CENSO (ver MAAQC_CENSO_SLOTS junto a
-# build_omp_env() y partition_cpu_pool_into_slots()). Ya no se usa en
-# ningún llamado a stage_censo_prescreen() — seguía mostrando colisión
-# parcial entre sub-jobs pese al parche local en orca_processor.py, así
-# que se abandonó a favor de dejar que el kernel reparta libremente
-# dentro del pool confinado por taskset. build_omp_env() y
-# partition_cpu_pool_into_slots() se dejan intactas por si se retoma el
-# enfoque más adelante, pero ningún caller les pasa censo_slot_groups hoy.
-MAAQC_CENSO_N_SLOTS = 2
 
 # Los defaults de recursos (NPROCS, MAXCORE, etc.) se inicializan más abajo
 # por ResourceProfile.detect() tras leer la topología real del sistema.
@@ -708,7 +680,7 @@ def usable_pus() -> list[int]:
     """PUs que el pipeline reparte de verdad (P + E; los LP E-cores no cuentan)."""
     return sorted({pu for b in P_CORE_BLOCKS for pu in b} | set(E_CORE_SINGLES))
 
-# OMP_ENV se construye bajo demanda en build_omp_env() para que siempre
+# El entorno OMP se construye bajo demanda en build_omp_env() para que siempre
 # refleje el valor actualizado de NPROCS (nunca queda obsoleto si el
 # usuario pasa --nprocs desde CLI). Ver [MPI-1] y [MPI-2] en el CHANGELOG
 # del módulo para el porqué de MAAQC_PE_LIST, set_pe_list y
@@ -719,12 +691,9 @@ def usable_pus() -> list[int]:
 #   - set_pe_list=False (usado por el camino de CENSO) omite
 #     MAAQC_PE_LIST para no forzar la misma lista fija sobre N sub-jobs
 #     paralelos que CENSO lanza con el mismo ENVIRON heredado.
-#   - MAAQC_CENSO_SLOTS es leído por un parche instalado aparte en CENSO
-#     (fuera de este repo) para repartir esos sub-jobs por hash de
-#     confórmero.
+#   - MAAQC_CENSO_SLOTS ya no se emite; solo se limpia si viene heredado.
 def build_omp_env(nprocs: int, cpu_list: Optional[list[int]] = None,
-                   set_pe_list: bool = True,
-                   censo_slot_groups: Optional[list[list[int]]] = None) -> dict:
+                   set_pe_list: bool = True) -> dict:
     env = {
         **os.environ,
         "OMP_NUM_THREADS": str(nprocs),
@@ -762,21 +731,9 @@ def build_omp_env(nprocs: int, cpu_list: Optional[list[int]] = None,
         # el wrapper de mpirun no lo use por accidente.
         env.pop("MAAQC_PE_LIST", None)
 
-    if censo_slot_groups:
-        # Cada grupo es una lista de PUs crudas (sin traducir a Core —
-        # esa traducción la hace el parche de CENSO en el momento de
-        # construir el MAAQC_PE_LIST real de cada llamada, reutilizando
-        # la misma tabla PU_TO_CORE duplicada localmente allá).
-        env["MAAQC_CENSO_SLOTS"] = "|".join(
-            ",".join(str(pu) for pu in group) for group in censo_slot_groups
-        )
-    else:
-        env.pop("MAAQC_CENSO_SLOTS", None)
+    env.pop("MAAQC_CENSO_SLOTS", None)
 
     return env
-
-# Alias global mantenido para compatibilidad con run_orca(env=None)
-OMP_ENV: dict = build_omp_env(NPROCS)
 
 STEPS = ["crest", "opt", "numfreq", "sp", "tddft", "adc2"]
 
@@ -1004,7 +961,6 @@ signal.signal(signal.SIGTERM, _sigint_handler)
 #  CONSTANTES FÍSICAS
 # ─────────────────────────────────────────────
 
-R_GAS_KCAL          = 1.987204e-3      # cte. de los gases, kcal/(mol·K)
 
 
 # ─────────────────────────────────────────────
@@ -1203,7 +1159,7 @@ class ResourceProfile:
         # Siempre OPT_BATCH_SIZE jobs × MAX_OPT_NPROCS_PER_JOB cores.
         effective_opt_batch = p if p > 1 else self.OPT_BATCH_SIZE
         if p <= 1:
-            self.nprocs_opt = min(c // max(self.OPT_BATCH_SIZE, 1),
+            self.nprocs_opt = min(max(1, c // max(self.OPT_BATCH_SIZE, 1)),
                                   self.MAX_OPT_NPROCS_PER_JOB)
         else:
             self.nprocs_opt = min(max(1, c // p), self.MAX_OPT_NPROCS_PER_JOB)
@@ -1219,7 +1175,7 @@ class ResourceProfile:
         # ── SP ───────────────────────────────────────────────────────────
         # Siempre SP_BATCH_SIZE jobs × MAX_SP_NPROCS cores.
         if p <= 1:
-            self.nprocs_sp = min(c // max(self.SP_BATCH_SIZE, 1),
+            self.nprocs_sp = min(max(1, c // max(self.SP_BATCH_SIZE, 1)),
                                  self.MAX_SP_NPROCS)
         else:
             self.nprocs_sp = min(max(1, c // p), self.MAX_SP_NPROCS)
@@ -1232,7 +1188,7 @@ class ResourceProfile:
         # Siempre TDDFT_BATCH_SIZE jobs × TDDFT_NPROCS_PER_JOB cores.
         # maxcore reducido por RAM_PENALTY_TDDFT para acomodar vectores de
         # excitación (NRoots 15).
-        self.nprocs_tddft  = min(c // max(self.TDDFT_BATCH_SIZE, 1),
+        self.nprocs_tddft  = min(max(1, c // max(self.TDDFT_BATCH_SIZE, 1)),
                                  self.TDDFT_NPROCS_PER_JOB)
         active_tddft_cores = self.nprocs_tddft * self.TDDFT_BATCH_SIZE
         raw_maxcore_tddft  = max(500, ram // max(active_tddft_cores, 1))
@@ -1583,9 +1539,13 @@ def check_opt_converged(out_file: Path) -> bool:
 
 _FREQ_LINE_RE = re.compile(r"^\s*\d+:\s+(-?\d+\.\d+)\s+cm\*\*-1")
 
+# METHODS §11: solo cuenta como imaginaria una frecuencia más negativa que
+# -IMAG_TOL_CM1 (modos blandos pequeños se tratan como reales, ver GV_INVERT_IFREQ).
+IMAG_TOL_CM1 = 20.0
+
 
 def check_no_imaginary(out_file: Path) -> bool:
-    """True si el ÚLTIMO bloque VIBRATIONAL FREQUENCIES no tiene modos negativos.
+    """True si el ÚLTIMO bloque VIBRATIONAL FREQUENCIES no tiene modos < -IMAG_TOL_CM1.
 
     Un .out ausente o ilegible devuelve False (antes devolvía True, es decir
     "sin imaginarias" para un cálculo que no existe). Solo se miran las
@@ -1602,7 +1562,7 @@ def check_no_imaginary(out_file: Path) -> bool:
     block = text[start:end if end != -1 else None]
     for line in block.splitlines():
         m = _FREQ_LINE_RE.match(line)
-        if m and float(m.group(1)) < 0.0:
+        if m and float(m.group(1)) < -IMAG_TOL_CM1:
             return False
     return True
 
@@ -1864,19 +1824,21 @@ def has_numfreq_restart(freq_dir: Path) -> bool:
 
 
 def extract_sp_energy(out_file: Path) -> Optional[float]:
-    """Extrae la energía del SP en Hartree."""
+    """Extrae la ÚLTIMA 'FINAL SINGLE POINT ENERGY' del .out (Hartree).
+    En opt.out la primera es la geometría inicial; la última, el mínimo."""
     if not out_file.exists():
         return None
+    energy = None
     try:
         for line in out_file.read_text(errors="replace").splitlines():
             if "FINAL SINGLE POINT ENERGY" in line:
                 try:
-                    return float(line.split()[-1])
+                    energy = float(line.split()[-1])
                 except ValueError:
                     pass
     except OSError:
         pass
-    return None
+    return energy
 
 
 def extract_adc2_lambda(out_file: Path) -> Optional[tuple[float, float, float]]:
@@ -2023,8 +1985,8 @@ def run_orca(inp_file: Path, out_file: Path, log: logging.Logger,
     Lanza ORCA de forma síncrona. Devuelve True si terminó bien.
     Si el .out ya existe y tiene TERMINATED NORMALLY, omite la ejecución.
     `env` permite pasar un entorno de proceso personalizado; si es None
-    se construye dinámicamente desde los globales NPROCS actuales (evita
-    usar el OMP_ENV construido al inicio del módulo, que puede estar obsoleto).
+    se construye dinámicamente desde los globales NPROCS actuales (nunca
+    queda obsoleto).
 
     `cpu_list`: lista explícita de CPUs lógicas (no necesariamente
     contiguas) a las que confinar el proceso vía `taskset -c cpu1,cpu2,...`.
@@ -2274,214 +2236,6 @@ def stage_crest(mol_xyz: Path, mol_dir: Path, charge: int,
 
 
 # ─────────────────────────────────────────────
-#  RECUPERACIÓN DE PRESCREENING PARCIAL
-# ─────────────────────────────────────────────
-
-def _parse_prescreening_orca_sp(outfile: Path) -> Optional[float]:
-    """
-    Replica OrcaProc._sp de CENSO: busca 'FINAL SINGLE POINT ENERGY'
-    en sp/sp.out y exige que el archivo contenga 'ORCA TERMINATED NORMALLY'.
-    """
-    if not outfile.exists():
-        return None
-    try:
-        text = outfile.read_text(errors="ignore")
-    except OSError:
-        return None
-    if "ORCA TERMINATED NORMALLY" not in text:
-        return None
-    for line in text.splitlines():
-        if "FINAL SINGLE POINT ENERGY" in line:
-            try:
-                return float(line.split()[-1])
-            except (ValueError, IndexError):
-                return None
-    return None
-
-
-def _parse_prescreening_xtb_energy(outfile: Path) -> Optional[float]:
-    """
-    Replica XtbProc._sp de CENSO: busca '| TOTAL ENERGY' y devuelve
-    el token[3] (energía xTB en Hartree).
-    """
-    if not outfile.exists():
-        return None
-    try:
-        text = outfile.read_text(errors="ignore")
-    except OSError:
-        return None
-    for line in text.splitlines():
-        if "| TOTAL ENERGY" in line:
-            try:
-                return float(line.split()[3])
-            except (ValueError, IndexError):
-                return None
-    return None
-
-
-def _censo_prescreen_diagnose_dir(censo_dir: Path, log: logging.Logger) -> dict:
-    """
-    Inspecciona censo_dir (01b_censo_prescreen/) y devuelve un dict con
-    el estado de los cálculos de prescreening:
-
-        {
-          "conf_dirs"  : [Path, ...],   # carpetas CONF* encontradas
-          "n_total"    : int,
-          "n_sp_ok"    : int,           # con sp/sp.out + TERMINATED NORMALLY
-          "n_gsolv_ok" : int,           # con xtb_gsolv/ completos
-          "n_full"     : int,           # con los tres archivos correctos
-          "can_recover": bool,          # True si n_full == n_total > 0
-        }
-
-    No lanza excepciones; si no hay carpetas CONF* devuelve todo en cero.
-    """
-    # CENSO 3.x escribe las carpetas CONF* dentro de censo_dir/0_PRESCREENING/
-    # (ver censo.log: "...using XtbProc in 0_PRESCREENING/CONF141/xtb_gsolv...").
-    # Antes solo se miraba censo_dir directamente y nunca se encontraba nada
-    # que recuperar. Buscamos en censo_dir y, si existe, en censo_dir/0_PRESCREENING/.
-    _search_roots = [censo_dir]
-    _prescreen_subdir = censo_dir / "0_PRESCREENING"
-    if _prescreen_subdir.is_dir():
-        _search_roots.append(_prescreen_subdir)
-
-    conf_dirs = sorted(
-        {
-            d for root in _search_roots if root.is_dir()
-            for d in root.iterdir() if d.is_dir() and d.name.startswith("CONF")
-        },
-        key=lambda d: int(re.search(r"\d+", d.name).group())
-                      if re.search(r"\d+", d.name) else 0,
-    )
-    n_total    = len(conf_dirs)
-    n_sp_ok    = 0
-    n_gsolv_ok = 0
-    n_full     = 0
-
-    for cd in conf_dirs:
-        sp_ok  = _parse_prescreening_orca_sp(cd / "sp" / "sp.out") is not None
-        gas_ok = _parse_prescreening_xtb_energy(cd / "xtb_gsolv" / "gas.out") is not None
-        sol_ok = _parse_prescreening_xtb_energy(cd / "xtb_gsolv" / "solv.out") is not None
-        if sp_ok:
-            n_sp_ok += 1
-        if gas_ok and sol_ok:
-            n_gsolv_ok += 1
-        if sp_ok and gas_ok and sol_ok:
-            n_full += 1
-
-    can_recover = (n_full == n_total > 0)
-
-    log.debug(
-        f"[CENSO-RECOVER]  diagnóstico {censo_dir.name}: "
-        f"{n_total} CONF dirs | sp_ok={n_sp_ok} | gsolv_ok={n_gsolv_ok} | "
-        f"full={n_full} | can_recover={can_recover}"
-    )
-    return {
-        "conf_dirs"  : conf_dirs,
-        "n_total"    : n_total,
-        "n_sp_ok"    : n_sp_ok,
-        "n_gsolv_ok" : n_gsolv_ok,
-        "n_full"     : n_full,
-        "can_recover": can_recover,
-    }
-
-
-def _censo_prescreen_recover(
-    censo_dir: Path,
-    log: logging.Logger,
-) -> Optional[Path]:
-    """
-    Reconstruye 0_PRESCREENING_recovered.json desde los .out ya calculados
-    en censo_dir (01b_censo_prescreen/), sin relanzar nada.
-
-    Reproduce exactamente la estructura que espera EnsembleData.read_output
-    de CENSO 3.0.x:
-        {
-          "part_name": "prescreening",
-          "data": {
-            "CONF1": {"energy": ..., "gsolv": ..., "grrho": 0.0, "gtot": ...},
-            ...
-          }
-        }
-
-    Devuelve la ruta al JSON si tuvo éxito con ≥1 confórmero, o None si
-    hay confórmeros sin datos suficientes (en ese caso el llamador debe
-    eliminar la carpeta y relanzar CENSO desde cero).
-
-    Diferencia frente al script standalone recover_prescreening.py:
-    • No escribe a stdout ni llama sys.exit(); usa el logger del pipeline.
-    • Devuelve None en vez de sys.exit() cuando faltan datos.
-    • Escribe 0_PRESCREENING_recovered.json junto al censo.log existente.
-    """
-    diag = _censo_prescreen_diagnose_dir(censo_dir, log)
-
-    if diag["n_total"] == 0:
-        log.debug("[CENSO-RECOVER]  no hay carpetas CONF* — nada que recuperar")
-        return None
-
-    data: dict[str, dict] = {}
-    missing: list[str]    = []
-
-    for cd in diag["conf_dirs"]:
-        name = cd.name
-
-        energy = _parse_prescreening_orca_sp(cd / "sp" / "sp.out")
-        if energy is None:
-            missing.append(name)
-            log.debug(f"[CENSO-RECOVER]  {name}: sp.out ausente o incompleto")
-            continue
-
-        energy_gas  = _parse_prescreening_xtb_energy(cd / "xtb_gsolv" / "gas.out")
-        energy_solv = _parse_prescreening_xtb_energy(cd / "xtb_gsolv" / "solv.out")
-
-        if energy_gas is None or energy_solv is None:
-            faltante = "gas.out" if energy_gas is None else "solv.out"
-            missing.append(name)
-            log.debug(f"[CENSO-RECOVER]  {name}: {faltante} ausente o sin parsear")
-            continue
-
-        gsolv = energy_solv - energy_gas
-        grrho = 0.0
-        gtot  = energy + gsolv + grrho
-
-        data[name] = {
-            "energy": energy,
-            "gsolv" : gsolv,
-            "grrho" : grrho,
-            "gtot"  : gtot,
-        }
-
-    if missing:
-        log.warning(
-            f"[CENSO-RECOVER]  {len(missing)}/{diag['n_total']} confórmeros "
-            f"sin datos completos: {', '.join(missing[:10])}"
-            f"{'…' if len(missing) > 10 else ''}"
-        )
-        # CENSO exige el set COMPLETO en --reload; si faltan datos no podemos usar recovery.
-        return None
-
-    if not data:
-        log.warning("[CENSO-RECOVER]  ningún confórmero recuperable")
-        return None
-
-    recovered_json = censo_dir / "0_PRESCREENING_recovered.json"
-    dump = {
-        "part_name": "prescreening",
-        "data"     : data,
-    }
-    try:
-        atomic_write(recovered_json, json.dumps(dump, indent=4))
-    except OSError as e:
-        log.error(f"[CENSO-RECOVER]  no se pudo escribir {recovered_json}: {e}")
-        return None
-
-    log.info(
-        f"[CENSO-RECOVER]  ✓  JSON reconstruido → {recovered_json.name} "
-        f"({len(data)} confórmeros)"
-    )
-    return recovered_json
-
-
-# ─────────────────────────────────────────────
 #  LOCK de CENSO — evita relanzamientos duplicados sobre el mismo censo_dir
 # ─────────────────────────────────────────────
 #
@@ -2680,6 +2434,18 @@ def _censo_resume_refine(done_out: Path, charge: int, temperature: float,
     return find_censo_result(censo_dir)
 
 
+def _censo_rebuild(res: tuple[Path, list[str], list[Path]], output_xyz: Path,
+                   log: logging.Logger) -> bool:
+    """Reconstruye output_xyz (ordenado por Gtot) desde un resultado de find_censo_result()."""
+    out, conf_ids, geoms = res
+    for geom in geoms:
+        if extract_conformers_by_id(geom, conf_ids, output_xyz, log):
+            log.info(f"[CENSO]  ✓  {len(conf_ids)} confórmero(s) desde {out.name} "
+                     f"(geometrías: {geom.name}) → {output_xyz.name}")
+            return True
+    return False
+
+
 def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
                            charge: int, log: logging.Logger,
                            temperature: float = 274.15,
@@ -2712,24 +2478,13 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
     censo_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Guardia de concurrencia: ¿ya hay un CENSO vivo sobre censo_dir? ──────
-    # Esto va ANTES de cualquier diagnóstico o lectura de CONF*/*.out: el
-    # bug real (ver comentario sobre _censo_lock_owner más arriba) era que
-    # esta función juzgaba si CENSO estaba "atascado" mirando el contenido
-    # del directorio, que sigue existiendo aunque CENSO esté vivo y ya haya
-    # avanzado a screening. Si hay un PID vivo, no tocamos nada — ni
-    # diagnóstico, ni --reload, ni limpieza de carpetas — y devolvemos el
-    # ensemble sin filtrar tal cual llegó, para que el pipeline no bloquee
-    # ni piense que falló (fail-open, igual que el resto de esta función).
+    # Va antes de leer CONF*/*.out: su contenido no dice si CENSO sigue vivo.
     _owner_pid = _censo_lock_owner(censo_dir, log)
     if _owner_pid is not None:
-        log.warning(
-            f"[CENSO]  ⏳  ya hay un proceso CENSO activo sobre {censo_dir.name}/ "
-            f"(PID {_owner_pid}) — no se toca nada para no pisarle el trabajo "
-            f"(este era el bug: relanzar --reload sobre un run que seguía vivo "
-            f"y ya había avanzado a screening). Vuelve a invocar el pipeline "
-            f"más tarde, cuando termine."
-        )
-        return conformers_xyz
+        return _censo_fallback(
+            log, conformers_xyz,
+            f"ya hay un proceso CENSO activo sobre {censo_dir.name}/ "
+            f"(PID {_owner_pid}); relanza el pipeline cuando termine")
 
     output_xyz = censo_dir / "censo_ensemble_sorted.xyz"
 
@@ -2758,53 +2513,23 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
     _has_screening = _screening_conf_ids is not None
 
     # ── Reconstrucción DIRECTA desde el .out + .xyz de CENSO ─────────────────
-    # FIX (2026-07-14): si el SCREENING (no solo el prescreening) ya terminó
-    # — es decir, _has_screening es True —, NO hace falta invocar CENSO de
-    # nuevo bajo ninguna forma (ni limpio, ni --reload): las energías
-    # Gtot/ΔGtot/Boltzmann y las geometrías de los confórmeros sobrevivientes
-    # YA están en disco (1_SCREENING.out + 1_SCREENING.xyz, o 3_REFINEMENT.*
-    # con --censo-refine). Este bloque se ejecuta ANTES de la verificación
-    # de output_xyz y ANTES del bloque de diagnóstico/--reload sobre
-    # 0_PRESCREENING/ más abajo.
-    #
-    # Bug real que esto corrige: con prescreening Y screening ya 100%
-    # completos en disco, el flujo anterior igual llegaba al bloque de
-    # "recuperación de carpeta parcial de CENSO" (_censo_prescreen_diagnose_dir
-    # sobre 0_PRESCREENING/), que diagnostica sobre las carpetas CONF* del
-    # PRESCREENING — no sabe nada de que el SCREENING ya terminó — y podía
-    # terminar relanzando CENSO (limpio o con --reload) para un trabajo que
-    # ya estaba hecho y disponible en 1_SCREENING.out.
+    # FIX (2026-07-14): si la parte pedida ya terminó, las energías y las
+    # geometrías están en disco (1_SCREENING.* o 3_REFINEMENT.*) y no hace
+    # falta invocar CENSO.
     if _has_screening:
-        _screening_out_path, _, _geom_sources = _censo_res
-        _rebuilt_direct = False
-        for _geom_src in _geom_sources:
-            if extract_conformers_by_id(_geom_src, _screening_conf_ids, output_xyz, log):
-                log.info(
-                    f"[CENSO]  ✓  CENSO ya completo en disco "
-                    f"({_screening_out_path.relative_to(censo_dir)}) "
-                    f"— {len(_screening_conf_ids)} confórmero(s), ensemble reconstruido "
-                    f"SIN invocar CENSO (geometrías: {_geom_src.name}) → {output_xyz.name}"
-                )
-                _rebuilt_direct = True
-                break
-            log.debug(
-                f"[CENSO]  fuente {_geom_src.name} no contiene los CONF# de "
-                f"{_screening_out_path.name} — probando siguiente fuente de geometrías"
-            )
-        if _rebuilt_direct:
+        if _censo_rebuild(_censo_res, output_xyz, log):
             return output_xyz
         log.warning(
-            f"[CENSO]  ⚠  {_screening_out_path.name} parseable ({len(_screening_conf_ids)} conf(s)) "
-            f"pero ninguna fuente de geometría disponible ({', '.join(g.name for g in _geom_sources)}) "
-            f"contiene esos CONF# — se continúa con la verificación de "
-            f"{output_xyz.name} / recovery de prescreening más abajo"
+            f"[CENSO]  ⚠  {_censo_res[0].name} parseable ({len(_screening_conf_ids)} conf(s)) "
+            f"pero ninguna geometría ({', '.join(g.name for g in _censo_res[2])}) "
+            f"contiene esos CONF# — se verifica {output_xyz.name}"
         )
 
     # ── Verificación cruzada output_xyz ↔ 1_SCREENING.out / conformers_xyz ──
     # El bug real: "existe output_xyz" y "existe 1_SCREENING.out parseable"
     # se verificaban por separado, sin comprobar que ambos describen el
     # MISMO screening. Un censo_ensemble_sorted.xyz viejo (de un run
-    # anterior, --reload fallido, --multitemp sin subdir, etc.) que quedó
+    # anterior, --multitemp sin subdir, etc.) que quedó
     # en este mismo censo_dir podía convivir con un 1_SCREENING.out fresco
     # y válido, y esta función los trataba como pareja sin más evidencia.
     # Ahora exigimos que output_xyz tenga el mismo n° de átomos por frame
@@ -2864,257 +2589,12 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
             f"se considera incompleto. Relanzando CENSO con --screening."
         )
 
-    # ── Recuperación de carpeta parcial de CENSO (prescreening interrumpido) ──
-    # Si existe la carpeta 01b_censo_prescreen/ con carpetas CONF* internas
-    # (generadas por un run de CENSO interrumpido), intentamos reconstruir
-    # 0_PRESCREENING_recovered.json y relanzar CENSO con --reload en lugar
-    # de correr todo desde cero.
-    #
-    # Flujo:
-    #   1. Detectar si hay carpetas CONF* en censo_dir.
-    #   2. Si hay un 0_PRESCREENING_recovered.json previo, reutilizarlo
-    #      directamente (permite reintentos tras un --reload que falló).
-    #   3. Diagnosticar si los .out de todas las CONF* son parseables.
-    #   4a. Si SÍ → reconstruir JSON y relanzar con --reload.
-    #   4b. Si NO (datos incompletos) → borrar carpetas corruptas y dejar
-    #       que CENSO corra desde cero más abajo.
-    #
-    # Nota: la carpeta censo_dir en sí se conserva (contiene el censo.log
-    # original y el crest_conformers.xyz copiado); solo se eliminan las
-    # subcarpetas CONF* que impiden a CENSO correr limpio.
-    _diag = _censo_prescreen_diagnose_dir(censo_dir, log)
-    if _diag["n_total"] > 0:
-        log.info(
-            f"[CENSO]  ⚙  carpeta previa detectada con {_diag['n_total']} "
-            f"CONF dirs (sp_ok={_diag['n_sp_ok']}, gsolv_ok={_diag['n_gsolv_ok']}, "
-            f"completos={_diag['n_full']})"
-        )
-
-        # ── ¿Ya existe un JSON de recovery de una ejecución anterior? ──────
-        _prev_json = censo_dir / "0_PRESCREENING_recovered.json"
-        if _prev_json.exists() and _prev_json.stat().st_size > 0:
-            log.info(
-                f"[CENSO]  ♻  reutilizando {_prev_json.name} existente "
-                f"— relanzando CENSO con --reload"
-            )
-            _recovered_json: Optional[Path] = _prev_json
-        elif _diag["can_recover"]:
-            # Todos los confórmeros tienen datos completos → reconstruir
-            log.info(
-                f"[CENSO]  🔧  todos los .out son parseables "
-                f"— reconstruyendo {censo_dir.name}/0_PRESCREENING_recovered.json"
-            )
-            _recovered_json = _censo_prescreen_recover(censo_dir, log)
-        elif _diag["n_full"] > 0:
-            # Recovery parcial: algunos CONF* completos, otros no.
-            # CENSO --reload exige el set COMPLETO (no parcial), así que
-            # no podemos mezclar incompletos en el JSON. En vez de descartar
-            # los n_full ya calculados, borramos SOLO las carpetas incompletas
-            # y reconstruimos el JSON sobre el subconjunto consistente que
-            # queda (n_full == nuevo n_total). Los pocos incompletos se
-            # recalculan al relanzar CENSO limpio sobre el ensemble reducido.
-            _n_incomplete = _diag["n_total"] - _diag["n_full"]
-            log.warning(
-                f"[CENSO]  ⚙  {_diag['n_full']}/{_diag['n_total']} CONF dirs "
-                f"completas — eliminando {_n_incomplete} incompleta(s) y "
-                f"reconstruyendo recovery sobre el resto en vez de recalcular todo"
-            )
-            for _cd in _diag["conf_dirs"]:
-                sp_ok  = _parse_prescreening_orca_sp(_cd / "sp" / "sp.out") is not None
-                gas_ok = _parse_prescreening_xtb_energy(_cd / "xtb_gsolv" / "gas.out") is not None
-                sol_ok = _parse_prescreening_xtb_energy(_cd / "xtb_gsolv" / "solv.out") is not None
-                if not (sp_ok and gas_ok and sol_ok):
-                    try:
-                        shutil.rmtree(_cd)
-                        log.debug(f"[CENSO]  rm -rf {_cd.name} (incompleta)")
-                    except OSError as _e:
-                        log.warning(f"[CENSO]  no se pudo eliminar {_cd.name}: {_e}")
-            _diag = _censo_prescreen_diagnose_dir(censo_dir, log)
-            if _diag["can_recover"]:
-                _recovered_json = _censo_prescreen_recover(censo_dir, log)
-            else:
-                log.warning(
-                    "[CENSO]  ⚠  diagnóstico tras limpieza parcial sigue "
-                    "inconsistente — recovery no es posible"
-                )
-                _recovered_json = None
-        else:
-            # Datos incompletos → el recovery no es posible; limpiar y relanzar
-            _recovered_json = None
-
-        if _recovered_json is not None:
-            # ── Relanzar CENSO con --reload sobre el JSON reconstruido ──────
-            local_input = censo_dir / conformers_xyz.name
-            _reload_attempted = False  # default: sin esto, referenciar
-                                        # _reload_attempted más abajo lanzaría
-                                        # NameError si safe_copy falla aquí
-            if not safe_copy(conformers_xyz, local_input):
-                log.warning(
-                    f"[CENSO-RECOVER]  no se pudo copiar {conformers_xyz.name} "
-                    f"— abortando recovery, relanzando limpio"
-                )
-            else:
-                # ago 2026: reservar el pool y reconciliarlo ANTES de armar
-                # cmd_reload — mismo fix que en el lanzamiento principal, ver
-                # _reconcile_censo_budget(). Si el pool queda vacío, no se
-                # intenta el --reload: se deja _reload_attempted=False para
-                # que el flujo caiga directo a la limpieza + relanzamiento
-                # normal más abajo (que reconcilia el pool de nuevo, fresco,
-                # sin dejar _diag en un estado inconsistente).
-                _recover_cpu_pool = _acquire_cpu_pool(NPROCS_CREST, log, "CENSO-RECOVER")
-                _eff_maxcores, _eff_omp_min = _reconcile_censo_budget(
-                    NPROCS_CREST, CENSO_OMP_MIN, _recover_cpu_pool, log, "CENSO-RECOVER"
-                )
-                _reload_attempted = _eff_maxcores > 0
-                if not _reload_attempted:
-                    log.error("[CENSO-RECOVER]  ✗  sin CPUs disponibles — "
-                              "se omite --reload, se limpiará la carpeta y "
-                              "CENSO correrá desde cero")
-            if _reload_attempted:
-                cmd_reload = [
-                    str(CENSO_BIN),
-                    # FIX (bug del 10 jul): NO pasar "--prescreening" aquí.
-                    # _recovered_json ya contiene el part "prescreening"
-                    # COMPLETO para los n_full == n_total confórmeros (así
-                    # lo garantiza _censo_prescreen_recover, que devuelve
-                    # None si falta algún dato). Pero si además le decimos
-                    # a CENSO "--prescreening" en el CLI, CENSO ejecuta ese
-                    # part igual — el --reload no lo hace tratarlo como ya
-                    # resuelto, solo le da un punto de partida — y recalcula
-                    # xtb_gsolv + sp para las 192 CONF* desde cero. Eso era
-                    # exactamente lo que producía "Reloaded results..."
-                    # seguido inmediatamente de "Running xtb_gsolv... CONF1"
-                    # en censo.log: tres corridas completas de prescreening
-                    # (~2.5 h cada una) sin avanzar nunca a screening.
-                    # Con solo "--screening" + "--reload", CENSO toma el
-                    # prescreening ya resuelto como dado y arranca directo
-                    # en screening.
-                    *censo_cli_parts(include_prescreening=False),
-                    "-i", local_input.name,
-                    "-c", str(charge),
-                    "-u", "0",
-                    "--solvent", "water",
-                    "--maxcores", str(_eff_maxcores),   # ago 2026: reconciliado
-                                                         # contra len(_recover_cpu_pool)
-                                                         # real, no NPROCS_CREST nominal
-                    "--omp-min", str(_eff_omp_min),     # ídem
-                    "-T", f"{temperature:.2f}",
-                    "--reload", str(_recovered_json),
-                ]
-                log.info(
-                    f"[CENSO-RECOVER]  ▶  relanzando CENSO con --reload "
-                    f"({_recovered_json.name}), solo --screening "
-                    f"(prescreening se toma del reload, no se recalcula)"
-                    + ("  [nohup]" if USE_NOHUP else "")
-                )
-                try:
-                    # 2026-07: mismo cambio que en el lanzamiento principal
-                    # (ver comentario junto a censo_cpu_pool más abajo en
-                    # stage_censo_prescreen) — se abandonó el reparto manual
-                    # vía MAAQC_CENSO_SLOTS; _recover_cpu_pool solo fija el
-                    # límite exterior vía taskset (necesario para coordinar
-                    # con otras instancias de pipeline.py corriendo en
-                    # paralelo), y el kernel reparte libremente los
-                    # sub-jobs internos de CENSO dentro de ese pool.
-                    #
-                    # ago 2026: OMP_NUM_THREADS del env ya NO es NPROCS_CREST
-                    # (el pool completo) sino censo_threads_per_job(...) —
-                    # ver CENSO_OMP_MIN arriba para el porqué (sin esto, cada
-                    # sub-job concurrente de CENSO pedía el pool completo de
-                    # hilos para sí mismo, sobre-suscribiendo 3x el pool
-                    # confinado por taskset).
-                    _recover_cpu_pool = _acquire_cpu_pool(NPROCS_CREST, log, "CENSO-RECOVER")
-                    _proc = _run_censo_locked(
-                        cmd_reload, censo_dir,
-                        censo_dir / "censo_recover.log",
-                        build_omp_env(censo_threads_per_job(NPROCS_CREST),
-                                       cpu_list=_recover_cpu_pool,
-                                       set_pe_list=False),
-                        censo_timeout_hours(),
-                        cpu_list=_recover_cpu_pool,
-                    )
-                    # Buscar el ensemble de salida (mismo esquema que abajo)
-                    _fixed = [
-                        "censo_ensemble_sorted.xyz",
-                        "censo_ensemble.xyz",
-                        "crest_conformers_sorted.xyz",
-                        "crest_conformers.xyz.sorted",
-                    ]
-                    for _name in _fixed:
-                        _p = censo_dir / _name
-                        if _p.exists() and _p.stat().st_size > 0 and _p != local_input:
-                            if not safe_copy(_p, output_xyz):
-                                break
-                            try:
-                                _n = len(read(str(output_xyz), index=":"))
-                            except Exception:
-                                _n = "?"
-                            log.info(
-                                f"[CENSO-RECOVER]  ✓  ensemble recuperado con --reload "
-                                f"→ {output_xyz.name} ({_n} conf(s))"
-                            )
-                            return output_xyz
-                    # No encontró ensemble → recovery falló; continuar al lanzamiento limpio
-                    log.warning(
-                        f"[CENSO-RECOVER]  ⚠  --reload no produjo un ensemble "
-                        f"reconocible (returncode={_proc.returncode}) — "
-                        f"revisa censo_recover.log. Se limpiará la carpeta y CENSO "
-                        f"correrá desde cero."
-                    )
-                except subprocess.TimeoutExpired:
-                    log.error("[CENSO-RECOVER]  ✗  TIMEOUT en --reload")
-                except Exception as _e:
-                    log.error(f"[CENSO-RECOVER]  ✗  error en --reload: {_e}")
-                finally:
-                    _cpu_lock_release()
-
-        # ── Limpieza de subcarpetas CONF* corruptas / no recuperables ───────
-        # Solo se borran las carpetas CONF* individuales; el directorio
-        # censo_dir (y archivos sueltos como censo.log, JSON, input XYZ)
-        # se conservan para diagnóstico.
-        log.warning(
-            f"[CENSO]  🗑  eliminando {len(_diag['conf_dirs'])} subcarpetas "
-            f"CONF* corruptas/incompletas en {censo_dir.name}/ para relanzar "
-            f"CENSO desde cero"
-        )
-        for _cd in _diag["conf_dirs"]:
-            try:
-                shutil.rmtree(_cd)
-                log.debug(f"[CENSO]  rm -rf {_cd.name}")
-            except OSError as _e:
-                log.warning(f"[CENSO]  no se pudo eliminar {_cd.name}: {_e}")
-        log.info("[CENSO]  ✓  limpieza completada — relanzando CENSO limpio")
-
-    # ── Intento de recuperación desde un .out de CENSO existente ────────────
-    # Si CENSO ya corrió manualmente (o en un run previo, p.ej. el --reload
-    # de arriba) y dejó resultados, parsear directamente en vez de relanzar
-    # CENSO. find_censo_result() prefiere 3_REFINEMENT > 2_OPTIMIZATION >
-    # 1_SCREENING y elige las geometrías que corresponden a esa parte.
-    _censo_res = find_censo_result(censo_dir, conformers_xyz)
-    if _censo_res is not None and censo_result_complete(_censo_res[0]):
-        _sc, _conf_ids, _geom_sources = _censo_res
-        log.info(
-            f"[CENSO]  📄  encontrado {_sc.relative_to(censo_dir)} "
-            f"con {len(_conf_ids)} conf(s) — reconstruyendo ensemble "
-            f"filtrado sin relanzar CENSO"
-        )
-        for _geom_src in _geom_sources:
-            if extract_conformers_by_id(_geom_src, _conf_ids, output_xyz, log):
-                log.info(
-                    f"[CENSO]  ✓  ensemble reconstruido desde {_sc.name} "
-                    f"(geometrías: {_geom_src.name}) "
-                    f"→ {output_xyz.name} ({len(_conf_ids)} conf(s))"
-                )
-                return output_xyz
-            log.debug(
-                f"[CENSO]  fuente {_geom_src.name} no contiene los CONF# — "
-                f"probando siguiente fuente de geometrías"
-            )
-        log.warning(
-            f"[CENSO]  ⚠  no se pudo reconstruir desde {_sc.name} "
-            f"— continuando con intento de relanzar CENSO"
-        )
-    # ─────────────────────────────────────────────────────────────────────────
+    # Prescreening interrumpido: se aparta (no se borra) y CENSO corre limpio.
+    _prev = censo_dir / "0_PRESCREENING"
+    if _prev.is_dir():
+        _aside = censo_dir / f"0_PRESCREENING.interrumpida_{time.strftime('%Y%m%d_%H%M%S')}"
+        _prev.rename(_aside)
+        log.warning(f"[CENSO]  ⚠  prescreening incompleto apartado en {_aside.name}")
 
     # CENSO escribe en cwd; copiar el ensemble de entrada ahí y referenciarlo
     # por nombre relativo evita ambigüedad sobre rutas absolutas en -i.
@@ -3235,116 +2715,16 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
         except Exception as _exc:
             logging.getLogger("maaqc").debug(f"diagnóstico del log de CENSO: {_exc!r}")
 
-    # ── Reconstrucción preferente desde el .out con energías (Gtot) ─────────
-    # CENSO escribe las energías reales (Gtot/ΔGtot/Boltzmann weight) en
-    # archivos .out (1_SCREENING.out si corrió screening, o 0_PRESCREENING.out
-    # si solo corrió prescreening). Los .xyz que CENSO deja (censo_ensemble_*.xyz,
-    # 1_SCREENING.xyz, etc.) tienen comentarios "CONF7" SIN energía numérica,
-    # por lo que select_nconf_auto() no puede leerlas si se usan directamente.
-    # Por eso, antes de copiar cualquier .xyz crudo, intentamos reconstruir el
-    # ensemble vía parse_censo_screening_out() + extract_conformers_by_id(),
-    # que sí preserva el orden por Gtot y permite recuperar energías después.
     _censo_res = find_censo_result(censo_dir, conformers_xyz)
     if _censo_res is not None and censo_result_complete(_censo_res[0]):
-        _po, _conf_ids, _geom_sources = _censo_res
-        for _geom_src in _geom_sources:
-            if extract_conformers_by_id(_geom_src, _conf_ids, output_xyz, log):
-                log.info(
-                    f"[CENSO]  ✓  CENSO terminó en {elapsed:.1f} min — "
-                    f"{len(_conf_ids)} confórmero(s) sobreviven, ensemble "
-                    f"reconstruido desde {_po.relative_to(censo_dir)} "
-                    f"(geometrías: {_geom_src.name}, ordenado por Gtot)"
-                )
-                return output_xyz
-    if CENSO_REFINE:
-        # Sin 3_REFINEMENT no hay que caer al screening en silencio: el
-        # protocolo pedido era otro.
-        return _censo_fallback(
-            log, conformers_xyz,
-            f"--censo-refine: CENSO no produjo un 3_REFINEMENT.out utilizable "
-            f"(returncode={returncode})"
-            + (f"; {_censo_log_snippet}" if _censo_log_snippet else ""))
-
-    _post_out_candidates = [
-        censo_dir / "1_SCREENING.out",
-        censo_dir / "CENSO" / "1_SCREENING.out",
-        censo_dir / "prescreening" / "1_SCREENING.out",
-        censo_dir / "0_PRESCREENING.out",
-        censo_dir / "CENSO" / "0_PRESCREENING.out",
-        censo_dir / "prescreening" / "0_PRESCREENING.out",
-    ]
-    for _po in _post_out_candidates:
-        _conf_ids = parse_censo_screening_out(_po)
-        if not _conf_ids:
-            continue
-        _geom_sources = [conformers_xyz]
-        for _xyz_name in ("1_SCREENING.xyz", "0_PRESCREENING.xyz"):
-            for _cand in (_po.parent / _xyz_name, _po.parent.parent / _xyz_name):
-                if _cand.exists() and _cand.stat().st_size > 0:
-                    _geom_sources.append(_cand)
-        for _geom_src in _geom_sources:
-            if extract_conformers_by_id(_geom_src, _conf_ids, output_xyz, log):
-                log.info(
-                    f"[CENSO]  ✓  pre-screening terminó en {elapsed:.1f} min — "
-                    f"{len(_conf_ids)} confórmero(s) sobreviven, ensemble "
-                    f"reconstruido desde {_po.relative_to(censo_dir)} "
-                    f"(geometrías: {_geom_src.name}, ordenado por Gtot)"
-                )
-                return output_xyz
-        log.debug(
-            f"[CENSO]  {_po.name} parseado pero no se pudo reconstruir "
-            f"geometría — probando candidatos .xyz crudos"
-        )
-
-    # ── Búsqueda robusta de output: nombres fijos + glob de respaldo ─────────
-    # CENSO 2/3 puede escribir en censo_dir directamente o en subdirectorios
-    # (CENSO/, prescreening/, etc.) con nombres que varían entre versiones.
-    # NOTA: este fallback se usa solo si no había .out con energías parseables
-    # arriba; estos .xyz traen comentarios "CONF#" sin energía numérica.
-    _fixed_candidates = [
-        "censo_ensemble_sorted.xyz",
-        "censo_ensemble.xyz",
-        "crest_conformers_sorted.xyz",
-        "crest_conformers.xyz.sorted",
-    ]
-    # Candidatos fijos primero (orden de prioridad)
-    _candidate_paths = [censo_dir / c for c in _fixed_candidates]
-    # Luego cualquier .xyz en subdirectorios que no sea el input copiado
-    _candidate_paths += sorted(
-        (p for p in censo_dir.rglob("*.xyz")
-         if p != local_input and p.name != output_xyz.name),
-        key=lambda p: p.stat().st_mtime if p.exists() else 0,
-        reverse=True,  # el más reciente primero
-    )
-
-    for p in _candidate_paths:
-        if not p.exists() or p.stat().st_size == 0:
-            continue
-        if p == local_input:
-            continue  # ignorar el input que copiamos nosotros
-        if not safe_copy(p, output_xyz):
-            log.warning(f"[CENSO] no se pudo normalizar {p.name} → {output_xyz.name} "
-                        f"— usando ensemble CREST sin filtrar")
-            return conformers_xyz
-        try:
-            n = len(read(str(output_xyz), index=":"))
-        except Exception:
-            n = "?"
-        log.info(f"[CENSO]  ✓  pre-screening terminó en {elapsed:.1f} min — "
-                 f"{n} confórmero(s) sobreviven ({p.relative_to(censo_dir)})")
-        return output_xyz
-
-    # Si llegamos aquí, CENSO no produjo ningún ensemble utilizable
-    if not _censo_log_snippet:
-        # No hubo error de config detectado → informar genéricamente
-        log.warning(
-            f"[CENSO]  ✗  no se encontró un ensemble filtrado reconocible "
-            f"(returncode={returncode}) en {censo_dir} — revisa {censo_log_path} "
-            f"a mano."
-        )
+        if _censo_rebuild(_censo_res, output_xyz, log):
+            log.info(f"[CENSO]  ✓  CENSO terminó en {elapsed:.1f} min")
+            return output_xyz
+    # Nada de prescreening suelto ni .xyz crudos: el protocolo pedido es otro.
     return _censo_fallback(
         log, conformers_xyz,
-        f"sin ensemble filtrado reconocible (returncode={returncode})"
+        f"CENSO no produjo un {'3_REFINEMENT' if CENSO_REFINE else '1_SCREENING'}.out "
+        f"utilizable (returncode={returncode}, revisa {censo_log_path})"
         + (f"; {_censo_log_snippet}" if _censo_log_snippet else ""))
 
 
@@ -3352,10 +2732,9 @@ def stage_censo_prescreen(conformers_xyz: Path, mol_dir: Path,
 #  PARSEO DE 1_SCREENING.out DE CENSO
 # ─────────────────────────────────────────────
 
-def censo_cli_parts(include_prescreening: bool = True) -> list[str]:
+def censo_cli_parts() -> list[str]:
     """Flags de partes de CENSO (+ --inprc) según CENSO_REFINE / CENSO_RC."""
-    parts = ["--prescreening"] if include_prescreening else []
-    parts.append("--screening")
+    parts = ["--prescreening", "--screening"]
     if CENSO_REFINE:
         # --ignore-failed es store_true en CENSO y su False pisa el
         # ignore_failed = True del rc: en corridas de días un SCF que no
@@ -3537,13 +2916,9 @@ def extract_conformers_by_id(
 #
 # run_censo_standalone() NO reimplementa nada nuevo: arma el mismo `cmd` y
 # usa exactamente el mismo trío _acquire_cpu_pool() + build_omp_env(...,
-# set_pe_list=False) + _run_censo_locked() que ya usan los dos call-sites
-# reales de CENSO (lanzamiento limpio y --reload, ver stage_censo_prescreen
-# más arriba). A diferencia de stage_censo_prescreen(), a propósito NO
-# hace diagnóstico/recovery de corridas parciales previas — es un modo para
-# invocaciones manuales puntuales sobre un ensemble ya filtrado o crudo, no
-# para el flujo automatizado completo del pipeline (para eso, seguir usando
-# el pipeline normal, que sí hace recovery).
+# set_pe_list=False) + _run_censo_locked() que stage_censo_prescreen(). A
+# diferencia de esa etapa, a propósito NO reutiliza ni reanuda resultados
+# previos: es para invocaciones manuales puntuales.
 def run_censo_standalone(input_xyz: Path, charge: int, out_dir: Path,
                           temperature: float, maxcores: int,
                           log: logging.Logger,
@@ -3551,9 +2926,8 @@ def run_censo_standalone(input_xyz: Path, charge: int, out_dir: Path,
     """
     Corre CENSO (--prescreening --screening) sobre `input_xyz` dentro de
     `out_dir`, con el mismo aislamiento de cores que usa el pipeline
-    completo para CENSO. Devuelve True si CENSO terminó con returncode 0
-    (independientemente de si se pudo localizar un ensemble de salida
-    reconocible — eso solo afecta el nivel del log final).
+    completo para CENSO. Devuelve True si CENSO terminó con returncode 0 y
+    dejó el resultado de la parte pedida.
     """
     owner_pid = _censo_lock_owner(out_dir, log)
     if owner_pid is not None:
@@ -3648,19 +3022,11 @@ def run_censo_standalone(input_xyz: Path, charge: int, out_dir: Path,
             return False
         return True
 
-    for _name in ("censo_ensemble_sorted.xyz", "censo_ensemble.xyz",
-                  "crest_conformers_sorted.xyz", "crest_conformers.xyz.sorted"):
-        _p = out_dir / _name
-        if _p.exists() and _p.stat().st_size > 0:
-            log.info(f"[CENSO-STANDALONE]  ✓  ensemble filtrado → {_p}")
-            return True
-
-    log.warning(
-        f"[CENSO-STANDALONE]  ⚠  CENSO terminó (returncode=0) pero no se "
-        f"encontró un ensemble de salida reconocible en {out_dir} — revisa "
-        f"censo.log / 1_SCREENING.out a mano."
+    log.error(
+        f"[CENSO-STANDALONE]  ✗  CENSO terminó (returncode=0) pero no dejó un "
+        f"N_PARTE.out parseable en {out_dir} — revisa censo.log"
     )
-    return True
+    return False
 
 
 def _apply_censo_args(args) -> None:
@@ -3856,7 +3222,7 @@ def compute_boltzmann_from_energies(
 
     e_min = min(energies.values())
     boltz_factors = {
-        cid: math.exp(-((e - e_min) * HARTREE_TO_KCAL) / (R_GAS_KCAL * temperature))
+        cid: math.exp(-((e - e_min) * HARTREE_TO_KCAL) / (R_KCAL * temperature))
         for cid, e in energies.items()
     }
     total = sum(boltz_factors.values())
@@ -4468,10 +3834,10 @@ def _numfreq_worker(task: dict) -> dict:
         return {**fail, "elapsed": elapsed}
 
     if check_no_imaginary(out_file):
-        log.info(f"[NUMFREQ] {conf_id}: sin frecuencias imaginarias ✓")
+        log.info(f"[NUMFREQ] {conf_id}: sin frecuencias imaginarias > {IMAG_TOL_CM1:g} cm⁻¹ ✓")
     else:
-        log.warning(f"[NUMFREQ] {conf_id}: frecuencias imaginarias detectadas "
-                    f"— incluido de todos modos (revisar manualmente)")
+        log.warning(f"[NUMFREQ] {conf_id}: frecuencias imaginarias > {IMAG_TOL_CM1:g} cm⁻¹ "
+                    f"detectadas — incluido de todos modos (revisar manualmente)")
         update_manifest(freq_dir, imaginary_freqs=True)
     return {"conf_id": conf_id, "freq_dir": freq_dir, "success": True, "elapsed": elapsed}
 
@@ -4601,7 +3967,7 @@ def stage_sp_gas(sp_dirs: list[Path], mol_dir: Path, log: logging.Logger,
         for d in sp_dirs
     ]
 
-    successful = _run_batched(tasks_all, _sp_gas_worker, _batch, _nprocs,
+    successful = _run_batched(tasks_all, functools.partial(_sp_solv_worker, kind="gas"), _batch, _nprocs,
                               log, "SP_GAS", result_key="sp_gas_dir")
 
     log.info(f"[SP_GAS] {len(successful)}/{len(sp_dirs)} completados")
@@ -4868,7 +4234,7 @@ def _run_spsmd_execution(
              f"≤{_batch} (CPUs activos/lote: {_batch * _nprocs_first})")
 
     successful = _run_batched(
-        tasks_all, _sp_smd_worker, _batch, _nprocs_first, log, "SP_SMD",
+        tasks_all, functools.partial(_sp_solv_worker, kind="smd"), _batch, _nprocs_first, log, "SP_SMD",
         result_key="sp_smd_dir",
         label=lambda t: f"{t['mol_dir'].name}/{t['conf_id']}",
     )
@@ -5674,16 +5040,20 @@ def _sp_worker(task: dict) -> dict:
     }
 
 
-def _sp_gas_worker(task: dict) -> dict:
+def _sp_solv_worker(task: dict, kind: str) -> dict:
     """
-    Worker para un único SP fase-gas (sin CPCM), diseñado para ejecutarse
-    en un hilo de ThreadPoolExecutor. Mismo patrón que _sp_worker, pero:
+    Worker para un único SP fase-gas (kind="gas", sin solvente) o con
+    SMD(water) (kind="smd", en vez del CPCM(water) del SP original),
+    diseñado para ejecutarse en un hilo de ThreadPoolExecutor. Mismo patrón
+    que _sp_worker, pero:
       - parte de un 04_sp/<conf_id>/ ya exitoso (sp_dir), no de un freq_dir.
       - charge/mult se leen de sp_dir/"sp.inp" (no de task["charge"]), para
         garantizar que coincide exactamente con el SP CPCM que le dio origen.
       - la geometría se copia desde sp_dir/"opt_opt.xyz" (la misma que usó
         el SP CPCM), no desde 02_opt/ ni 03_numfreq/ directamente — así el
-        SP_GAS queda 100% trazable al mismo SP.
+        SP_GAS/SP_SMD queda 100% trazable al mismo SP.
+
+    Escribe en 04b_sp_gas/ o 04c_sp_smd/ según kind, con sp_{kind}.inp/.out.
 
     task debe contener:
         conf_id, sp_dir, template, nprocs, maxcore, mol_dir, log
@@ -5691,7 +5061,7 @@ def _sp_gas_worker(task: dict) -> dict:
         cpu_list: list[int] de CPUs lógicas exclusivas para este worker.
 
     Devuelve:
-        dict con conf_id, sp_gas_dir (Path o None), success, elapsed (min)
+        dict con conf_id, sp_{kind}_dir (Path o None), success, elapsed (min)
     """
     conf_id  : str            = task["conf_id"]
     sp_dir   : Path           = task["sp_dir"]
@@ -5702,29 +5072,33 @@ def _sp_gas_worker(task: dict) -> dict:
     log      : logging.Logger = task["log"]
     cpu_list : Optional[list[int]] = task.get("cpu_list")
 
+    tag = f"SP_{kind.upper()}"
+    key = f"sp_{kind}_dir"
+    fail = {"conf_id": conf_id, key: None, "success": False, "elapsed": 0.0}
+
     sp_inp = sp_dir / "sp.inp"
     charge_mult = _parse_charge_mult_from_sp_inp(sp_inp)
     if charge_mult is None:
-        log.warning(f"[SP_GAS] {conf_id}: no se pudo leer charge/mult de "
+        log.warning(f"[{tag}] {conf_id}: no se pudo leer charge/mult de "
                     f"{sp_inp} — saltando")
-        return {"conf_id": conf_id, "sp_gas_dir": None, "success": False, "elapsed": 0.0}
+        return fail
     charge, mult = charge_mult
 
     opt_xyz = sp_dir / "opt_opt.xyz"
     if not opt_xyz.exists():
-        log.warning(f"[SP_GAS] {conf_id}: no se encontró {opt_xyz} — saltando")
-        return {"conf_id": conf_id, "sp_gas_dir": None, "success": False, "elapsed": 0.0}
+        log.warning(f"[{tag}] {conf_id}: no se encontró {opt_xyz} — saltando")
+        return fail
 
-    sp_gas_dir = mol_dir / "04b_sp_gas" / conf_id
-    out_file = sp_gas_dir / "sp_gas.out"
+    out_dir  = mol_dir / {"gas": SUBDIR_SP_GAS, "smd": SUBDIR_SP_SMD}[kind] / conf_id
+    out_file = out_dir / f"sp_{kind}.out"
     inp_text = template.format(
         CHARGE=charge, MULT=mult,
         NPROCS=nprocs, MAXCORE=maxcore,
     )
-    inp_file = prepare_orca_job(sp_gas_dir, "sp_gas.inp", inp_text, log, "SP_GAS",
+    inp_file = prepare_orca_job(out_dir, f"sp_{kind}.inp", inp_text, log, tag,
                                 xyz_src=opt_xyz)
     if inp_file is None:
-        return {"conf_id": conf_id, "sp_gas_dir": None, "success": False, "elapsed": 0.0}
+        return fail
 
     t0         = time.time()
     worker_env = build_omp_env(nprocs, cpu_list=cpu_list)
@@ -5733,74 +5107,7 @@ def _sp_gas_worker(task: dict) -> dict:
 
     return {
         "conf_id":    conf_id,
-        "sp_gas_dir": sp_gas_dir if success else None,
-        "success":    success,
-        "elapsed":    elapsed,
-    }
-
-
-def _sp_smd_worker(task: dict) -> dict:
-    """
-    Worker para un único SP con SMD(water), diseñado para ejecutarse en un
-    hilo de ThreadPoolExecutor. Idéntico patrón que _sp_gas_worker, pero:
-      - en vez de fase-gas (sin bloque de solvente), usa SMD(water) en lugar
-        del CPCM(water) del SP original.
-      - parte de un 04_sp/<conf_id>/ ya exitoso (sp_dir), no de un freq_dir.
-      - charge/mult se leen de sp_dir/"sp.inp" (no de task["charge"]), para
-        garantizar que coincide exactamente con el SP CPCM que le dio origen.
-      - la geometría se copia desde sp_dir/"opt_opt.xyz" (la misma que usó
-        el SP CPCM), no desde 02_opt/ ni 03_numfreq/ directamente — así el
-        SP_SMD queda 100% trazable al mismo SP.
-
-    task debe contener:
-        conf_id, sp_dir, template, nprocs, maxcore, mol_dir, log
-    Opcional:
-        cpu_list: list[int] de CPUs lógicas exclusivas para este worker.
-
-    Devuelve:
-        dict con conf_id, sp_smd_dir (Path o None), success, elapsed (min)
-    """
-    conf_id  : str            = task["conf_id"]
-    sp_dir   : Path           = task["sp_dir"]
-    template : str            = task["template"]
-    nprocs   : int            = task["nprocs"]
-    maxcore  : int            = task["maxcore"]
-    mol_dir  : Path           = task["mol_dir"]
-    log      : logging.Logger = task["log"]
-    cpu_list : Optional[list[int]] = task.get("cpu_list")
-
-    sp_inp = sp_dir / "sp.inp"
-    charge_mult = _parse_charge_mult_from_sp_inp(sp_inp)
-    if charge_mult is None:
-        log.warning(f"[SP_SMD] {conf_id}: no se pudo leer charge/mult de "
-                    f"{sp_inp} — saltando")
-        return {"conf_id": conf_id, "sp_smd_dir": None, "success": False, "elapsed": 0.0}
-    charge, mult = charge_mult
-
-    opt_xyz = sp_dir / "opt_opt.xyz"
-    if not opt_xyz.exists():
-        log.warning(f"[SP_SMD] {conf_id}: no se encontró {opt_xyz} — saltando")
-        return {"conf_id": conf_id, "sp_smd_dir": None, "success": False, "elapsed": 0.0}
-
-    sp_smd_dir = mol_dir / "04c_sp_smd" / conf_id
-    out_file = sp_smd_dir / "sp_smd.out"
-    inp_text = template.format(
-        CHARGE=charge, MULT=mult,
-        NPROCS=nprocs, MAXCORE=maxcore,
-    )
-    inp_file = prepare_orca_job(sp_smd_dir, "sp_smd.inp", inp_text, log, "SP_SMD",
-                                xyz_src=opt_xyz)
-    if inp_file is None:
-        return {"conf_id": conf_id, "sp_smd_dir": None, "success": False, "elapsed": 0.0}
-
-    t0         = time.time()
-    worker_env = build_omp_env(nprocs, cpu_list=cpu_list)
-    success    = run_orca(inp_file, out_file, log, env=worker_env, cpu_list=cpu_list)
-    elapsed    = (time.time() - t0) / 60
-
-    return {
-        "conf_id":    conf_id,
-        "sp_smd_dir": sp_smd_dir if success else None,
+        key:          out_dir if success else None,
         "success":    success,
         "elapsed":    elapsed,
     }
@@ -5885,12 +5192,6 @@ def _cpu_lock_busy_cpus() -> set[int]:
     my_pid = str(os.getpid())
     with _cpu_lock_txn() as data:
         return {c for pid, cpus in data.items() if pid != my_pid for c in cpus}
-
-
-def _cpu_lock_reserve(cpus: list[int]) -> None:
-    """Registra los CPUs que el proceso actual (PID) usará en este lote."""
-    with _cpu_lock_txn() as data:
-        data[str(os.getpid())] = sorted(set(cpus))
 
 
 def _cpu_lock_release() -> None:
@@ -6162,57 +5463,6 @@ def assign_cpu_pool(n_cores: int, exclude: Optional[set[int]] = None) -> list[in
     return [c for c in pool if c < total_logical][:n_cores]
 
 
-def partition_cpu_pool_into_slots(pool: list[int], n_slots: int) -> list[list[int]]:
-    """
-    Particiona un pool ya calculado (ej. por assign_cpu_pool()) en
-    `n_slots` grupos contiguos de PUs, cada uno destinado a un sub-job
-    paralelo de CENSO (ver MAAQC_CENSO_SLOTS junto a build_omp_env()).
-
-    Contexto (julio 2026): CENSO congela su entorno una sola vez
-    (ENVIRON en params.py) y no expone ningún mecanismo nativo para que
-    sub-jobs paralelos (2+ SP simultáneos, cada uno con su propio
-    mpirun) reciban listas de cores distintas — confirmado leyendo
-    censo/parallel.py (LocalCluster con n_workers=1, un solo pool de
-    hilos) y processing/orca_processor.py (_sp()/opt() llaman a
-    _make_call() sin env= explícito, cayendo siempre a ENVIRON global).
-    Un parche local en orca_processor.py (fuera de este repo, ver
-    censo_patch/README.md) intercepta esas llamadas y lee
-    MAAQC_CENSO_SLOTS para asignar cada conformero a un slot de forma
-    determinística (hash estable de job.conf.name módulo n_slots).
-
-    Esta función solo arma la partición del lado de pipeline.py — no
-    reparte P_CORE_BLOCKS/E_CORE_SINGLES con ninguna lógica especial de
-    prioridad (a diferencia de assign_cpu_lists()/assign_cpu_pool()):
-    simplemente corta `pool` (ya ordenado por assign_cpu_pool() con
-    P-cores primero) en `n_slots` trozos de tamaño lo más parejo
-    posible, preservando el orden. Si `pool` no es divisible
-    exactamente, los primeros slots reciben una PU extra antes que los
-    últimos (ej. pool de 10 PUs en 3 slots → tamaños [4, 3, 3], no
-    [3, 3, 4]) — irrelevante en la práctica porque el caso de uso real
-    es n_slots=2 con pool par (8 PUs → [4, 4]).
-
-    Devuelve una lista de `n_slots` listas de PUs. Si `pool` tiene menos
-    elementos que `n_slots`, algunos slots devueltos pueden quedar
-    vacíos (lista vacía) — el caller debe decidir si eso es aceptable
-    (build_omp_env() con censo_slot_groups conteniendo un grupo vacío
-    simplemente no fija MAAQC_PE_LIST para ese slot en el parche de
-    CENSO, ver fail-open en _maaqc_build_slot_env()).
-    """
-    if n_slots <= 0:
-        return []
-    if not pool:
-        return [[] for _ in range(n_slots)]
-
-    base_size, remainder = divmod(len(pool), n_slots)
-    slots: list[list[int]] = []
-    idx = 0
-    for i in range(n_slots):
-        size = base_size + (1 if i < remainder else 0)
-        slots.append(pool[idx: idx + size])
-        idx += size
-    return slots
-
-
 def _check_cpu_budget(batch_size: int, nprocs_per_job: int, log: logging.Logger) -> None:
     """Advierte (no bloquea) si el lote pide más cores de los físicamente disponibles."""
     requested = batch_size * nprocs_per_job
@@ -6309,7 +5559,7 @@ def _setup_run_resources(args):
     """
     global NPROCS_CREST, NPROCS, MAXCORE, NPROCS_NUMFREQ, MAXCORE_NUMFREQ, \
            NPROCS_TDDFT, MAXCORE_TDDFT, NPROCS_ADC2, MAXCORE_ADC2, \
-           OPT_BATCH_SIZE, SP_BATCH_SIZE, TDDFT_BATCH_SIZE, OMP_ENV, \
+           OPT_BATCH_SIZE, SP_BATCH_SIZE, TDDFT_BATCH_SIZE, \
            NUMFREQ_BATCH_SIZE, ALLOW_NO_CENSO
 
     ALLOW_NO_CENSO = bool(getattr(args, "allow_no_censo", False))
@@ -6430,7 +5680,6 @@ def _setup_run_resources(args):
         len(usable_pus()) // max(nprocs_numfreq, 1),
         _ram_usable // max(nprocs_numfreq * maxcore_nf, 1),
     ))
-    OMP_ENV          = build_omp_env(NPROCS)
 
     resources = dict(
         nprocs_crest=nprocs_crest, nprocs=nprocs, maxcore=maxcore,
@@ -7436,8 +6685,6 @@ PROJECT_ROOT    = Path("~/PAPER1")
 # y cada "state" (antes llamado mol_name en todo el código) es un
 # subdirectorio de WORK_ROOT: WORK_ROOT / <state> / 04_sp / conf_xxx / ...
 RC_WORK_ROOT       = Path("runs")
-HARTREE_TO_EV   = 27.211396132
-KB_KCAL         = 0.0019872041     # kcal/(mol·K)
 
 # Temperaturas de análisis:
 #   250.0 K  — mínimo oceánico Antártico WAP (invierno)
@@ -7484,29 +6731,6 @@ MULTIWFN_NTHREADS = 8
 # ─────────────────────────────────────────────
 #  PARSERS — individuales y robustos
 # ─────────────────────────────────────────────
-
-def rc_parse_sp_energy(out_file: Path) -> Optional[float]:
-    """Extrae la última energía FINAL SINGLE POINT ENERGY del .out de SP."""
-    if not out_file.exists():
-        return None
-    energy = None
-    for line in out_file.read_text(errors="replace").splitlines():
-        if "FINAL SINGLE POINT ENERGY" in line:
-            try:
-                energy = float(line.split()[-1])
-            except ValueError:
-                pass
-    return energy
-
-
-def parse_opt_energy(out_file: Path) -> Optional[float]:
-    """
-    Extrae la energía del último ciclo de optimización (paso final convergido).
-    ORCA reporta 'FINAL SINGLE POINT ENERGY' también durante Opt, así que
-    tomamos la última ocurrencia, que corresponde al mínimo convergido.
-    """
-    return rc_parse_sp_energy(out_file)
-
 
 def parse_imaginary_freqs(freq_out: Path) -> list[float]:
     """Devuelve lista de frecuencias imaginarias (cm⁻¹, valores negativos)."""
@@ -7860,15 +7084,6 @@ def rc_parse_thermochem(freq_out: Path, T: float = T_STD) -> dict:
     }
 
 
-def parse_gas_phase_sp(sp_gas_out: Path) -> Optional[float]:
-    """
-    Extrae la energía de un SP en fase gas (sin CPCM).
-    Usado en el ciclo de pKa para calcular ΔG_solv de cada especie.
-    Retorna la última 'FINAL SINGLE POINT ENERGY' en Hartree, o None.
-    """
-    return rc_parse_sp_energy(sp_gas_out)
-
-
 # ─────────────────────────────────────────────
 #  ANÁLISIS CREST → DFT
 # ─────────────────────────────────────────────
@@ -8171,7 +7386,7 @@ def compute_boltzmann_multiT(df_conf: pd.DataFrame) -> pd.DataFrame:
 
         for T, label in zip(TEMPS_K, TEMP_LABELS):
             col = f"boltz_{label}"
-            raw = np.exp(-df.loc[valid, "dE_kcal"] / (KB_KCAL * T))
+            raw = np.exp(-df.loc[valid, "dE_kcal"] / (R_KCAL * T))
             df.loc[valid, col] = raw / raw.sum()
     else:
         df.attrs["boltzmann_mode"] = "gibbs_composite"
@@ -8186,7 +7401,7 @@ def compute_boltzmann_multiT(df_conf: pd.DataFrame) -> pd.DataFrame:
                 continue
 
             dG = df.loc[valid, col_dg]
-            raw = np.exp(-dG / (KB_KCAL * T))
+            raw = np.exp(-dG / (R_KCAL * T))
             df.loc[valid, col_b] = raw / raw.sum()
 
     # ── Métricas del ensemble ─────────────────────────────────────────────
@@ -8298,312 +7513,6 @@ def print_boltzmann_analysis(df: pd.DataFrame):
 
 
 # ─────────────────────────────────────────────
-#  CICLO TERMODINÁMICO DE pKa
-# ─────────────────────────────────────────────
-
-def rc_compute_pka(
-    mol_acid: str,
-    mol_base: str,
-    T: float = T_STD,
-) -> dict:
-    """
-    Calcula el pKa teórico de la reacción AH(aq) → A⁻(aq) + H⁺(aq) usando
-    el ciclo termodinámico de Born (ciclo termoquímico de dos-ramas).
-
-    ════════════════════════════════════════════════════════════════════════
-    CICLO DE BORN (esquema de dos niveles)
-    ════════════════════════════════════════════════════════════════════════
-
-      AH(gas) ──────────────────────────────────────► A⁻(gas) + H⁺(gas)
-         │                  ΔG_gas                          │
-     ΔG_solv(AH)                              ΔG_solv(A⁻) + ΔG_solv(H⁺)
-         │                                                  │
-         ▼                                                  ▼
-      AH(aq)  ──────────────────────────────────────► A⁻(aq) + H⁺(aq)
-                              ΔG_aq
-
-    ΔG_gas   = G_total(A⁻, gas) + G(H⁺, gas) - G_total(AH, gas)
-    ΔG_solv  = E_SP(CPCM) - E_SP(gas)   para cada especie
-    ΔG_aq    = ΔG_gas + ΔΔG_solv
-    pKa      = ΔG_aq / (RT · ln10)
-
-    ════════════════════════════════════════════════════════════════════════
-    NIVEL DE TEORÍA
-    ════════════════════════════════════════════════════════════════════════
-
-    G_total en fase gas se aproxima como:
-        G_gas(X) = E_SP_gas(X) + G_corr(X)
-    donde G_corr viene del NumFreq (que usa CPCM). Esta es la aproximación
-    de Ho & Coote (Theor. Chem. Acc. 2010): la corrección térmica es casi
-    independiente del solvente para moléculas rígidas.
-
-    ΔG_solv(X) = E_SP_aq(X, CPCM) - E_SP_gas(X)
-    usando el mismo funcional/base en ambos (ωB97X-D3/def2-TZVPD).
-
-    ════════════════════════════════════════════════════════════════════════
-    CONSTANTES DE REFERENCIA (todas a 298.15 K)
-    ════════════════════════════════════════════════════════════════════════
-
-    G(H⁺, gas)    = -6.28 kcal/mol    [Tissandier et al. 1998]
-    ΔG_solv(H⁺)   = -265.9 kcal/mol   [Kelly, Cramer & Truhlar 2006]
-    δG_conc       = +1.894 kcal/mol    [corrección 1 atm → 1 M, RT·ln(24.5)]
-
-    ════════════════════════════════════════════════════════════════════════
-    PARÁMETROS
-    ════════════════════════════════════════════════════════════════════════
-
-    mol_acid : nombre del directorio en runs/ para AH (forma protonada)
-    mol_base : nombre del directorio en runs/ para A⁻ (forma desprotonada)
-    T        : temperatura de cálculo (default 298.15 K)
-
-    ════════════════════════════════════════════════════════════════════════
-    ARCHIVOS REQUERIDOS
-    ════════════════════════════════════════════════════════════════════════
-
-    Para cada mol (acid y base):
-      · runs/<mol>/04_sp/<best_conf>/sp.out          — SP acuoso (CPCM)
-      · runs/<mol>/06_sp_gas/<best_conf>/sp_gas.out  — SP fase gas (sin CPCM)
-      · runs/<mol>/03_numfreq/<best_conf>/freq.out   — correcciones térmicas
-
-    El confórmero representativo es el de menor G_total a 298 K.
-    Si no existe 06_sp_gas, el ciclo de pKa no puede calcularse.
-
-    ════════════════════════════════════════════════════════════════════════
-    RETORNA
-    ════════════════════════════════════════════════════════════════════════
-
-    dict con:
-        pKa              : valor teórico (float o None si falta algún dato)
-        dG_aq_kcal       : ΔG_aq en kcal/mol
-        dG_gas_kcal      : ΔG_gas en kcal/mol
-        dG_solv_acid     : ΔG_solv(AH) en kcal/mol
-        dG_solv_base     : ΔG_solv(A⁻) en kcal/mol
-        dG_solv_hplus    : ΔG_solv(H⁺) constante de literatura
-        G_total_acid_gas : G_total(AH) en fase gas (Hartree)
-        G_total_base_gas : G_total(A⁻) en fase gas (Hartree)
-        conf_acid        : confórmero representativo de AH
-        conf_base        : confórmero representativo de A⁻
-        T                : temperatura usada (K)
-        ok               : True si el pKa se calculó correctamente
-        warnings         : lista de advertencias
-    """
-    result: dict = {
-        "pKa":              None,
-        "dG_aq_kcal":       None,
-        "dG_gas_kcal":      None,
-        "dG_solv_acid":     None,
-        "dG_solv_base":     None,
-        "dG_solv_hplus":    DG_SOLV_HPLUS,
-        "G_total_acid_gas": None,
-        "G_total_base_gas": None,
-        "conf_acid":        None,
-        "conf_base":        None,
-        "T":                T,
-        "ok":               False,
-        "warnings":         [],
-    }
-
-    def _warn(msg: str):
-        result["warnings"].append(msg)
-        warnings.warn(f"[pKa] {msg}")
-
-    # ── Cargar resultados de ambas formas ─────────────────────────────────
-    try:
-        df_acid, _ = collect_results(mol_acid)
-        df_base, _ = collect_results(mol_base)
-    except Exception as e:
-        _warn(f"Error al cargar resultados: {e}")
-        return result
-
-    if df_acid.empty or df_base.empty:
-        _warn("DataFrames vacíos para ácido o base.")
-        return result
-
-    # ── Confórmero representativo: mínimo G_total a 298.15 K ─────────────
-    lbl_298 = "298K"
-    col_g298 = f"G_total_{lbl_298}"
-
-    def _best_conf(df: pd.DataFrame, mol: str) -> Optional[str]:
-        if col_g298 in df.columns and df["thermo_ok"].any():
-            valid = df["thermo_ok"] & df[col_g298].notna()
-            if valid.any():
-                return df.loc[df.loc[valid, col_g298].idxmin(), "conformer"]
-        # Fallback: mínima E_SP
-        if "E_hartree" in df.columns and df["E_hartree"].notna().any():
-            _warn(f"[{mol}] Usando E_SP (sin G_corr) para seleccionar confórmero.")
-            return df.loc[df["E_hartree"].idxmin(), "conformer"]
-        return None
-
-    conf_acid = _best_conf(df_acid, mol_acid)
-    conf_base = _best_conf(df_base, mol_base)
-    result["conf_acid"] = conf_acid
-    result["conf_base"] = conf_base
-
-    if conf_acid is None or conf_base is None:
-        _warn("No se pudo determinar el confórmero representativo.")
-        return result
-
-    # ── Energías SP acuosas (CPCM) ───────────────────────────────────────
-    acid_sp_aq_file = RC_WORK_ROOT / mol_acid / "04_sp" / conf_acid / "sp.out"
-    base_sp_aq_file = RC_WORK_ROOT / mol_base / "04_sp" / conf_base / "sp.out"
-
-    E_acid_aq = rc_parse_sp_energy(acid_sp_aq_file)
-    E_base_aq = rc_parse_sp_energy(base_sp_aq_file)
-
-    if E_acid_aq is None:
-        _warn(f"No se encontró SP acuoso de AH en {acid_sp_aq_file}")
-    if E_base_aq is None:
-        _warn(f"No se encontró SP acuoso de A⁻ en {base_sp_aq_file}")
-
-    # ── Energías SP en fase gas ───────────────────────────────────────────
-    acid_sp_gas_file = (RC_WORK_ROOT / mol_acid / PKA_GAS_SP_SUBDIR
-                        / conf_acid / "sp_gas.out")
-    base_sp_gas_file = (RC_WORK_ROOT / mol_base / PKA_GAS_SP_SUBDIR
-                        / conf_base / "sp_gas.out")
-
-    E_acid_gas = parse_gas_phase_sp(acid_sp_gas_file)
-    E_base_gas = parse_gas_phase_sp(base_sp_gas_file)
-
-    if E_acid_gas is None:
-        _warn(
-            f"SP en fase gas de AH no encontrado en {acid_sp_gas_file}. "
-            f"Corre: orca sp_gas.inp > sp_gas.out (sin CPCM, mismo funcional/base)."
-        )
-    if E_base_gas is None:
-        _warn(
-            f"SP en fase gas de A⁻ no encontrado en {base_sp_gas_file}. "
-            f"Corre: orca sp_gas.inp > sp_gas.out (sin CPCM, mismo funcional/base)."
-        )
-
-    if E_acid_gas is None or E_base_gas is None:
-        return result  # no hay suficiente para continuar
-
-    # ── Correcciones térmicas (G_corr) ────────────────────────────────────
-    acid_freq_file = RC_WORK_ROOT / mol_acid / "03_numfreq" / conf_acid / "freq.out"
-    base_freq_file = RC_WORK_ROOT / mol_base / "03_numfreq" / conf_base / "freq.out"
-
-    # Misma fuente que compute_pka() (`maaqc.py pka`): GoodVibes evaluado a
-    # T. Antes era el bloque THERMOCHEMISTRY de ORCA (fijo a 298 K y con
-    # su propio quasi-RRHO), así que `collect` y `pka` daban pKa distintos
-    # para los mismos datos.
-    tc_acid = get_thermochem(acid_freq_file, T=T, source=RC_GCORR_SOURCE,
-                             gv_cutoff=GV_CUTOFF, gv_qs=GV_QS, gv_qh=GV_QH)
-    tc_base = get_thermochem(base_freq_file, T=T, source=RC_GCORR_SOURCE,
-                             gv_cutoff=GV_CUTOFF, gv_qs=GV_QS, gv_qh=GV_QH)
-
-    G_corr_acid: Optional[float] = None
-    G_corr_base: Optional[float] = None
-
-    if tc_acid.get("ok"):
-        G_corr_acid = tc_acid["G_corr"]
-    else:
-        _warn(
-            f"Correcciones térmicas de AH no disponibles o incompletas "
-            f"({acid_freq_file}). Se usará G_gas ≈ E_gas (sin ZPE ni entropía). "
-            f"El pKa resultante tendrá mayor incertidumbre."
-        )
-
-    if tc_base.get("ok"):
-        G_corr_base = tc_base["G_corr"]
-    else:
-        _warn(
-            f"Correcciones térmicas de A⁻ no disponibles o incompletas "
-            f"({base_freq_file}). Se usará G_gas ≈ E_gas."
-        )
-
-    # ── G_total en fase gas para cada especie ─────────────────────────────
-    #   G_gas = E_SP_gas + G_corr(RRHO, de NumFreq con CPCM)
-    #   La aproximación Ho & Coote justifica usar G_corr del cálculo CPCM
-    #   incluso para la fase gas (la corrección térmica es casi la misma).
-    G_acid_gas = E_acid_gas + (G_corr_acid if G_corr_acid is not None else 0.0)
-    G_base_gas = E_base_gas + (G_corr_base if G_corr_base is not None else 0.0)
-
-    result["G_total_acid_gas"] = G_acid_gas
-    result["G_total_base_gas"] = G_base_gas
-
-    # ── ΔG_gas (en kcal/mol) ─────────────────────────────────────────────
-    #   ΔG_gas = G(A⁻, gas) + G(H⁺, gas) - G(AH, gas)
-    dG_gas_hartree = G_base_gas - G_acid_gas   # en Hartree (H⁺ se suma aparte)
-    dG_conc        = dg_conc_corr(T)
-    dG_gas_kcal    = dG_gas_hartree * HARTREE_TO_KCAL + g_hplus_gas(T)
-    result["dG_gas_kcal"] = dG_gas_kcal
-
-    # ── ΔG_solv para cada especie ─────────────────────────────────────────
-    #   ΔG_solv(X) = E_SP_aq(X, CPCM) - E_SP_gas(X)
-    #   En kcal/mol. Incluye corrección de concentración estándar δG_conc.
-    if E_acid_aq is not None:
-        dG_solv_acid = (E_acid_aq - E_acid_gas) * HARTREE_TO_KCAL + dG_conc
-        result["dG_solv_acid"] = dG_solv_acid
-    else:
-        _warn("No se puede calcular ΔG_solv(AH) sin E_SP acuoso.")
-        return result
-
-    if E_base_aq is not None:
-        dG_solv_base = (E_base_aq - E_base_gas) * HARTREE_TO_KCAL + dG_conc
-        result["dG_solv_base"] = dG_solv_base
-    else:
-        _warn("No se puede calcular ΔG_solv(A⁻) sin E_SP acuoso.")
-        return result
-
-    # ── ΔG_aq (ciclo de Born completo) ───────────────────────────────────
-    #   ΔG_aq = ΔG_gas + ΔG_solv(A⁻) + ΔG_solv(H⁺) + δG_conc(H⁺) - ΔG_solv(AH)
-    #   (+ DG_CONC_CORR una vez: Δn = +1, H⁺ gas 1 atm → 1 M; el δG_conc de
-    #   A⁻ y AH ya está en dG_solv_* y se cancela entre ellos.)
-    dG_aq_kcal = (
-        dG_gas_kcal
-        + dG_solv_base
-        + DG_SOLV_HPLUS
-        + dG_conc
-        - dG_solv_acid
-    )
-    result["dG_aq_kcal"] = dG_aq_kcal
-
-    # ── pKa ──────────────────────────────────────────────────────────────
-    pKa = dG_aq_kcal / (R_KCAL * T * LN10)
-    result["pKa"]  = pKa
-    result["ok"]   = True
-
-    return result
-
-
-def print_pka_analysis(pka_result: dict, mol_acid: str, mol_base: str):
-    """Imprime el análisis completo del ciclo termodinámico de pKa."""
-    sep = "─" * 74
-    print(f"\n{sep}")
-    print("  ANÁLISIS DE pKa TEÓRICO")
-    print(f"  AH = {mol_acid}   │   A⁻ = {mol_base}")
-    print(f"  T  = {pka_result['T']:.2f} K")
-    print(sep)
-
-    if not pka_result["ok"]:
-        print("\n  ✗  El ciclo de pKa no pudo completarse.")
-        for w in pka_result["warnings"]:
-            print(f"     ⚠  {w}")
-        return
-
-    print(f"\n  Confórmero representativo AH : {pka_result['conf_acid']}")
-    print(f"  Confórmero representativo A⁻ : {pka_result['conf_base']}")
-
-    print("\n  ── Contribuciones al ciclo de Born ──")
-    print(f"  {'ΔG_gas':>30} = {pka_result['dG_gas_kcal']:+10.3f} kcal/mol")
-    print(f"  {'ΔG_solv(AH)':>30} = {pka_result['dG_solv_acid']:+10.3f} kcal/mol")
-    print(f"  {'ΔG_solv(A⁻)':>30} = {pka_result['dG_solv_base']:+10.3f} kcal/mol")
-    print(f"  {'ΔG_solv(H⁺) [Kelly 2006]':>30} = {pka_result['dG_solv_hplus']:+10.3f} kcal/mol")
-    print(f"  {'─'*48}")
-    print(f"  {'ΔG_aq':>30} = {pka_result['dG_aq_kcal']:+10.3f} kcal/mol")
-    print(f"\n  pKa (teórico, {pka_result['T']:.2f} K) = {pka_result['pKa']:.2f}")
-    print("\n  Nota: incertidumbre típica ±1–2 unidades de pKa para ciclos")
-    print("  Born/CPCM a nivel ωB97X-D3/def2-TZVPD (Ho & Coote 2010).")
-
-    if pka_result["warnings"]:
-        print("\n  Advertencias:")
-        for w in pka_result["warnings"]:
-            print(f"    ⚠  {w}")
-
-    print(f"\n{sep}\n")
-
-
-# ─────────────────────────────────────────────
 #  COLECTOR PRINCIPAL
 # ─────────────────────────────────────────────
 
@@ -8693,11 +7602,11 @@ def collect_results(mol_name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     for sp_dir in sp_dirs:
         conf_id  = sp_dir.name
         sp_out   = sp_dir / "sp.out"
-        e_sp     = rc_parse_sp_energy(sp_out)
+        e_sp     = extract_sp_energy(sp_out)
 
         # Energía DFT post-opt (de la optimización, no del SP)
         opt_out  = _stage_file("02_opt", conf_id, "opt.out")
-        e_opt    = parse_opt_energy(opt_out)
+        e_opt    = extract_sp_energy(opt_out)
 
         # Frecuencias imaginarias
         freq_out   = _stage_file("03_numfreq", conf_id, "freq.out")
@@ -8708,8 +7617,8 @@ def collect_results(mol_name: str) -> tuple[pd.DataFrame, pd.DataFrame]:
             "E_hartree":      e_sp,       # SP de alta precisión (def2-TZVPD)
             "E_opt_hartree":  e_opt,      # energía al final de la Opt (def2-SVP)
             "opt_converged":  check_opt_converged(opt_out),
-            "has_imaginary":  len(imag_freqs) > 0,
-            "n_imaginary":    len(imag_freqs),
+            "has_imaginary":  any(f < -IMAG_TOL_CM1 for f in imag_freqs),
+            "n_imaginary":    sum(f < -IMAG_TOL_CM1 for f in imag_freqs),
             "imag_freqs_cm1": str(imag_freqs) if imag_freqs else "—",
         })
 
@@ -9154,546 +8063,34 @@ def plot_comparison(dfs_conf: dict, dfs_tddft: dict,
 #    Δboltz(i,T)  = boltz_GV(i,T) - boltz_ORCA(i,T)    — impacto en Boltzmann
 #
 #  Flujo:
-#    run_goodvibes_on_mol()  → invoca `python -m goodvibes` como subprocess,
-#                              guarda JSON en runs/<mol>/<conf>/goodvibes/,
-#                              retorna dict conf_id → GV_thermochem
+#    run_goodvibes_on_mol()  → run_goodvibes() (la misma de `pka`) por confórmero
 #    compute_gv_appendix()  → construye DataFrame de comparación
-#    print_gv_appendix()    → tabla formateada al estilo del script
 #    export_gv_appendix()   → guarda CSV/XLSX del apéndice en runs/<mol>/
 #
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-# ── Parámetros GoodVibes (modificables) ─────────────────────────────────────
-GV_FREQ_CUTOFF = 100.0    # cm⁻¹ — cutoff para corrección mRRHO Grimme
-GV_SUBDIR      = "goodvibes"  # subcarpeta creada dentro de cada conf_xxx
-
-# Entorno conda donde está instalado GoodVibes.
-# Si se deja en None, el script lo detecta automáticamente buscando en los
-# entornos conocidos de miniforge3/miniconda3/anaconda3.
-
-
-def _rc_resolve_gv_python() -> str:
-    """Alias de _resolve_gv_python() (misma estrategia, ahora una sola copia
-    y con caché: antes se re-resolvía con subprocesses en cada llamada)."""
-    return _resolve_gv_python()
-
-
-def _probe_gv_capabilities(python_exe: str) -> dict:
-    """
-    Ejecuta `python -m goodvibes --help` para detectar qué flags están
-    disponibles en la versión instalada.
-
-    Retorna un dict con:
-        supports_json_format  : bool — existe --output_format json (v4+)
-        supports_csv          : bool — existe --csv (v3.x)
-        version               : str  — número de versión o "?"
-    """
-    caps = {"supports_json_format": False, "supports_csv": False, "version": "?"}
-    try:
-        r = subprocess.run(
-            [python_exe, "-m", "goodvibes", "--help"],
-            capture_output=True, text=True, timeout=15
-        )
-        help_text = r.stdout + r.stderr
-
-        # Detectar flags de salida disponibles
-        if "--output_format" in help_text or "output_format" in help_text:
-            caps["supports_json_format"] = True
-        if "--csv" in help_text:
-            caps["supports_csv"] = True
-
-        # Intentar versión
-        r2 = subprocess.run(
-            [python_exe, "-m", "goodvibes", "--version"],
-            capture_output=True, text=True, timeout=10
-        )
-        for line in (r2.stdout + r2.stderr).splitlines():
-            m = re.search(r"([\d]+\.[\d]+\.[\d]+|v[\d.]+)", line)
-            if m:
-                caps["version"] = m.group(1).lstrip("v")
-                break
-    except Exception as _exc:
-        logging.getLogger("maaqc").debug(f"sondeo de capacidades de GoodVibes: {_exc!r}")
-    return caps
-
-
-def _parse_goodvibes_dat(dat_path: Path) -> dict:
-    """
-    Parsea el archivo de texto tabulado que GoodVibes genera siempre
-    (Goodvibes_output.dat o similar) cuando no se solicita salida JSON.
-
-    GoodVibes imprime una tabla con el formato (columnas separadas por espacios):
-        Structure  E_SPC  ZPE  H  T.S  T.qh-S  G(T)  qh-G(T)
-    o bien (versión 3.x, con nombres ligeramente distintos):
-        Structure  E  ZPE  H  T.S  T.qh-S  G(T)  qh-G(T)
-
-    Las unidades son Hartree para energías y Hartree/K para S si se reporta.
-    Las líneas de datos comienzan con el nombre del archivo (sin extensión).
-
-    Retorna el mismo formato que _parse_goodvibes_json():
-        H_GV, S_GV (Eh/K), TS_GV (Eh), G_GV (Eh), ZPE_GV (Eh),
-        E_elec_GV (Eh), T_GV (K), G_corr_GV (Eh), ok, warning
-    """
-    null = {
-        "H_GV": None, "S_GV": None, "TS_GV": None, "G_GV": None,
-        "ZPE_GV": None, "E_elec_GV": None, "T_GV": None,
-        "G_corr_GV": None, "ok": False, "warning": "dat no parseado",
-    }
-
-    if not dat_path.exists():
-        null["warning"] = f"Archivo .dat no encontrado: {dat_path}"
-        return null
-
-    try:
-        text = dat_path.read_text(errors="replace")
-    except OSError as exc:
-        null["warning"] = f"No se pudo leer {dat_path}: {exc}"
-        return null
-
-    lines = text.splitlines()
-
-    # ── Detectar temperatura del encabezado ──────────────────────────────
-    T_GV: Optional[float] = None
-    for line in lines:
-        m = re.search(r"Temp\s*=\s*([\d.]+)\s*K", line, re.I)
-        if not m:
-            m = re.search(r"at\s+([\d.]+)\s*K", line, re.I)
-        if m:
-            try:
-                T_GV = float(m.group(1))
-                break
-            except ValueError:
-                pass
-    if T_GV is None:
-        T_GV = 298.15  # asumir condición estándar si no se detecta
-
-    # ── Detectar línea de encabezado de columnas ─────────────────────────
-    # GoodVibes imprime una línea con "Structure" y los nombres de columnas.
-    # Buscamos esa línea y la siguiente que sea numérica (datos).
-    header_idx = -1
-    for i, line in enumerate(lines):
-        if re.search(r"\bStructure\b", line, re.I):
-            header_idx = i
-            break
-
-    if header_idx < 0:
-        null["warning"] = f"No se encontró encabezado 'Structure' en {dat_path}"
-        return null
-
-    header = lines[header_idx].split()
-
-    # Normalizar nombres de columna a minúsculas para búsqueda robusta
-    def _col(names: list[str]) -> Optional[int]:
-        """Devuelve el índice (0-based) de la primera columna que coincida."""
-        for name in names:
-            nl = name.lower()
-            for j, h in enumerate(header):
-                if h.lower() == nl:
-                    return j
-        return None
-
-    # Columnas posibles según versión de GoodVibes
-    idx_e    = _col(["E_SPC", "E_SP", "E", "E_DFT"])
-    idx_zpe  = _col(["ZPE"])
-    idx_h    = _col(["H"])
-    idx_ts   = _col(["T.S", "TS", "T*S"])       # T·S a T_GV (Eh)
-    idx_tqs  = _col(["T.qh-S", "T.QH-S"])       # T·qhS (corrección GoodVibes)
-    idx_g    = _col(["G(T)", "G"])               # G RRHO (sin corrección quasi)
-    idx_qhg  = _col(["qh-G(T)", "qh-G", "QH-G(T)"])  # G quasi-RRHO (el que queremos)
-
-    # Buscar primera línea de datos después del encabezado
-    # NOTA: GoodVibes v4 antepone un símbolo de estado (p.ej. "o", "x", "?")
-    # ANTES del nombre de la estructura, produciendo una columna extra al inicio
-    # que NO existe en el encabezado. Ejemplo real:
-    #   encabezado : Structure   E   ZPE   H   qh-H   T.S   T.qh-S   G(T)   qh-G(T)
-    #   datos      : o   freq   -1220.967288   0.403359   ...
-    # Los índices derivados del encabezado (base 0) deben desplazarse +1 para
-    # las líneas de datos cuando se detecta este símbolo inicial.
-    E_elec: Optional[float] = None
-    ZPE:    Optional[float] = None
-    H_GV:   Optional[float] = None
-    TS_GV:  Optional[float] = None   # T·qhS (Eh) — con corrección cuasi-RRHO
-    G_GV:   Optional[float] = None   # qh-G(T) absoluto (Eh)
-
-    for line in lines[header_idx + 1:]:
-        parts = line.split()
-        if len(parts) < 3:
-            continue
-
-        # Detectar offset: si parts[0] es un símbolo de 1 carácter (o/x/?)
-        # y parts[1] no es numérico (es el nombre del archivo), hay offset=1.
-        # Si parts[0] no es numérico directamente (es el nombre), offset=0.
-        offset = 0
-        if len(parts[0]) == 1 and not parts[0].lstrip('-').replace('.','',1).isdigit():
-            # parts[0] es símbolo de estado → parts[1] es nombre, datos desde parts[2]
-            try:
-                float(parts[2])
-                offset = 1
-            except (ValueError, IndexError):
-                continue
-        else:
-            # parts[0] es nombre → datos desde parts[1]
-            try:
-                float(parts[1])
-                offset = 0
-            except (ValueError, IndexError):
-                continue
-
-        def _get_col(idx: Optional[int], parts=parts, offset=offset) -> Optional[float]:
-            if idx is None:
-                return None
-            real_idx = idx + offset
-            if real_idx >= len(parts):
-                return None
-            try:
-                return float(parts[real_idx])
-            except ValueError:
-                return None
-
-        E_elec = _get_col(idx_e)
-        ZPE    = _get_col(idx_zpe)
-        H_GV   = _get_col(idx_h)
-        # preferir quasi-RRHO; `is None` y no `or`: un 0.0 válido no debe
-        # caer a la columna armónica.
-        TS_GV  = _get_col(idx_tqs)
-        if TS_GV is None:
-            TS_GV = _get_col(idx_ts)
-        G_GV   = _get_col(idx_qhg)
-        if G_GV is None:
-            G_GV = _get_col(idx_g)
-        break  # solo necesitamos la primera fila de datos
-
-    if G_GV is None:
-        null["warning"] = (
-            f"No se pudo extraer G(T) del .dat ({dat_path}). "
-            f"Columnas detectadas: {header}"
-        )
-        return null
-
-    S_GV: Optional[float] = None
-    if TS_GV is not None and T_GV > 0:
-        S_GV = TS_GV / T_GV  # Eh/K
-
-    G_corr_GV: Optional[float] = None
-    if G_GV is not None and E_elec is not None:
-        G_corr_GV = G_GV - E_elec
-
-    return {
-        "H_GV":      H_GV,
-        "S_GV":      S_GV,        # Eh/K
-        "TS_GV":     TS_GV,       # Eh (T·qhS)
-        "G_GV":      G_GV,        # Eh absoluto (qh-G(T))
-        "ZPE_GV":    ZPE,         # Eh
-        "E_elec_GV": E_elec,      # Eh
-        "T_GV":      T_GV,        # K
-        "G_corr_GV": G_corr_GV,   # Eh (puede ser None si no hay E_elec)
-        "ok":        True,
-        "warning":   "",
-    }
-
-
 def run_goodvibes_on_mol(mol_name: str) -> dict[str, dict]:
     """
-    Invoca GoodVibes sobre todos los freq.out de 03_numfreq/<conf_*>/freq.out
-    para la molécula mol_name.
+    run_goodvibes() a T_STD sobre cada 03_numfreq/conf_*/freq.out de mol_name.
 
-    Flujo para cada confórmero:
-      1. Resuelve el Python correcto (entorno sciencebitch o auto-detección).
-      2. Detecta las capacidades de la versión instalada (--output_format json
-         vs parseo del .dat de salida clásico).
-      3. Crea runs/<mol>/<conf>/goodvibes/ y ejecuta GoodVibes desde allí.
-      4. Parsea JSON (v4+) o el .dat tabulado (v3.x) según disponibilidad.
-
-    Retorna dict:
-        { "conf_001": {"H_GV": float, "S_GV": float, "G_GV": float,
-                       "ZPE_GV": float, "T_GV": float, "ok": bool,
-                       "json_path": Path, "warning": str}, ... }
-
-    Si GoodVibes no está disponible o falla para un confórmero, "ok" = False
-    y "warning" describe el error — el resto del script no se interrumpe.
+    Retorna { "conf_001": {"G_GV", "G_corr_GV", "S_GV", "ZPE_GV", "E_elec_GV"
+    (Eh, Eh/K), "ok", "warning"}, ... } con los valores cuasi-armónicos.
     """
-    mol_dir  = RC_WORK_ROOT / mol_name
-    freq_dir = mol_dir / "03_numfreq"
-
-    if not freq_dir.exists():
-        warnings.warn(f"[GoodVibes] {freq_dir} no existe — omitiendo {mol_name}.")
-        return {}
-
-    conf_dirs = sorted(freq_dir.glob("conf_*"))
-    if not conf_dirs:
-        warnings.warn(f"[GoodVibes] Sin subdirectorios conf_* en {freq_dir}.")
-        return {}
-
-    # ── Resolver Python y capacidades UNA SOLA VEZ para todos los conf ────
-    python_exe = _rc_resolve_gv_python()
-    caps       = _probe_gv_capabilities(python_exe)
-
-    # Verificar que goodvibes sea invocable con el ejecutable resuelto
-    try:
-        probe = subprocess.run(
-            [python_exe, "-c", "import goodvibes"],
-            capture_output=True, timeout=10
-        )
-        if probe.returncode != 0:
-            warnings.warn(
-                f"[GoodVibes] No se puede importar goodvibes con {python_exe}.\n"
-                f"  Instalar con: conda activate sciencebitch && pip install goodvibes\n"
-                f"  stderr: {probe.stderr.strip()[:200]}"
-            )
-            return {c.name: {
-                "H_GV": None, "S_GV": None, "G_GV": None,
-                "ZPE_GV": None, "T_GV": None, "ok": False,
-                "json_path": None,
-                "warning": f"goodvibes no disponible en {python_exe}",
-            } for c in conf_dirs}
-    except Exception as exc:
-        warnings.warn(f"[GoodVibes] Error al verificar goodvibes: {exc}")
-        return {}
-
-    print(f"  [GoodVibes v{caps['version']}] Python: {python_exe}")
-    use_json = caps["supports_json_format"]
-    print(f"  [GoodVibes] Modo salida: {'JSON (--output_format json)' if use_json else '.dat tabulado (clásico)'}")
-
+    freq_dir = RC_WORK_ROOT / mol_name / "03_numfreq"
     results: dict[str, dict] = {}
-
-    for conf_dir in conf_dirs:
-        conf_id  = conf_dir.name
-        freq_out = conf_dir / "freq.out"
-
-        null_entry = {
-            "H_GV":    None, "S_GV":   None, "G_GV":  None,
-            "ZPE_GV":  None, "T_GV":   None,
-            "ok":      False, "json_path": None, "warning": "",
+    for conf_dir in sorted(freq_dir.glob("conf_*")):
+        gv = run_goodvibes(conf_dir / "freq.out", T=T_STD,
+                           cutoff=GV_CUTOFF, qs=GV_QS, qh=GV_QH)
+        results[conf_dir.name] = {
+            "G_GV": gv["G_total_qh"], "G_corr_GV": gv["G_corr_qh"],
+            "S_GV": gv["S_total_qh"], "ZPE_GV": gv["ZPE"],
+            "E_elec_GV": gv["scf_energy"],
+            "ok": gv["ok"], "warning": gv["warning"] or "",
         }
-
-        if not freq_out.exists():
-            null_entry["warning"] = f"freq.out no encontrado en {conf_dir}"
-            results[conf_id] = null_entry
-            continue
-
-        # Crear subcarpeta goodvibes/ dentro del directorio del confórmero
-        gv_dir = conf_dir / GV_SUBDIR
-        gv_dir.mkdir(exist_ok=True)
-
-        # ── Construir comando según capacidades de la versión ─────────────
-        # GoodVibes siempre necesita la ruta al .out; corremos desde gv_dir
-        # para que los archivos de salida queden ahí con nombres predecibles.
-        cmd_base = [
-            python_exe, "-m", "goodvibes",
-            str(freq_out.resolve()),
-            "-q",
-            "--qs", GV_QS,
-            "-f", str(GV_FREQ_CUTOFF),
-            "-t", "298.15",
-        ] + _gv_invert_args(python_exe)
-
-        if use_json:
-            # v4+: --output_format json → escribe <stem>_goodvibes.json en cwd
-            json_path = gv_dir / f"{freq_out.stem}_goodvibes.json"
-            cmd = cmd_base + ["--output_format", "json"]
-        else:
-            # v3.x: sin flag de formato → escribe Goodvibes_output.dat en cwd
-            json_path = None
-            cmd = cmd_base  # salida .dat clásica
-
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                cwd=str(gv_dir),
-            )
-        except subprocess.TimeoutExpired:
-            null_entry["warning"] = "GoodVibes timeout (>120 s)"
-            results[conf_id] = null_entry
-            continue
-        except FileNotFoundError:
-            null_entry["warning"] = (
-                f"Ejecutable no encontrado: {python_exe}\n"
-                "  Instalar con: conda activate sciencebitch && pip install goodvibes"
-            )
-            results[conf_id] = null_entry
-            continue
-
-        if proc.returncode != 0:
-            null_entry["warning"] = (
-                f"GoodVibes retornó código {proc.returncode}. "
-                f"stderr: {proc.stderr[:300]}"
-            )
-            results[conf_id] = null_entry
-            continue
-
-        # ── Parsear la salida según el formato producido ───────────────────
-        if use_json and json_path is not None:
-            if not json_path.exists():
-                # v4+ con --output_format json pero JSON no generado →
-                # intentar fallback con el .dat que puede haber escrito de todas formas
-                dat_candidates = list(gv_dir.glob("*.dat")) + list(gv_dir.glob("Goodvibes_output*"))
-                if dat_candidates:
-                    null_entry["warning"] = (
-                        f"JSON no generado por GoodVibes v4 en {json_path}; "
-                        f"usando .dat de fallback."
-                    )
-                    gv_data = _parse_goodvibes_dat(dat_candidates[0])
-                    if gv_data["ok"]:
-                        gv_data["json_path"] = dat_candidates[0]
-                        results[conf_id] = gv_data
-                    else:
-                        null_entry["warning"] += f" {gv_data['warning']}"
-                        results[conf_id] = null_entry
-                else:
-                    null_entry["warning"] = (
-                        f"JSON no generado por GoodVibes en {json_path}. "
-                        f"stdout: {proc.stdout[:300]}"
-                    )
-                    results[conf_id] = null_entry
-                continue
-
-            try:
-                gv_data = _parse_goodvibes_json(json_path, freq_out.name)
-            except Exception as exc:
-                null_entry["warning"] = f"Error parseando JSON de GoodVibes: {exc}"
-                results[conf_id] = null_entry
-                continue
-
-            gv_data["json_path"] = json_path
-            results[conf_id] = gv_data
-
-        else:
-            # Parsear .dat tabulado (v3.x o cuando JSON no está disponible)
-            dat_candidates = (
-                list(gv_dir.glob("Goodvibes_output*"))
-                + list(gv_dir.glob("*.dat"))
-            )
-            if not dat_candidates:
-                null_entry["warning"] = (
-                    f"GoodVibes no generó ningún archivo de salida en {gv_dir}. "
-                    f"stdout: {proc.stdout[:400]}"
-                )
-                results[conf_id] = null_entry
-                continue
-
-            dat_path = dat_candidates[0]
-            try:
-                gv_data = _parse_goodvibes_dat(dat_path)
-            except Exception as exc:
-                null_entry["warning"] = f"Error parseando .dat de GoodVibes: {exc}"
-                results[conf_id] = null_entry
-                continue
-
-            if not gv_data["ok"]:
-                null_entry["warning"] = gv_data.get("warning", "Parseo .dat falló")
-                results[conf_id] = null_entry
-                continue
-
-            gv_data["json_path"] = dat_path  # reaprovechamos el campo para la ruta
-            results[conf_id] = gv_data
-
+    if not results:
+        warnings.warn(f"[GoodVibes] Sin subdirectorios conf_* en {freq_dir}.")
     return results
-
-
-def _parse_goodvibes_json(json_path: Path, filename: str) -> dict:
-    """
-    Parsea el JSON producido por GoodVibes v4.x y extrae H, S, G (mRRHO), ZPE.
-
-    El JSON de GoodVibes v4 tiene la forma:
-        {
-          "timestamp": "...",
-          "version": "4.x",
-          "molecules": [
-            {
-              "filename": "freq.out",
-              "t":  298.15,
-              "zpe": <float Eh>,
-              "h":  <float Eh>,    ← entalpía total (E_elec + H_corr_GV)
-              "ts": <float Eh>,    ← T·S (en Eh)
-              "g":  <float Eh>,    ← G total (E_elec + G_corr_GV)
-              ...
-            }
-          ]
-        }
-
-    Nota: GoodVibes reporta H y G como energías absolutas que incluyen E_elec.
-    Para obtener G_corr_GV (compatible con el ciclo compuesto del script):
-        G_corr_GV = G_GV - E_elec_GV
-    donde E_elec_GV es la energía electrónica que GoodVibes lee del .out
-    (campo "sp" o "e_sp" en el JSON, según versión).
-    """
-    with open(json_path) as f:
-        data = json.load(f)
-
-    # GoodVibes v4 agrupa bajo "molecules" (lista) o directamente como dict
-    molecules = data.get("molecules") or data.get("data") or []
-
-    # Buscar la entrada que corresponde a nuestro freq.out
-    entry = None
-    stem  = Path(filename).stem  # "freq"
-
-    for mol in molecules:
-        fn = mol.get("filename", mol.get("file", ""))
-        if Path(fn).stem == stem or fn == filename:
-            entry = mol
-            break
-
-    # Fallback: si solo hay una entrada, usarla directamente
-    if entry is None and len(molecules) == 1:
-        entry = molecules[0]
-
-    if entry is None:
-        raise ValueError(
-            f"No se encontró entrada para '{filename}' en {json_path}. "
-            f"Claves disponibles: {[m.get('filename','?') for m in molecules]}"
-        )
-
-    # Extraer campos — GoodVibes v4 usa minúsculas
-    def _get(*keys):
-        for k in keys:
-            v = entry.get(k)
-            if v is not None:
-                try:
-                    return float(v)
-                except (TypeError, ValueError):
-                    pass
-        return None
-
-    T_GV   = _get("t", "temp", "temperature")
-    ZPE_GV = _get("zpe", "ZPE")
-    H_GV   = _get("h", "H", "enthalpy")           # absoluto (Eh)
-    TS_GV  = _get("ts", "tds", "t*s")             # T·S en Eh
-    G_GV   = _get("g", "G", "gibbs", "qh_g")      # absoluto (Eh), con mRRHO
-    E_elec = _get("sp", "e_sp", "e_elec",
-                  "electronic_energy", "scf_energy")
-
-    # Algunas versiones reportan S directamente (en Eh/K), otras T·S
-    S_GV = None
-    if TS_GV is not None and T_GV is not None and T_GV > 0:
-        S_GV = TS_GV / T_GV   # Eh/K
-    else:
-        S_GV = _get("s", "S", "entropy")
-
-    # G_corr_GV = G_total_GV - E_elec
-    # Si GoodVibes no reporta E_elec en el JSON, lo dejamos None;
-    # el apéndice usará G_GV directamente para ΔG_rel (diferencias).
-    G_corr_GV = None
-    if G_GV is not None and E_elec is not None:
-        G_corr_GV = G_GV - E_elec
-
-    ok = G_GV is not None
-
-    return {
-        "H_GV":      H_GV,
-        "S_GV":      S_GV,       # Eh/K
-        "TS_GV":     TS_GV,      # Eh
-        "G_GV":      G_GV,       # Eh absoluto (E_elec + G_corr_GV)
-        "G_corr_GV": G_corr_GV,  # Eh — corrección pura (None si no hay E_elec)
-        "ZPE_GV":    ZPE_GV,     # Eh
-        "E_elec_GV": E_elec,     # Eh — energía electrónica leída por GoodVibes
-        "T_GV":      T_GV,       # K
-        "ok":        ok,
-        "warning":   "" if ok else "G_GV no encontrado en JSON",
-    }
 
 
 def compute_gv_appendix(
@@ -9851,7 +8248,7 @@ def compute_gv_appendix(
 
         # Boltzmann GV a 298 K
         dg_gv = df_gv.loc[valid_gv, "dG_GV_kcal"]
-        raw   = np.exp(-dg_gv / (KB_KCAL * T_STD))
+        raw   = np.exp(-dg_gv / (R_KCAL * T_STD))
         df_gv["boltz_GV_298K"] = np.nan
         df_gv.loc[valid_gv, "boltz_GV_298K"] = raw / raw.sum()
     else:
@@ -9878,166 +8275,6 @@ def compute_gv_appendix(
         df_gv["rank_change_GV"] = df_gv["rank_GV"] - df_gv["rank_ORCA"]
 
     return df_gv
-
-
-def print_gv_appendix(df_gv: pd.DataFrame, mol_name: str):
-    """
-    Imprime el apéndice GoodVibes con el mismo estilo que el resto del script.
-    Muestra tres secciones:
-      1. Correcciones absolutas ORCA vs GV (G_corr, S, ZPE)
-      2. Impacto en ΔG relativo y pesos Boltzmann a 298 K
-      3. Cambios de ranking conformacional (si los hay)
-    """
-    sep = "─" * 74
-    print(f"\n{sep}")
-    print("  APÉNDICE GOODVIBES — Corrección cuasi-armónica mRRHO (Grimme)")
-    print(f"  Molécula : {mol_name}")
-    print(f"  Método   : -q --qs grimme -f {GV_FREQ_CUTOFF:.0f} cm⁻¹ (v{_gv_version()})")
-    print("  Ciclo    : G_GV = E_SP(TZVPD/CPCM) + G_corr_GV(mRRHO, SVP/CPCM)")
-    print(sep)
-
-    if df_gv.empty:
-        print("  Sin datos de GoodVibes.")
-        return
-
-    # Confórmeros sin GV
-    failed = df_gv[~df_gv["gv_ok"]]
-    if not failed.empty:
-        print(f"\n  ⚠  {len(failed)} confórmero(s) sin datos GoodVibes:")
-        for _, r in failed.iterrows():
-            print(f"     {r['conformer']:>10}  →  {r['gv_warning']}")
-
-    ok = df_gv[df_gv["gv_ok"]].copy()
-    if ok.empty:
-        print("  Sin confórmeros válidos de GoodVibes para comparar.")
-        return
-
-    # ── Sección 1: Correcciones absolutas ────────────────────────────────
-    print(f"\n  ── 1. Correcciones absolutas (Eh) ── "
-          f"[ORCA=RRHO  |  GV=mRRHO Grimme, f₀={GV_FREQ_CUTOFF:.0f} cm⁻¹]")
-    print(f"\n  {'conf':>10}  {'G_corr_ORCA':>14}  {'G_corr_GV':>12}  "
-          f"{'ΔG_corr(Eh)':>13}  {'ΔG_corr(kcal)':>14}  "
-          f"{'S_ORCA(Eh/K)':>13}  {'S_GV(Eh/K)':>11}  {'ΔS(Eh/K)':>10}")
-    print("  " + "─" * 100)
-
-    for _, r in ok.iterrows():
-        def _f(v, fmt=".6f"):
-            return f"{v:{fmt}}" if pd.notna(v) else "      —     "
-
-        dg_sign = "+" if (r.get("dG_corr_Eh") or 0) >= 0 else ""
-        ds_sign = "+" if (r.get("dS_EhK") or 0) >= 0 else ""
-        print(
-            f"  {r['conformer']:>10}  "
-            f"{_f(r.get('G_corr_ORCA_Eh')):>14}  "
-            f"{_f(r.get('G_corr_GV_Eh')):>12}  "
-            f"{dg_sign}{_f(r.get('dG_corr_Eh'), '.6f'):>12}  "
-            f"{dg_sign}{_f(r.get('dG_corr_kcal'), '.4f'):>13}  "
-            f"{_f(r.get('S_ORCA_EhK')):>13}  "
-            f"{_f(r.get('S_GV_EhK')):>11}  "
-            f"{ds_sign}{_f(r.get('dS_EhK'), '.6f'):>9}"
-        )
-
-    # Estadística del Δ(G_corr)
-    dg_vals = ok["dG_corr_kcal"].dropna()
-    if not dg_vals.empty:
-        print(f"\n  Δ(G_corr) medio  : {dg_vals.mean():+.4f} kcal/mol")
-        print(f"  Δ(G_corr) rango  : [{dg_vals.min():+.4f}, {dg_vals.max():+.4f}] kcal/mol")
-        print(f"  Interpretación   : GV{'aumenta' if dg_vals.mean()>0 else 'reduce'} G_corr "
-              f"{'(mRRHO menos negativo → G más alto)' if dg_vals.mean()>0 else '(mRRHO más negativo → G más bajo)'}")
-
-    # ── Sección 2: Impacto en ΔG relativo y Boltzmann ────────────────────
-    print("\n  ── 2. Impacto en ΔG relativo y pesos Boltzmann (T = 298.15 K) ──")
-    print(f"\n  {'conf':>10}  {'ΔG_ORCA':>9}  {'ΔG_GV':>8}  {'ΔΔG_rel':>9}  "
-          f"{'boltz_ORCA':>11}  {'boltz_GV':>10}  {'Δboltz':>8}  {'dominante':>9}")
-    print("  " + "─" * 85)
-
-    for _, r in ok.sort_values("dG_GV_kcal").iterrows():
-        dg_o   = r.get("dG_ORCA_kcal")
-        dg_gv  = r.get("dG_GV_kcal")
-        ddg    = r.get("ddG_rel_kcal")
-        bo     = r.get("boltz_ORCA_298K")
-        bg     = r.get("boltz_GV_298K")
-        db     = r.get("d_boltz_298K")
-
-        def _fv(v, fmt):
-            return f"{v:{fmt}}" if pd.notna(v) else "   —   "
-
-        dom_gv = " ★" if pd.notna(bg) and bg > 0.50 else ("  ·" if pd.notna(bg) and bg > 0.10 else "   ")
-        print(
-            f"  {r['conformer']:>10}  "
-            f"{_fv(dg_o,  '+9.3f')}  "
-            f"{_fv(dg_gv, '+8.3f')}  "
-            f"{_fv(ddg,   '+9.4f')}  "
-            f"{_fv(bo,    '11.4f')}  "
-            f"{_fv(bg,    '10.4f')}  "
-            f"{_fv(db,    '+8.4f')}"
-            f"{dom_gv}"
-        )
-
-    # Resumen del impacto sobre Boltzmann
-    ddg_vals = ok["ddG_rel_kcal"].dropna()
-    db_vals  = ok["d_boltz_298K"].dropna()
-    if not ddg_vals.empty:
-        print(f"\n  |ΔΔG_rel| máximo : {ddg_vals.abs().max():.4f} kcal/mol")
-        if ddg_vals.abs().max() < 0.1:
-            print("  → Impacto negligible en los ΔG relativos (< 0.1 kcal/mol)")
-        elif ddg_vals.abs().max() < 0.5:
-            print("  → Impacto pequeño pero no nulo en los ΔG relativos (0.1–0.5 kcal/mol)")
-        else:
-            print("  → Impacto significativo en los ΔG relativos (> 0.5 kcal/mol) ⚠")
-    if not db_vals.empty:
-        print(f"  |Δboltz| máximo  : {db_vals.abs().max():.4f} "
-              f"({'cambio relevante en ensemble' if db_vals.abs().max() > 0.05 else 'cambio menor en ensemble'})")
-
-    # ── Sección 3: Rankings ───────────────────────────────────────────────
-    if "rank_change_GV" in df_gv.columns:
-        inversions = df_gv["rank_change_GV"].dropna()
-        n_inv = (inversions.abs() > 0).sum()
-        print("\n  ── 3. Ranking conformacional: ORCA vs GoodVibes ──")
-        print(f"  Inversiones detectadas: {n_inv}/{len(ok)}")
-
-        if n_inv > 0:
-            print(f"\n  {'conf':>10}  {'rank_ORCA':>10}  {'rank_GV':>8}  {'Δrank':>7}")
-            print("  " + "─" * 42)
-            for _, r in df_gv[df_gv["rank_change_GV"].abs() > 0].iterrows():
-                rch = r.get("rank_change_GV", 0)
-                flag = " ◀ inversión"
-                print(
-                    f"  {r['conformer']:>10}  "
-                    f"{str(r.get('rank_ORCA','—')):>10}  "
-                    f"{str(r.get('rank_GV','—')):>8}  "
-                    f"{int(rch):>+7}{flag}"
-                )
-        else:
-            print("  → El ranking conformacional es idéntico con ORCA-RRHO y GV-mRRHO.")
-
-    print("\n  Archivos GV guardados en:")
-    for conf_id in df_gv["conformer"]:
-        p = RC_WORK_ROOT / mol_name / "03_numfreq" / conf_id / GV_SUBDIR
-        if p.exists():
-            # El nombre del JSON depende del stem del .out (normalmente freq_goodvibes.json)
-            json_files = list(p.glob("*_goodvibes.json"))
-            fname = json_files[0].name if json_files else "*.json"
-            print(f"    {p}/{fname}")
-
-    print(f"\n{sep}\n")
-
-
-def _gv_version() -> str:
-    """Devuelve la versión de GoodVibes instalada, o '?' si no se puede determinar."""
-    try:
-        python_exe = _rc_resolve_gv_python()
-        result = subprocess.run(
-            [python_exe, "-m", "goodvibes", "--version"],
-            capture_output=True, text=True, timeout=10
-        )
-        for line in (result.stdout + result.stderr).splitlines():
-            m = re.search(r"([\d]+\.[\d]+\.[\d]+|v[\d.]+)", line)
-            if m:
-                return m.group(1).lstrip("v")
-    except Exception as _exc:
-        logging.getLogger("maaqc").debug(f"versión de GoodVibes: {_exc!r}")
-    return "?"
 
 
 def export_gv_appendix(df_gv: pd.DataFrame, mol_name: str, fmt: str):
@@ -11385,7 +9622,7 @@ SUBDIR_SP_SMD  = "04c_sp_smd"  # SPs con SMD(water) en vez de CPCM(water) [--sps
 # ─────────────────────────────────────────────
 #  GOODVIBES  (corrección cuasi-armónica opcional)
 # ─────────────────────────────────────────────
-# G_corr estándar (parse_thermochem) usa el oscilador armónico puro para
+# G_corr estándar (rc_parse_thermochem) usa el oscilador armónico puro para
 # TODOS los modos vibracionales, incluidos los rotores internos de baja
 # frecuencia (<100 cm⁻¹) — típicos en M-Gly:Val (cadenas laterales Gly/Val,
 # grupos OH/NH libres). Ahí la aproximación armónica sobreestima la entropía
@@ -11404,7 +9641,7 @@ GV_QH     = False      # aplicar también la corrección cuasi-armónica de
 # se invierten los modos con ν > GV_INVERT_IFREQ (cm⁻¹, negativo); un modo más
 # negativo indica una optimización a revisar y se deja como lo trata GoodVibes.
 # None = no invertir (comportamiento de pka-spec-v1).
-GV_INVERT_IFREQ: Optional[float] = -20.0
+GV_INVERT_IFREQ: Optional[float] = -IMAG_TOL_CM1
 _GV_INVERT_FLAG: dict = {}
 
 
@@ -12105,23 +10342,6 @@ def load_calibration_file(path: Path) -> dict:
 #            sin dependencias cruzadas)
 # ─────────────────────────────────────────────
 
-def parse_sp_energy(out_file: Path) -> Optional[float]:
-    """
-    Extrae la última 'FINAL SINGLE POINT ENERGY' del .out de ORCA.
-    Retorna energía en Hartree, o None si no se encuentra.
-    """
-    if not out_file.exists():
-        return None
-    energy = None
-    for line in out_file.read_text(errors="replace").splitlines():
-        if "FINAL SINGLE POINT ENERGY" in line:
-            try:
-                energy = float(line.split()[-1])
-            except ValueError:
-                pass
-    return energy
-
-
 def parse_theory_level(out_file: Path) -> Optional[str]:
     """
     Extrae la línea de keywords ORCA ('! funcional base CPCM ...') del .out,
@@ -12276,125 +10496,6 @@ def _validate_state_charges(
     return msgs
 
 
-def parse_thermochem(freq_out: Path, T: float = T_STD) -> dict:
-    """
-    Extrae correcciones termoquímicas del bloque THERMOCHEMISTRY de ORCA 6.
-
-    Lógica idéntica a results_collector.py:
-      - 'Final entropy term' es T·S a T_parsed (en Eh), NO es S puro.
-      - S_total = TS_total / T_parsed   (Eh/K)
-      - G_corr(T) = H_corr − T · S_total
-
-    Retorna dict con claves:
-        E_elec_freq, ZPE, H_corr, TS_total, S_total,
-        G_corr, G_total_freq, T_parsed, n_imag, ok
-    Todos los valores en Hartree (salvo T_parsed en K y n_imag entero).
-    """
-    null = {
-        "E_elec_freq": None, "ZPE": None,       "H_corr": None,
-        "TS_total":    None, "S_total": None,    "G_corr": None,
-        "G_total_freq": None, "T_parsed": None,
-        "n_imag": 0,         "ok": False,
-    }
-
-    if not freq_out.exists():
-        return null
-
-    try:
-        lines = freq_out.read_text(errors="replace").splitlines()
-    except OSError:
-        return null
-
-    # Frecuencias imaginarias
-    n_imag = sum(
-        1 for l in lines
-        if re.match(r"\s+\d+:\s+(-\d+\.\d+)\s+cm", l)
-    )
-
-    # Energía electrónica (primera ocurrencia = SP del NumFreq)
-    E_elec_freq: Optional[float] = None
-    for line in lines:
-        if "FINAL SINGLE POINT ENERGY" in line:
-            try:
-                E_elec_freq = float(line.split()[-1])
-                break
-            except ValueError:
-                pass
-
-    # Bloque THERMOCHEMISTRY (última ocurrencia)
-    thermo_start = -1
-    for idx, line in enumerate(lines):
-        if "THERMOCHEMISTRY AT" in line.upper():
-            thermo_start = idx
-
-    if thermo_start < 0:
-        result = dict(null)
-        result["E_elec_freq"] = E_elec_freq
-        result["n_imag"] = n_imag
-        return result
-
-    # Temperatura del bloque
-    T_parsed: Optional[float] = None
-    m = re.search(r"THERMOCHEMISTRY AT\s+([\d.]+)\s*K",
-                  lines[thermo_start], re.IGNORECASE)
-    if m:
-        try:
-            T_parsed = float(m.group(1))
-        except ValueError:
-            pass
-
-    # Patrones ORCA 6
-    _pat_zpe = re.compile(r"Zero point energy\s+\.\.\.\s+([-\d.]+)\s*Eh", re.I)
-    _pat_h   = re.compile(r"Total [Ee]nthalpy\s+\.\.\.\s+([-\d.]+)\s*Eh", re.I)
-    _pat_s   = re.compile(r"Final entropy term\s+\.\.\.\s+([-\d.]+)\s*Eh", re.I)
-    _pat_g   = re.compile(
-        r"(?:Total|Final) Gibbs free energy\s+\.\.\.\s+([-\d.]+)\s*Eh", re.I
-    )
-
-    ZPE = H_total = TS_total = G_total_freq = None
-    for line in lines[thermo_start:]:
-        if ZPE is None:
-            m = _pat_zpe.search(line)
-            if m:
-                try: ZPE = float(m.group(1))
-                except ValueError: pass
-        if H_total is None:
-            m = _pat_h.search(line)
-            if m:
-                try: H_total = float(m.group(1))
-                except ValueError: pass
-        if TS_total is None:
-            m = _pat_s.search(line)
-            if m:
-                try: TS_total = float(m.group(1))
-                except ValueError: pass
-        if G_total_freq is None:
-            m = _pat_g.search(line)
-            if m:
-                try: G_total_freq = float(m.group(1))
-                except ValueError: pass
-
-    # Derivar correcciones
-    H_corr  = (H_total - E_elec_freq) if (H_total is not None and E_elec_freq is not None) else None
-    S_total = (TS_total / T_parsed)   if (TS_total is not None and T_parsed and T_parsed != 0) else None
-    G_corr  = (H_corr - T * S_total)  if (H_corr is not None and S_total is not None) else None
-
-    ok = all(x is not None for x in [ZPE, H_corr, TS_total, G_corr, G_total_freq])
-
-    return {
-        "E_elec_freq":  E_elec_freq,
-        "ZPE":          ZPE,
-        "H_corr":       H_corr,
-        "TS_total":     TS_total,
-        "S_total":      S_total,       # Eh/K
-        "G_corr":       G_corr,        # Eh, a temperatura T
-        "G_total_freq": G_total_freq,  # Eh
-        "T_parsed":     T_parsed,
-        "n_imag":       n_imag,
-        "ok":           ok,
-    }
-
-
 def _resolve_gv_python(force: bool = False) -> str:
     """
     Devuelve la ruta absoluta al intérprete Python que tiene goodvibes instalado.
@@ -12476,7 +10577,7 @@ def run_goodvibes(
                                amortiguado con `cutoff`, default 100 cm⁻¹)
 
     Esto es clave para que la comparación "armónico vs. GoodVibes" del
-    script sea limpia: antes, la pasada "armónica" salía de parse_thermochem()
+    script sea limpia: antes, la pasada "armónica" salía de rc_parse_thermochem()
     (bloque THERMOCHEMISTRY de ORCA, que ya viene con `Quasi RRHO = True` y
     su propio cutoff interno ~1 cm⁻¹) mientras que la pasada "GoodVibes"
     salía de un cálculo aparte — dos fuentes de datos distintas, no
@@ -12786,14 +10887,13 @@ def get_thermochem(
       source="goodvibes" → columnas T.qh-S / qh-G(T) de GoodVibes
                             (mRRHO de Grimme, amortiguado con gv_cutoff)
 
-    Antes, "harmonic" salía de parse_thermochem() (bloque THERMOCHEMISTRY
+    Antes, "harmonic" salía de rc_parse_thermochem() (bloque THERMOCHEMISTRY
     de ORCA, que ya trae `Quasi RRHO = True` con su propio cutoff interno
     ~1 cm⁻¹) mientras que "goodvibes" salía de un cálculo aparte — dos
-    fuentes de datos distintas, no comparables. parse_thermochem() se deja
-    definida arriba solo como utilidad de referencia/inspección manual, ya
-    no la usa esta función.
+    fuentes de datos distintas, no comparables. Esta función ya no usa
+    rc_parse_thermochem().
 
-    Retorna siempre el shape de parse_thermochem() (E_elec_freq, ZPE,
+    Retorna siempre el shape de rc_parse_thermochem() (E_elec_freq, ZPE,
     H_corr, TS_total, S_total, G_corr, G_total_freq, T_parsed, n_imag, ok),
     más "source" y "warning" para trazabilidad. Esto permite que
     collect_mol_data(), _state_G_total_direct() y compute_pka() usen la
@@ -12903,16 +11003,16 @@ def collect_mol_data(mol_name: str, verbose: bool = False,
         # que "E_sp_aq" es la energía acuosa vigente para esta corrida.
         if use_smd:
             sp_aq_file = mol_dir / SUBDIR_SP_SMD / conf_id / "sp_smd.out"
-            e_sp_aq    = parse_sp_energy(sp_aq_file)
+            e_sp_aq    = extract_sp_energy(sp_aq_file)
             if e_sp_aq is None:
                 n_missing_smd += 1
         else:
             sp_aq_file  = sp_dir / "sp.out"
-            e_sp_aq     = parse_sp_energy(sp_aq_file)
+            e_sp_aq     = extract_sp_energy(sp_aq_file)
 
         # SP fase gas (sin CPCM) — para el ciclo de pKa
         sp_gas_file = mol_dir / SUBDIR_SP_GAS / conf_id / "sp_gas.out"
-        e_sp_gas    = parse_sp_energy(sp_gas_file)
+        e_sp_gas    = extract_sp_energy(sp_gas_file)
 
         # Correcciones térmicas — leídas a T_STD, S_total re-escalado.
         # gcorr_source="harmonic" → columnas T.S/G(T) de GoodVibes (RRHO
@@ -13026,8 +11126,8 @@ def collect_mol_data(mol_name: str, verbose: bool = False,
         warns.append(
             f"[{mol_name}] {n_missing_smd}/{len(df)} conformers without SMD SP "
             f"(expected at runs/{mol_name}/{SUBDIR_SP_SMD}/conf_NNN/sp_smd.out). "
-            f"Run the pipeline with --spsmd for this molecule before using "
-            f"--spsmd here. Those conformers will have E_sp_aq=NaN and be "
+            f"Run the pipeline with --spsmd for this molecule, or use --no-spsmd "
+            f"in `pka` to use CPCM. Those conformers will have E_sp_aq=NaN and be "
             f"excluded from the Boltzmann ensemble and from best_conf."
         )
 
@@ -16016,8 +14116,9 @@ Ejemplos:
                              "a direct (default: auto). Los pasos que involucran el "
                              "macroestado neutro/zwitterión (con --protonated/"
                              "--zwitterion) siempre usan 'direct'.")
-    parser.add_argument("--spsmd", action="store_true",
-                        help="Usa las energías SP con SMD(water) "
+    parser.add_argument("--spsmd", action=argparse.BooleanOptionalAction, default=True,
+                        help="(default: activo; --no-spsmd para CPCM) "
+                             "Usa las energías SP con SMD(water) "
                              "(04c_sp_smd/conf_NNN/sp_smd.out, calculadas con "
                              "pipeline.py --spsmd) como energía SP acuosa en vez de "
                              "las CPCM(water) normales (04_sp/conf_NNN/sp.out) para "
@@ -16050,8 +14151,9 @@ Ejemplos:
                              "(default: activado). Usa --no-verbose para el modo "
                              "resumido. El .log de la corrida (ver --mol) siempre "
                              "guarda TODO lo impreso, independientemente de este flag.")
-    parser.add_argument("--goodvibes", action="store_true",
-                        help="Corre el ciclo COMPLETO dos veces: una con G_corr "
+    parser.add_argument("--goodvibes", action=argparse.BooleanOptionalAction, default=True,
+                        help="(default: activo; --no-goodvibes para solo armónico) "
+                             "Corre el ciclo COMPLETO dos veces: una con G_corr "
                              "armónico estándar de NumFreq (RRHO, tal cual lo "
                              "reporta ORCA) y otra con la corrección cuasi-armónica "
                              "de GoodVibes (mRRHO de Grimme para los modos de baja "
@@ -16202,7 +14304,7 @@ help="Aplica la corrección empírica calibrada (ver "
         _used = ["harmonic"] + (["goodvibes"] if args.goodvibes else [])
         if _cg and any(g not in _cg for g in _used):
             print(f"AVISO: la calibración se calculó con gcorr={_cg} y `pka` usa "
-                  f"gcorr_source={_used} (añade --goodvibes o recalibra con --gcorr both).",
+                  f"gcorr_source={_used} (usa --no-goodvibes o recalibra con --gcorr both).",
                   file=sys.stderr)
 
     args.empirical_correction_spec = _parse_empirical_correction_spec(
@@ -16277,6 +14379,12 @@ help="Aplica la corrección empírica calibrada (ver "
             print(f"  molécula : {args.mol}")
         print(f"  runs/ : {PC_WORK_ROOT}")
         print(f"  log   : {log_path}")
+        _desv = ([] if args.spsmd else ["CPCM en vez de SMD (--no-spsmd)"]) \
+              + ([] if args.goodvibes else ["armónico en vez de qh-GoodVibes (--no-goodvibes)"]) \
+              + ([] if args.temp == T_STD else [f"T={args.temp:g} K"])
+        if _desv:
+            print("  ⚠  análisis de sensibilidad, no protocolo primario "
+                  "(METHODS §11): " + "; ".join(_desv))
 
         if args.pair:
             _run_pair(args, "harmonic")
@@ -16329,6 +14437,52 @@ def _run_pair(args, gcorr_source: str = "harmonic"):
                                           pka_result=res)
         _print_empirical_correction(corr, label)
     return {"pka": res}
+
+
+def _apply_empirical_corrections(args, gcorr_source: str, sites: list) -> dict:
+    """
+    Aplica --empirical-correction a cada tramo de `sites` = [(clave "pKa1",
+    etiqueta, pka_result)], imprime los bloques y la nota, y deja pKa_raw /
+    pKa_corrected / correction en cada pka_result corregido. Devuelve
+    {clave: corr | None} (None si no se pidió corrección para esa clave).
+    """
+    ec_spec = getattr(args, "empirical_correction_spec", {}) or {}
+    ec_mode = getattr(args, "empirical_correction_mode", "aicc")
+    corrs = {key: None for key, _, _ in sites}
+    if not ec_spec:
+        return corrs
+    for key, _, pka_result in sites:
+        if key in ec_spec:
+            raw = pka_result["pKa"] if (pka_result and pka_result["ok"]) else None
+            corrs[key] = apply_empirical_correction(raw, ec_spec[key],
+                                                    gcorr_source=gcorr_source, mode=ec_mode,
+                                                    pka_result=pka_result)
+    for key, label, _ in sites:
+        _print_empirical_correction(corrs[key], label)
+    if any(c and c.get("ok") for c in corrs.values()):
+        print("\n  Nota: la distribución de especies, el pI y los "
+              "gráficos de aquí en adelante usan los pKa's CORREGIDOS "
+              "EMPÍRICAMENTE donde se pidió corrección (ver arriba). "
+              "El escaneo de temperatura (arriba) sigue mostrando "
+              "valores CRUDOS Born/CPCM sin corregir: la calibración "
+              "empírica solo se ajustó a T=298.15 K. " + ((
+              "Si además usas "
+              "--montecarlo, esa propagación de incertidumbre corre "
+              "sobre el ciclo de Born crudo (no conoce la corrección "
+              "empírica); súmale el RMSE de calibración reportado "
+              "arriba como una fuente de error sistemático aparte."
+              ) if not args.mc_calibrated else (
+              "Con --mc-calibrated el MC muestrea el error de calibración "
+              "(intercepto t_{n−1}·s_LOO) en los tramos corregidos; los de "
+              "n<CALIB_MIN_N caen al MC crudo (ver avisos arriba).")
+              ))
+    for key, _, pka_result in sites:
+        c = corrs[key]
+        if c and c.get("ok") and pka_result is not None:
+            pka_result["pKa_raw"] = c["pKa_raw"]
+            pka_result["pKa_corrected"] = c["pKa_corrected"]
+            pka_result["correction"] = c
+    return corrs
 
 
 def _run_classic(args, gcorr_source: str = "harmonic"):
@@ -16393,42 +14547,10 @@ def _run_classic(args, gcorr_source: str = "harmonic"):
     pKa2_raw = pka2_result["pKa"] if (pka2_result and pka2_result["ok"]) else None
 
     # ── Corrección empírica (--empirical-correction) ───────────────────────
-    ec_spec = getattr(args, "empirical_correction_spec", {}) or {}
-    ec_mode = getattr(args, "empirical_correction_mode", "aicc")
-    corr1 = corr2 = None
-    if ec_spec:
-        if "pKa1" in ec_spec:
-            corr1 = apply_empirical_correction(pKa1_raw, ec_spec["pKa1"],
-                                               gcorr_source=gcorr_source, mode=ec_mode,
-                                               pka_result=pka1_result)
-        if "pKa2" in ec_spec:
-            corr2 = apply_empirical_correction(pKa2_raw, ec_spec["pKa2"],
-                                               gcorr_source=gcorr_source, mode=ec_mode,
-                                               pka_result=pka2_result)
-        _print_empirical_correction(corr1, "pKa₁")
-        _print_empirical_correction(corr2, "pKa₂")
-        if any(c and c.get("ok") for c in (corr1, corr2)):
-            print("\n  Nota: la distribución de especies, el pI y los "
-                  "gráficos de aquí en adelante usan los pKa's CORREGIDOS "
-                  "EMPÍRICAMENTE donde se pidió corrección (ver arriba). "
-                  "El escaneo de temperatura (arriba) sigue mostrando "
-                  "valores CRUDOS Born/CPCM sin corregir: la calibración "
-                  "empírica solo se ajustó a T=298.15 K. " + ((
-                  "Si además usas "
-                  "--montecarlo, esa propagación de incertidumbre corre "
-                  "sobre el ciclo de Born crudo (no conoce la corrección "
-                  "empírica); súmale el RMSE de calibración reportado "
-                  "arriba como una fuente de error sistemático aparte."
-                  ) if not args.mc_calibrated else (
-                  "Con --mc-calibrated el MC muestrea el error de calibración "
-                  "(intercepto t_{n−1}·s_LOO) en los tramos corregidos; los de "
-                  "n<CALIB_MIN_N caen al MC crudo (ver avisos arriba).")
-                  ))
-        for c, pka_result in ((corr1, pka1_result), (corr2, pka2_result)):
-            if c and c.get("ok") and pka_result is not None:
-                pka_result["pKa_raw"] = c["pKa_raw"]
-                pka_result["pKa_corrected"] = c["pKa_corrected"]
-                pka_result["correction"] = c
+    corrs = _apply_empirical_corrections(
+        args, gcorr_source,
+        [("pKa1", "pKa₁", pka1_result), ("pKa2", "pKa₂", pka2_result)])
+    corr1, corr2 = corrs["pKa1"], corrs["pKa2"]
 
     pKa1 = corr1["pKa_corrected"] if (corr1 and corr1.get("ok")) else pKa1_raw
     pKa2 = corr2["pKa_corrected"] if (corr2 and corr2.get("ok")) else pKa2_raw
@@ -16806,47 +14928,12 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
     pKa2_raw = pka2_result["pKa"] if (pka2_result and pka2_result["ok"]) else None
 
     # ── Corrección empírica (--empirical-correction) ───────────────────────
-    ec_spec = getattr(args, "empirical_correction_spec", {}) or {}
-    ec_mode = getattr(args, "empirical_correction_mode", "aicc")
-    corr0 = corr1 = corr2 = None
-    if ec_spec:
-        if "pKa0" in ec_spec:
-            corr0 = apply_empirical_correction(pKa0_raw, ec_spec["pKa0"],
-                                               gcorr_source=gcorr_source, mode=ec_mode,
-                                               pka_result=pka0_result)
-        if "pKa1" in ec_spec:
-            corr1 = apply_empirical_correction(pKa1_raw, ec_spec["pKa1"],
-                                               gcorr_source=gcorr_source, mode=ec_mode,
-                                               pka_result=pka1_result)
-        if "pKa2" in ec_spec:
-            corr2 = apply_empirical_correction(pKa2_raw, ec_spec["pKa2"],
-                                               gcorr_source=gcorr_source, mode=ec_mode,
-                                               pka_result=pka2_result)
-        _print_empirical_correction(corr0, "pKa₀ (A→R/D)")
-        _print_empirical_correction(corr1, "pKa₁ (R/D→B)")
-        _print_empirical_correction(corr2, "pKa₂ (B→C)")
-        if any(c and c.get("ok") for c in (corr0, corr1, corr2)):
-            print("\n  Nota: la distribución de especies, el pI y los "
-                  "gráficos de aquí en adelante usan los pKa's CORREGIDOS "
-                  "EMPÍRICAMENTE donde se pidió corrección (ver arriba). "
-                  "El escaneo de temperatura (arriba) sigue mostrando "
-                  "valores CRUDOS Born/CPCM sin corregir: la calibración "
-                  "empírica solo se ajustó a T=298.15 K. " + ((
-                  "Si además usas "
-                  "--montecarlo, esa propagación de incertidumbre corre "
-                  "sobre el ciclo de Born crudo (no conoce la corrección "
-                  "empírica); súmale el RMSE de calibración reportado "
-                  "arriba como una fuente de error sistemático aparte."
-                  ) if not args.mc_calibrated else (
-                  "Con --mc-calibrated el MC muestrea el error de calibración "
-                  "(intercepto t_{n−1}·s_LOO) en los tramos corregidos; los de "
-                  "n<CALIB_MIN_N caen al MC crudo (ver avisos arriba).")
-                  ))
-        for c, pka_result in ((corr0, pka0_result), (corr1, pka1_result), (corr2, pka2_result)):
-            if c and c.get("ok") and pka_result is not None:
-                pka_result["pKa_raw"] = c["pKa_raw"]
-                pka_result["pKa_corrected"] = c["pKa_corrected"]
-                pka_result["correction"] = c
+    corrs = _apply_empirical_corrections(
+        args, gcorr_source,
+        [("pKa0", "pKa₀ (A→R/D)", pka0_result),
+         ("pKa1", "pKa₁ (R/D→B)", pka1_result),
+         ("pKa2", "pKa₂ (B→C)", pka2_result)])
+    corr0, corr1, corr2 = corrs["pKa0"], corrs["pKa1"], corrs["pKa2"]
 
     pKa0 = corr0["pKa_corrected"] if (corr0 and corr0.get("ok")) else pKa0_raw
     pKa1 = corr1["pKa_corrected"] if (corr1 and corr1.get("ok")) else pKa1_raw
@@ -17123,18 +15210,6 @@ class ExcitedState:
         if denom <= 0:
             return None
         return 1.0 / denom
-
-
-@dataclass
-class ConformerJob:
-    conf_dir: Path
-    molecule: str
-    run_label: str
-    conf_id: str
-    homo_idx: Optional[int] = None
-    lumo_idx: Optional[int] = None
-    is_open_shell: bool = False
-    states: dict[int, ExcitedState] = _dc_field(default_factory=dict)
 
 
 @dataclass

@@ -14,6 +14,7 @@ import logging
 import math
 import os
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -971,8 +972,9 @@ def test_censo_cli_parts(monkeypatch, tmp_path):
     monkeypatch.setattr(m, "CENSO_REFINE", False)
     assert m.censo_cli_parts() == ["--prescreening", "--screening"]
     monkeypatch.setattr(m, "CENSO_REFINE", True)
-    parts = m.censo_cli_parts(include_prescreening=False)
-    assert parts[:4] == ["--screening", "--optimization", "--refinement", "--ignore-failed"]
+    parts = m.censo_cli_parts()
+    assert parts[:5] == ["--prescreening", "--screening", "--optimization",
+                         "--refinement", "--ignore-failed"]
     assert parts[-2:] == ["--inprc", str(m.CENSO_REFINE_RC)]
     assert m.censo_timeout_hours() == m.CENSO_TIMEOUT_HOURS_REFINE
 
@@ -993,6 +995,83 @@ def test_stage_censo_reuses_existing_refinement(tmp_path, monkeypatch):
     text = out.read_text()
     assert "CONF2" in text and "9.0" in text and "CONF1" not in text
     assert m._find_screening_out(mol_dir) == censo_dir / "3_REFINEMENT.out"
+
+
+def _censo_fake(monkeypatch, effect, returncode=1):
+    """CENSO simulado: ejecuta effect(censo_dir) y termina con returncode."""
+    def run(cmd, censo_dir, *a, **k):
+        effect(censo_dir)
+        return subprocess.CompletedProcess(cmd, returncode)
+    monkeypatch.setattr(m, "_acquire_cpu_pool", lambda *a, **k: [0, 1])
+    monkeypatch.setattr(m, "_cpu_lock_release", lambda: None)
+    monkeypatch.setattr(m, "_run_censo_locked", run)
+    monkeypatch.setattr(m, "ALLOW_NO_CENSO", False)
+    monkeypatch.setattr(m, "CENSO_REFINE", False)
+
+
+def test_stage_censo_failed_run_never_yields_stray_xyz(tmp_path, monkeypatch):
+    crest = tmp_path / "crest_conformers.xyz"
+    _censo_xyz(crest, ["CONF1", "CONF2"], 0.0)
+    old = tmp_path / "run" / "01b_censo_prescreen" / "0_PRESCREENING" / "CONF1"
+    old.mkdir(parents=True)
+    (old / "sp.out").write_text("parcial")
+
+    def effect(d):
+        _censo_out(d / "0_PRESCREENING.out", [("CONF1", -2.0, 100)])
+        _censo_xyz(d / "0_PRESCREENING.xyz", ["CONF1"], 0.0)
+        _censo_xyz(d / "censo_ensemble_sorted.xyz", ["CONF1"], 0.0)
+
+    _censo_fake(monkeypatch, effect)
+    with pytest.raises(m.CensoUnavailableError):
+        m.stage_censo_prescreen(crest, tmp_path / "run", 0, LOG)
+    # el prescreening interrumpido se aparta, no se borra
+    kept = list((tmp_path / "run" / "01b_censo_prescreen").glob(
+        "0_PRESCREENING.interrumpida_*/CONF1/sp.out"))
+    assert len(kept) == 1
+
+
+def test_stage_censo_ok_run_uses_screening(tmp_path, monkeypatch):
+    crest = tmp_path / "crest_conformers.xyz"
+    _censo_xyz(crest, ["CONF1", "CONF2"], 0.0)
+
+    def effect(d):
+        _censo_out(d / "1_SCREENING.out", [("CONF2", -2.0, 100)])
+
+    _censo_fake(monkeypatch, effect, returncode=0)
+    out = m.stage_censo_prescreen(crest, tmp_path / "run", 0, LOG)
+    assert "CONF2" in out.read_text() and "CONF1" not in out.read_text()
+
+
+def test_stage_censo_live_process_aborts(tmp_path, monkeypatch):
+    crest = tmp_path / "crest_conformers.xyz"
+    _censo_xyz(crest, ["CONF1"], 0.0)
+    monkeypatch.setattr(m, "ALLOW_NO_CENSO", False)
+    monkeypatch.setattr(m, "_censo_lock_owner", lambda *a: 4242)
+    with pytest.raises(m.CensoUnavailableError):
+        m.stage_censo_prescreen(crest, tmp_path / "run", 0, LOG)
+
+
+def test_censo_standalone_without_result_is_failure(tmp_path, monkeypatch):
+    src = tmp_path / "in.xyz"
+    _censo_xyz(src, ["CONF1"], 0.0)
+    out = tmp_path / "out"
+    out.mkdir()
+    _censo_fake(monkeypatch, lambda d: None, returncode=0)
+    assert m.run_censo_standalone(src, 0, out, 298.15, 2, LOG) is False
+
+
+def test_run_goodvibes_on_mol_maps_quasi_harmonic(tmp_path, monkeypatch):
+    for c in ("conf_1", "conf_2"):
+        (tmp_path / "X" / "03_numfreq" / c).mkdir(parents=True)
+    monkeypatch.setattr(m, "RC_WORK_ROOT", tmp_path)
+    monkeypatch.setattr(m, "run_goodvibes", lambda f, **k: {
+        "G_total_qh": -1.5, "G_total_harmonic": -9.0, "G_corr_qh": 0.5,
+        "S_total_qh": 1e-4, "ZPE": 0.6, "scf_energy": -2.0,
+        "ok": True, "warning": None})
+    r = m.run_goodvibes_on_mol("X")
+    assert set(r) == {"conf_1", "conf_2"}
+    assert r["conf_1"]["G_GV"] == -1.5 and r["conf_1"]["G_corr_GV"] == 0.5
+    assert r["conf_1"]["warning"] == ""
 
 
 def test_cli_flags_pka_calibrate(capsys, monkeypatch):
@@ -1092,3 +1171,82 @@ def test_speciation_with_extra_micro(capsys):
     assert list(df0.columns) == cols0
     m.print_distribution_table_5(df0, 3.0, 9.0, 12.0)
     assert "f(R)+f(D) = f(neutro/zwitterión total)" in capsys.readouterr().out
+
+
+def test_extract_sp_energy_devuelve_la_ultima(tmp_path):
+    out = tmp_path / "opt.out"
+    out.write_text("FINAL SINGLE POINT ENERGY      -10.5\n"
+                   "FINAL SINGLE POINT ENERGY      -11.25\n")
+    assert m.extract_sp_energy(out) == -11.25
+    assert m.extract_sp_energy(tmp_path / "no_existe.out") is None
+
+
+@pytest.mark.parametrize("kind,subdir", [("gas", "04b_sp_gas"), ("smd", "04c_sp_smd")])
+def test_sp_solv_worker_rutas_y_clave(tmp_path, monkeypatch, kind, subdir):
+    sp_dir = tmp_path / "04_sp" / "conf_1"
+    sp_dir.mkdir(parents=True)
+    (sp_dir / "sp.inp").write_text("* xyzfile 0 1 opt_opt.xyz\n")
+    (sp_dir / "opt_opt.xyz").write_text("1\n\nH 0 0 0\n")
+    vistos = {}
+
+    def fake_prep(d, name, text, log, tag, xyz_src=None):
+        vistos["dir"], vistos["name"], vistos["tag"] = d, name, tag
+        return d / name
+
+    monkeypatch.setattr(m, "prepare_orca_job", fake_prep)
+    monkeypatch.setattr(m, "run_orca", lambda *a, **k: True)
+    task = {"conf_id": "conf_1", "sp_dir": sp_dir, "template": "{CHARGE}{MULT}{NPROCS}{MAXCORE}",
+            "nprocs": 1, "maxcore": 100, "mol_dir": tmp_path, "log": logging.getLogger("t")}
+    r = m._sp_solv_worker(task, kind)
+    esperado = tmp_path / subdir / "conf_1"
+    assert vistos["dir"] == esperado and vistos["name"] == f"sp_{kind}.inp"
+    assert vistos["tag"] == f"SP_{kind.upper()}"
+    assert r[f"sp_{kind}_dir"] == esperado and r["success"]
+
+
+@pytest.mark.parametrize("cores", [1, 2, 12])
+def test_resource_profile_nprocs_nunca_cero(cores):
+    rp = m.ResourceProfile(total_cores=cores, ram_mb=32000)
+    for v in (rp.nprocs_opt, rp.nprocs_sp, rp.nprocs_tddft):
+        assert v >= 1
+    if cores == 12:
+        assert (rp.nprocs_opt, rp.nprocs_sp, rp.nprocs_tddft) == (4, 4, 6)
+
+
+def test_pka_help_muestra_flags_negativos(capsys):
+    assert m.main(["pka", "--help"]) == 0
+    out = capsys.readouterr().out
+    assert "--no-spsmd" in out and "--no-goodvibes" in out
+
+
+def test_pka_defaults_smd_y_goodvibes(tmp_path, monkeypatch):
+    vistos = {}
+    monkeypatch.setattr(m, "_run_pair", lambda a, g="harmonic": vistos.setdefault("a", a))
+    monkeypatch.setattr(m, "_setup_run_logger",
+                        lambda *a: (tmp_path / "x.log", open(tmp_path / "x.log", "w"),
+                                    m.sys.stdout, m.sys.stderr))
+    m.main(["pka", "--work-root", str(tmp_path), "--pair", "A", "B"])
+    assert vistos["a"].spsmd is True and vistos["a"].goodvibes is True
+
+
+@pytest.mark.parametrize("linea,esperado", [
+    ("-8.70", True), ("-17.61", True), ("-20.00", True),
+    ("-20.01", False), ("-123.45", False)])
+def test_check_no_imaginary_umbral(tmp_path, linea, esperado):
+    f = tmp_path / "freq.out"
+    f.write_text("VIBRATIONAL FREQUENCIES\n-----\n"
+                 f"   0:         0.00 cm**-1\n   6:      {linea} cm**-1\n"
+                 "   7:       50.00 cm**-1\nNORMAL MODES\n")
+    assert m.check_no_imaginary(f) is esperado
+    assert m.GV_INVERT_IFREQ == -20.0
+
+
+@pytest.mark.parametrize("nombre,carga", [("Cp", None), ("010", None), ("4DG_T", None)])
+def test_resolve_charge_sin_inferir_sale(nombre, carga):
+    with pytest.raises(SystemExit):
+        m.resolve_charge(nombre, carga)
+
+
+def test_resolve_charge_casos_validos():
+    assert m.resolve_charge("Cp", -2) == -2
+    assert m.resolve_charge("SB", None) == -1
