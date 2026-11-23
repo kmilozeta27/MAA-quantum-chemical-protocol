@@ -16172,7 +16172,7 @@ Disposición esperada:  <base>/<MOL>/runs/<estado>/   (como en `pka --mol`)
 
 Ejemplos:
   maaqc.py calibrate --list --base ~/PAPER1/calib
-  maaqc.py calibrate --base ~/PAPER1/calib --method born --gcorr both
+  maaqc.py calibrate --base ~/PAPER1/calib --method direct --gcorr both
   maaqc.py calibrate --base ~/PAPER1/calib --override GLYCINE.neutral=glycine
 """,
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -16193,8 +16193,9 @@ Ejemplos:
                     help="fuente de G_corr (default goodvibes: corrección de "
                          "quasi-RRHO para modos blandos; harmonic queda como "
                          "chequeo de sensibilidad, difiere ≤0.1 en pKa)")
-    ap.add_argument("--spsmd", action="store_true",
-                    help="usa los SP SMD (04c_sp_smd) en lugar de CPCM para E_sp_aq. "
+    ap.add_argument("--spsmd", action=argparse.BooleanOptionalAction, default=True,
+                    help="(default: activo, como en `pka`; --no-spsmd para CPCM) "
+                         "usa los SP SMD (04c_sp_smd) en lugar de CPCM para E_sp_aq. "
                          "Recomendado junto con --method direct: las constantes "
                          "de Born están calibradas para CPCM. Se guarda en el JSON.")
     ap.add_argument("--override", nargs="*", default=[], metavar="MOL.rol=CARPETA",
@@ -16229,9 +16230,9 @@ Ejemplos:
 
     gsources = ["harmonic", "goodvibes"] if args.gcorr == "both" else [args.gcorr]
     if args.spsmd and args.method in ("auto", "born"):
-        print("\n  ⚠  --spsmd con method='%s': las constantes de Born "
-              "(G_HPLUS_AQ_BORN) están calibradas para CPCM. Para SMD usa "
-              "--method direct y mantén el mismo método en `pka`." % args.method)
+        print("\n  ⚠  SMD con method='%s': las constantes de Born "
+              "(G_HPLUS_AQ_BORN) están calibradas para CPCM. Usa "
+              "--method direct (y el mismo método en `pka`) o --no-spsmd." % args.method)
     # resultados[(mol, slot)][gsrc] = resultado compute_pka
     results: dict[tuple[str, str], dict[str, dict]] = {}
     for mol, spec in sets.items():
@@ -16378,7 +16379,7 @@ Cada subcomando conserva exactamente los flags de su script de origen:
                --protonated A --zwitterion D --montecarlo
   maaqc.py cubes --root PAPER1 --grid 80 --dry-run
   maaqc.py calibrate --list --base PAPER1/calib
-  maaqc.py calibrate --base PAPER1/calib --method born --gcorr both
+  maaqc.py calibrate --base PAPER1/calib --method direct --gcorr both
   maaqc.py pka --mol AP --pair APA APR --method born
   maaqc.py pka --mol MGLYVAL --protonated A --neutral R --zwitterion D --anion B \\
                --dianion C --calibration-file calibration.json \\

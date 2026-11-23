@@ -1104,6 +1104,25 @@ def test_calibrate_no_stale_builtin_points(monkeypatch, tmp_path):
     assert val["calc_goodvibes"] == 3.5 and val["calc_harmonic"] is None
 
 
+def test_calibrate_smd_default(monkeypatch, tmp_path):
+    import copy, json
+    monkeypatch.setattr(m, "EMPIRICAL_CALIBRATION", copy.deepcopy(m.EMPIRICAL_CALIBRATION))
+    seen = []
+
+    def fake(mol, spec, base, T, meth, gsrc, use_smd=False):
+        seen.append(use_smd)
+        return {t["slot"]: {"ok": True, "pKa": 3.5, "method": "direct"}
+                for t in spec["transitions"]}
+    monkeypatch.setattr(m, "_calib_compute_mol", fake)
+    for extra, smd, name in (([], True, "SMD"), (["--no-spsmd"], False, "CPCM")):
+        seen.clear()
+        out = tmp_path / "c.json"
+        m.main(["calibrate", "--base", str(tmp_path), "--mols", "VALINE",
+                "--out", str(out)] + extra)
+        assert seen and all(u is smd for u in seen)
+        assert json.loads(out.read_text())["meta"]["solvent_model"] == name
+
+
 def test_fit_harmonic_none_not_ok(monkeypatch):
     monkeypatch.setattr(m, "EMPIRICAL_CALIBRATION", {"t": [
         {"mol": "M", "calc_goodvibes": 3.0, "calc_harmonic": None, "exp": 2.0}]})
