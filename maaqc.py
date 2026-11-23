@@ -320,7 +320,7 @@ def check_required_bins(log: logging.Logger) -> None:
 
 
 ORCA_BIN   = Path(os.environ.get("PIPELINE_ORCA_BIN",
-                                  "~/orca_6_1_1_avx2/orca"))
+                                  str(Path.home() / "orca_6_1_1_avx2/orca")))
 CREST_BIN  = _resolve_bin("crest")  # resuelto vía PATH o conda env sciencebitch
 CENSO_BIN  = _resolve_bin("censo")  # resuelto vía PATH o conda env sciencebitch
 
@@ -548,7 +548,7 @@ SP_BATCH_SIZE   = 3
 TDDFT_BATCH_SIZE = 2
 NUMFREQ_BATCH_SIZE = 1   # recalculado en _setup_run_resources() según cores y RAM
 
-# ── Topología REAL de este ThinkPad T14 (Core Ultra 7), confirmada con
+# ── Topología REAL del equipo de referencia, confirmada con
 #    `lscpu -e`. Elevada a nivel de módulo porque tanto assign_cpu_lists()
 #    (pinning por-job, usado por ORCA) como assign_cpu_pool() (pinning de
 #    un único proceso con paralelismo interno propio, usado por CENSO)
@@ -668,7 +668,7 @@ if _topo is not None:
     P_CORE_BLOCKS, E_CORE_SINGLES, LP_CORE_SINGLES, CORE_TO_PUS = _topo
     CPU_TOPOLOGY_SOURCE = "sysfs"
 else:
-    CPU_TOPOLOGY_SOURCE = "tabla fija (ThinkPad T14)"
+    CPU_TOPOLOGY_SOURCE = "tabla fija (equipo de referencia)"
 del _topo
 
 PU_TO_CORE: dict[int, int] = {
@@ -1062,7 +1062,7 @@ class ResourceProfile:
 
         Usa psutil para la RAM (más fiable que /proc/meminfo en algunos
         kernels). Si psutil no está disponible, estima 28 GB (valor
-        conservador para el ThinkPad T14 Gen5 con 32 GB).
+        conservador para un portátil con 32 GB).
         """
         # Antes os.cpu_count() (14 en el T14), que contaba los 2 LP E-cores
         # que assign_cpu_lists() evita: el perfil se dimensionaba para CPUs
@@ -2904,7 +2904,7 @@ def extract_conformers_by_id(
 #  CENSO STANDALONE (--censo-standalone)
 # ─────────────────────────────────────────────
 #
-# Motivación (ago 2026): Kmilo seguía invocando `censo` pelado a mano en la
+# Motivación (ago 2026): El usuario seguía invocando `censo` pelado a mano en la
 # terminal para correr un ensemble suelto (fuera del flujo CREST->pipeline),
 # perdiendo con eso TODO el aislamiento de cores que stage_censo_prescreen()
 # ya tiene resuelto (taskset -c sobre un pool que evita mezclar SMT/E-core/
@@ -4620,7 +4620,7 @@ def stage_adc2(
     TDDFT ni de ninguna otra etapa posterior a SP — así --start adc2 solo
     necesita que 04_sp/ exista, sin requerir 05_tddft ni el resto del
     pipeline (relevante porque ADC2 necesita ~400GB de disco, por lo que
-    Kmilo suele respaldar y borrar todo lo demás antes de correrlo).
+    el usuario suele respaldar y borrar todo lo demás antes de correrlo).
 
     Requiere únicamente que 04_sp/<conf_id>/ exista (out + opt_opt.xyz) para
     el confórmero dominante. Si falta la geometría, aborta esa etapa con
@@ -5251,7 +5251,7 @@ def assign_cpu_lists(batch_size: int, nprocs_per_job: int,
     """
     Calcula listas explícitas de CPUs lógicas (no necesariamente
     contiguas) para cada worker de un lote, basadas en la topología REAL
-    de este ThinkPad T14 (Core Ultra 7), confirmada con `lscpu -e`:
+    del equipo de referencia, confirmada con `lscpu -e`:
 
         CPU lógica  →  CORE físico   →  tipo
         0, 1        →  CORE 0        →  P-core (2 hilos SMT, mismo L2)
@@ -5433,7 +5433,7 @@ def assign_cpu_pool(n_cores: int, exclude: Optional[set[int]] = None) -> list[in
     cualquiera de sus 2 PUs está excluido.
 
     Devuelve una lista de hasta n_cores CPUs lógicas. Si n_cores excede
-    las CPUs físicas reales de la máquina (12 en este ThinkPad: 2
+    las CPUs físicas reales de la máquina (12 en el equipo de referencia: 2
     P-cores + 8 E-cores, sin contar LP), la lista incluye también los
     LP E-cores como último recurso y, si aún así no alcanza, se trunca
     a las CPUs lógicas disponibles en el sistema.
@@ -5853,7 +5853,7 @@ def _run_one(args, parser):
     # ════════════════════════════════════════════════════════════
     # ADC2 solo depende de 04_sp/ (energías + opt_opt.xyz de cada confórmero).
     # Se salta CREST, CENSO, OPT, NUMFREQ, TDDFT por completo — ni siquiera
-    # se verifica que existan — porque en el flujo real de Kmilo esos
+    # se verifica que existan — porque en el flujo real del usuario esos
     # archivos ya fueron borrados del disco (ADC2 requiere ~400GB libres,
     # así que respalda todo en un disco externo y limpia el compu antes de
     # correr esta etapa). Lo único indispensable es 04_sp/.
@@ -6677,8 +6677,8 @@ except ImportError:
 # Raíz del proyecto donde viven las carpetas de cada molécula, p.ej.:
 #   PROJECT_ROOT/MGLYVAL/runs/<state>/04_sp/conf_xxx/...
 # Se puede sobrescribir con --project-root; por defecto usa la ruta real
-# del sistema de kmilozeta.
-PROJECT_ROOT    = Path("~/PAPER1")
+# del sistema del usuario.
+PROJECT_ROOT    = Path.home() / "PAPER1"
 
 # WORK_ROOT se recalcula en main() a partir de --mol como
 #   PROJECT_ROOT / <MOL> / "runs"
@@ -6704,8 +6704,8 @@ PKA_GAS_SP_SUBDIR = "06_sp_gas"
 
 # ── Constantes Multiwfn / ESP de superficie ─────────────────────────────────
 # Ejecutables (rutas completas — mismo criterio que ORCA: nunca confiar en PATH)
-ORCA_2MKL_BIN   = "~/orca_6_1_1_avx2/orca_2mkl"
-MULTIWFN_BIN    = "~/multiwfn/Multiwfn_2026.6.2_bin_Linux/Multiwfn"
+ORCA_2MKL_BIN   = str(Path.home() / "orca_6_1_1_avx2/orca_2mkl")
+MULTIWFN_BIN    = str(Path.home() / "multiwfn/Multiwfn_2026.6.2_bin_Linux/Multiwfn")
 
 # Subcarpeta del pipeline donde vive la función de onda de cada confórmero
 # (el .gbw usado para el análisis ESP es el de la etapa TDDFT: runs/<mol>/05_tddft/conf_XXX/)
@@ -6723,7 +6723,7 @@ MULTIWFN_TIMEOUT  = 21600   # s — 6 h por confórmero (ESP puede demorar basta
 # Multiwfn respeta OMP_NUM_THREADS para paralelizar el análisis de superficie
 # ESP (mapeo de malla + búsqueda de extremos). Por defecto hereda el entorno
 # del proceso padre, que puede estar limitado a 2. Ajustar según núcleos
-# disponibles en la máquina (ver también compquim-kmilozeta: MKL/OpenBLAS a 1
+# disponibles en la máquina (ver también la configuración del entorno: MKL/OpenBLAS a 1
 # para evitar sobre-suscripción cuando Multiwfn ya reparte con OMP).
 MULTIWFN_NTHREADS = 8
 
@@ -8386,8 +8386,8 @@ def export_gv_appendix(df_gv: pd.DataFrame, mol_name: str, fmt: str):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ── Secuencia de menú Multiwfn para el análisis ESP ─────────────────────────
-# Verificar contra la versión instalada (2026.6.2 en este equipo, ver skill
-# compquim-kmilozeta) corriendo Multiwfn interactivamente una vez sobre un
+# Verificar contra la versión instalada (2026.6.2 en este equipo, ver la
+# documentación del entorno) corriendo Multiwfn interactivamente una vez sobre un
 # .molden.input de prueba. Si los números difieren, solo hay que tocar estas
 # constantes -- el resto del harness (batch único + timeout + verificación
 # por contenido) no depende de los valores exactos.
@@ -8589,7 +8589,7 @@ def run_multiwfn_esp_on_conf(conf_dir: Path) -> dict:
     # OMP_NUM_THREADS controla la paralelización interna de Multiwfn para el
     # análisis de superficie ESP. MKL/OpenBLAS se fijan a 1 para evitar
     # sobre-suscripción de núcleos (mismo criterio que el resto del pipeline
-    # de compquim-kmilozeta).
+    # del entorno de referencia).
     multiwfn_env = os.environ.copy()
     multiwfn_env["OMP_NUM_THREADS"] = str(MULTIWFN_NTHREADS)
     multiwfn_env["MKL_NUM_THREADS"] = "1"
@@ -14373,7 +14373,7 @@ help="Aplica la corrección empírica calibrada (ver "
 
     try:
         print("\n" + "═" * 74)
-        print("  PROTONATION CYCLE  —  FAE-MAA / kmilozeta")
+        print("  PROTONATION CYCLE  —  FAE-MAA")
         print("═" * 74)
         if args.mol:
             print(f"  molécula : {args.mol}")
@@ -15808,7 +15808,7 @@ def _cubes_arg_parser() -> argparse.ArgumentParser:
                          help="resolución de grilla para orca_plot (default: 80)")
     parser.add_argument(
         "--orca-plot",
-        default="~/orca_6_1_1_avx2/orca_plot",
+        default=str(Path.home() / "orca_6_1_1_avx2/orca_plot"),
         help="ruta al binario orca_plot",
     )
     parser.add_argument(

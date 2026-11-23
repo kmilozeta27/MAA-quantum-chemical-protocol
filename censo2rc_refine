@@ -1,0 +1,70 @@
+# Configuración CENSO 3.0.9 para maaqc.py --censo-refine (ORCA 6.1.1, sin TURBOMOLE).
+# P: B97-D3/def2-SV(P) + ALPB · S: r2SCAN-3c CPCM · O: r2SCAN-3c CPCM (ANCOPT) · R: wB97X-D3/def2-TZVP SMD.
+# A mano: censo -i ens.xyz -c <q> -u 0 -P -S -O -R --maxcores 12 --omp-min 4 --inprc censo2rc_refine
+# Validado con censo.config.setup.configure() (2026-11-19). NO reemplaza ~/.censo2rc.
+
+[general]
+temperature = 298.15
+evaluate_rrho = True
+# ALPB = mismo modelo que CREST; también es el Gsolv que usa prescreening (no hay "sm" en prescreening)
+sm_rrho = alpb
+imagthr = -100.0
+sthr = 50.0
+solvent = water
+gas_phase = False
+copy_mo = True
+balance = True
+# OJO: el CLI de CENSO pisa esto con --ignore-failed (store_true); maaqc --censo-refine lo pasa siempre
+ignore_failed = True
+
+[prescreening]
+# DFT en fase gas + Gsolv(ALPB, GFN2). Grid DEFGRID1 + LooseSCF (fijo en CENSO).
+prog = orca
+func = b97-d3
+basis = def2-SV(P)
+gfnv = gfn2
+# no bajar: en DG hubo conformeros a 3.5-3.9 kcal/mol aquí que terminaron < 2.5 en screening
+threshold = 4.0
+
+[screening]
+prog = orca
+func = r2scan-3c
+basis = def2-mTZVPP
+sm = cpcm
+gfnv = gfn2
+# + umbral difuso (hasta +1 kcal/mol según la dispersión de GmRRHO)
+threshold = 3.5
+# con ORCA, False corre SP gas + SP solvente y da el mismo Gtot (E_gas + (E_solv - E_gas)); True cuesta la mitad
+gsolv_included = True
+
+[optimization]
+# ANCOPT (xtb) como driver con gradientes r2SCAN-3c/CPCM; corta conformeros entre macrociclos
+prog = orca
+func = r2scan-3c
+basis = def2-mTZVPP
+sm = cpcm
+gfnv = gfn2
+optcycles = 8
+maxcyc = 200
+optlevel = normal
+threshold = 3.0
+gradthr = 0.01
+hlow = 0.01
+macrocycles = True
+constrain = False
+xtb_opt = True
+
+[refinement]
+# mismo funcional y solvente que el SP final de maaqc (wB97X-D3/def2-TZVPD SMD), base algo menor
+prog = orca
+func = wb97x-d3
+basis = def2-TZVP
+sm = smd
+gfnv = gfn2
+# población Boltzmann acumulada que se conserva
+threshold = 0.95
+gsolv_included = True
+
+[paths]
+orca = /path/to/orca_6_1_1_avx2/orca
+xtb = /path/to/miniforge3/envs/sciencebitch/bin/xtb

@@ -1,0 +1,441 @@
+{
+  "meta": {
+    "created": "2026-11-22T23:24:31",
+    "T": 298.15,
+    "method_requested": "direct",
+    "method_resolved": "direct",
+    "gcorr": [
+      "harmonic",
+      "goodvibes"
+    ],
+    "base": "calib",
+    "script": "maaqc.py calibrate",
+    "solvent_model": "SMD",
+    "note": "pKa exp. a 25 °C; ver exp_ref por punto; v4 (2026-11-22): pKa exp. de PKA_EXP (IUPAC Digitized pKa Dataset v2.4 Reliable, si no Williams/Evans); umbral de modos imaginarios 20 cm-1"
+  },
+  "points": [
+    {
+      "mol": "ASPARTIC",
+      "slot": "pKa0",
+      "type": "carboxyl",
+      "step": "A→R/D",
+      "group": "α-COOH",
+      "acid_files": "AA",
+      "base_files": "AR/AD",
+      "gcorr_source": "harmonic",
+      "method": "direct",
+      "pKa_calc": 3.106447710418578,
+      "pKa_exp": 1.99,
+      "error": 1.116447710418578,
+      "ok": true
+    },
+    {
+      "mol": "ASPARTIC",
+      "slot": "pKa0",
+      "type": "carboxyl",
+      "step": "A→R/D",
+      "group": "α-COOH",
+      "acid_files": "AA",
+      "base_files": "AR/AD",
+      "gcorr_source": "goodvibes",
+      "method": "direct",
+      "pKa_calc": 3.0151853494514906,
+      "pKa_exp": 1.99,
+      "error": 1.0251853494514906,
+      "ok": true
+    },
+    {
+      "mol": "ASPARTIC",
+      "slot": "pKa1",
+      "type": "carboxyl_2",
+      "step": "R/D→B",
+      "group": "β-COOH",
+      "acid_files": "AR/AD",
+      "base_files": "AB",
+      "gcorr_source": "harmonic",
+      "method": "direct",
+      "pKa_calc": 6.055472297702195,
+      "pKa_exp": 3.9,
+      "error": 2.1554722977021954,
+      "ok": true
+    },
+    {
+      "mol": "ASPARTIC",
+      "slot": "pKa1",
+      "type": "carboxyl_2",
+      "step": "R/D→B",
+      "group": "β-COOH",
+      "acid_files": "AR/AD",
+      "base_files": "AB",
+      "gcorr_source": "goodvibes",
+      "method": "direct",
+      "pKa_calc": 5.961851505461702,
+      "pKa_exp": 3.9,
+      "error": 2.061851505461702,
+      "ok": true
+    },
+    {
+      "mol": "GLUTAMIC",
+      "slot": "pKa0",
+      "type": "carboxyl",
+      "step": "A→R/D",
+      "group": "α-COOH",
+      "acid_files": "GA",
+      "base_files": "GR/GD",
+      "gcorr_source": "harmonic",
+      "method": "direct",
+      "pKa_calc": 3.5338695195981713,
+      "pKa_exp": 2.19,
+      "error": 1.3438695195981714,
+      "ok": true
+    },
+    {
+      "mol": "GLUTAMIC",
+      "slot": "pKa0",
+      "type": "carboxyl",
+      "step": "A→R/D",
+      "group": "α-COOH",
+      "acid_files": "GA",
+      "base_files": "GR/GD",
+      "gcorr_source": "goodvibes",
+      "method": "direct",
+      "pKa_calc": 3.697131352962261,
+      "pKa_exp": 2.19,
+      "error": 1.507131352962261,
+      "ok": true
+    },
+    {
+      "mol": "GLUTAMIC",
+      "slot": "pKa1",
+      "type": "carboxyl_2",
+      "step": "R/D→B",
+      "group": "γ-COOH",
+      "acid_files": "GR/GD",
+      "base_files": "GB",
+      "gcorr_source": "harmonic",
+      "method": "direct",
+      "pKa_calc": 5.910548578777507,
+      "pKa_exp": 4.25,
+      "error": 1.6605485787775072,
+      "ok": true
+    },
+    {
+      "mol": "GLUTAMIC",
+      "slot": "pKa1",
+      "type": "carboxyl_2",
+      "step": "R/D→B",
+      "group": "γ-COOH",
+      "acid_files": "GR/GD",
+      "base_files": "GB",
+      "gcorr_source": "goodvibes",
+      "method": "direct",
+      "pKa_calc": 5.653708318383184,
+      "pKa_exp": 4.25,
+      "error": 1.4037083183831838,
+      "ok": true
+    },
+    {
+      "mol": "GLUTAMIC",
+      "slot": "pKa2",
+      "type": "amino_dianion",
+      "step": "B→C",
+      "group": "NH₃⁺ (2×COO⁻)",
+      "acid_files": "GB",
+      "base_files": "GC",
+      "gcorr_source": "harmonic",
+      "method": "direct",
+      "pKa_calc": 15.639799526754512,
+      "pKa_exp": 9.67,
+      "error": 5.969799526754512,
+      "ok": true
+    },
+    {
+      "mol": "GLUTAMIC",
+      "slot": "pKa2",
+      "type": "amino_dianion",
+      "step": "B→C",
+      "group": "NH₃⁺ (2×COO⁻)",
+      "acid_files": "GB",
+      "base_files": "GC",
+      "gcorr_source": "goodvibes",
+      "method": "direct",
+      "pKa_calc": 15.679167085198713,
+      "pKa_exp": 9.67,
+      "error": 6.009167085198714,
+      "ok": true
+    },
+    {
+      "mol": "GLYCINE",
+      "slot": "pKa0",
+      "type": "carboxyl",
+      "step": "A→R/D",
+      "group": "COOH",
+      "acid_files": "GA",
+      "base_files": "GR/GD",
+      "gcorr_source": "harmonic",
+      "method": "direct",
+      "pKa_calc": 3.778862775649098,
+      "pKa_exp": 2.35,
+      "error": 1.428862775649098,
+      "ok": true
+    },
+    {
+      "mol": "GLYCINE",
+      "slot": "pKa0",
+      "type": "carboxyl",
+      "step": "A→R/D",
+      "group": "COOH",
+      "acid_files": "GA",
+      "base_files": "GR/GD",
+      "gcorr_source": "goodvibes",
+      "method": "direct",
+      "pKa_calc": 3.7595473520941685,
+      "pKa_exp": 2.35,
+      "error": 1.4095473520941684,
+      "ok": true
+    },
+    {
+      "mol": "GLYCINE",
+      "slot": "pKa1",
+      "type": "amino",
+      "step": "R/D→B",
+      "group": "NH₃⁺",
+      "acid_files": "GR/GD",
+      "base_files": "GB",
+      "gcorr_source": "harmonic",
+      "method": "direct",
+      "pKa_calc": 11.631449886753003,
+      "pKa_exp": 9.78,
+      "error": 1.851449886753004,
+      "ok": true
+    },
+    {
+      "mol": "GLYCINE",
+      "slot": "pKa1",
+      "type": "amino",
+      "step": "R/D→B",
+      "group": "NH₃⁺",
+      "acid_files": "GR/GD",
+      "base_files": "GB",
+      "gcorr_source": "goodvibes",
+      "method": "direct",
+      "pKa_calc": 11.590049577451515,
+      "pKa_exp": 9.78,
+      "error": 1.8100495774515153,
+      "ok": true
+    },
+    {
+      "mol": "VALINE",
+      "slot": "pKa0",
+      "type": "carboxyl",
+      "step": "A→R/D",
+      "group": "COOH",
+      "acid_files": "VA",
+      "base_files": "VR/VD",
+      "gcorr_source": "harmonic",
+      "method": "direct",
+      "pKa_calc": 3.520372823866681,
+      "pKa_exp": 2.29,
+      "error": 1.2303728238666811,
+      "ok": true
+    },
+    {
+      "mol": "VALINE",
+      "slot": "pKa0",
+      "type": "carboxyl",
+      "step": "A→R/D",
+      "group": "COOH",
+      "acid_files": "VA",
+      "base_files": "VR/VD",
+      "gcorr_source": "goodvibes",
+      "method": "direct",
+      "pKa_calc": 3.518594543302289,
+      "pKa_exp": 2.29,
+      "error": 1.2285945433022891,
+      "ok": true
+    },
+    {
+      "mol": "VALINE",
+      "slot": "pKa1",
+      "type": "amino",
+      "step": "R/D→B",
+      "group": "NH₃⁺",
+      "acid_files": "VR/VD",
+      "base_files": "VB",
+      "gcorr_source": "harmonic",
+      "method": "direct",
+      "pKa_calc": 12.793123742628813,
+      "pKa_exp": 9.72,
+      "error": 3.0731237426288125,
+      "ok": true
+    },
+    {
+      "mol": "VALINE",
+      "slot": "pKa1",
+      "type": "amino",
+      "step": "R/D→B",
+      "group": "NH₃⁺",
+      "acid_files": "VR/VD",
+      "base_files": "VB",
+      "gcorr_source": "goodvibes",
+      "method": "direct",
+      "pKa_calc": 12.866788012552563,
+      "pKa_exp": 9.72,
+      "error": 3.1467880125525625,
+      "ok": true
+    },
+    {
+      "mol": "AP",
+      "slot": "pair",
+      "type": "pyridinium",
+      "step": "APA→APR",
+      "group": "N–H⁺ (4-aminopiridinio)",
+      "acid_files": "APA",
+      "base_files": "APR",
+      "gcorr_source": "harmonic",
+      "method": "direct",
+      "pKa_calc": 10.746718611784651,
+      "pKa_exp": 9.11,
+      "error": 1.6367186117846515,
+      "ok": true
+    },
+    {
+      "mol": "AP",
+      "slot": "pair",
+      "type": "pyridinium",
+      "step": "APA→APR",
+      "group": "N–H⁺ (4-aminopiridinio)",
+      "acid_files": "APA",
+      "base_files": "APR",
+      "gcorr_source": "goodvibes",
+      "method": "direct",
+      "pKa_calc": 10.745338708768772,
+      "pKa_exp": 9.11,
+      "error": 1.6353387087687725,
+      "ok": true
+    }
+  ],
+  "EMPIRICAL_CALIBRATION": {
+    "carboxyl": [
+      {
+        "mol": "Glycine",
+        "calc_harmonic": 3.779,
+        "calc_goodvibes": 3.76,
+        "exp": 2.35,
+        "exp_ref": "IUPAC Digitized pKa Dataset v2.4 (Reliable, 25 °C); Glu: Williams/Evans pKa compilation (ACS Org. Div., 4/2022)"
+      },
+      {
+        "mol": "Valine",
+        "calc_harmonic": 3.52,
+        "calc_goodvibes": 3.519,
+        "exp": 2.29,
+        "exp_ref": "IUPAC Digitized pKa Dataset v2.4 (Reliable, 25 °C); Glu: Williams/Evans pKa compilation (ACS Org. Div., 4/2022)"
+      },
+      {
+        "mol": "Aspartic",
+        "calc_harmonic": 3.106,
+        "calc_goodvibes": 3.015,
+        "exp": 1.99,
+        "exp_ref": "IUPAC Digitized pKa Dataset v2.4 (Reliable, 25 °C); Glu: Williams/Evans pKa compilation (ACS Org. Div., 4/2022) (α-COOH)"
+      },
+      {
+        "mol": "Glutamic",
+        "calc_harmonic": 3.534,
+        "calc_goodvibes": 3.697,
+        "exp": 2.19,
+        "exp_ref": "IUPAC Digitized pKa Dataset v2.4 (Reliable, 25 °C); Glu: Williams/Evans pKa compilation (ACS Org. Div., 4/2022) (α-COOH)"
+      }
+    ],
+    "carboxyl_2": [
+      {
+        "mol": "Aspartic",
+        "calc_harmonic": 6.055,
+        "calc_goodvibes": 5.962,
+        "exp": 3.9,
+        "exp_ref": "IUPAC Digitized pKa Dataset v2.4 (Reliable, 25 °C); Glu: Williams/Evans pKa compilation (ACS Org. Div., 4/2022) (β-COOH)"
+      },
+      {
+        "mol": "Glutamic",
+        "calc_harmonic": 5.911,
+        "calc_goodvibes": 5.654,
+        "exp": 4.25,
+        "exp_ref": "IUPAC Digitized pKa Dataset v2.4 (Reliable, 25 °C); Glu: Williams/Evans pKa compilation (ACS Org. Div., 4/2022) (γ-COOH)"
+      }
+    ],
+    "amino": [
+      {
+        "mol": "Glycine",
+        "calc_harmonic": 11.631,
+        "calc_goodvibes": 11.59,
+        "exp": 9.78,
+        "exp_ref": "IUPAC Digitized pKa Dataset v2.4 (Reliable, 25 °C); Glu: Williams/Evans pKa compilation (ACS Org. Div., 4/2022)"
+      },
+      {
+        "mol": "Valine",
+        "calc_harmonic": 12.793,
+        "calc_goodvibes": 12.867,
+        "exp": 9.72,
+        "exp_ref": "IUPAC Digitized pKa Dataset v2.4 (Reliable, 25 °C); Glu: Williams/Evans pKa compilation (ACS Org. Div., 4/2022)"
+      }
+    ],
+    "amino_dianion": [
+      {
+        "mol": "Glutamic",
+        "calc_harmonic": 15.64,
+        "calc_goodvibes": 15.679,
+        "exp": 9.67,
+        "exp_ref": "IUPAC Digitized pKa Dataset v2.4 (Reliable, 25 °C); Glu: Williams/Evans pKa compilation (ACS Org. Div., 4/2022) (α-NH₃⁺ de Glu)"
+      }
+    ],
+    "pyridinium": [
+      {
+        "mol": "AP",
+        "calc_harmonic": 10.747,
+        "calc_goodvibes": 10.745,
+        "exp": 9.11,
+        "exp_ref": "4-aminopiridina, 9.11 a 25 °C (IUPAC Digitized pKa Dataset v2.4, B29 Reliable)"
+      }
+    ],
+    "ammonium_dianion": [
+      {
+        "mol": "IDA",
+        "calc_harmonic": null,
+        "calc_goodvibes": null,
+        "exp": 9.89,
+        "exp_ref": "Williams/Evans pKa compilation (ACS Org. Div., 4/2022)"
+      },
+      {
+        "mol": "MeIDA",
+        "calc_harmonic": null,
+        "calc_goodvibes": null,
+        "exp": 10.18,
+        "exp_ref": "Williams/Evans pKa compilation (ACS Org. Div., 4/2022)"
+      }
+    ],
+    "amidinium": [
+      {
+        "mol": "Benzamidine",
+        "calc_harmonic": null,
+        "calc_goodvibes": null,
+        "exp": 11.6,
+        "exp_ref": "Williams/Evans pKa compilation (ACS Org. Div., 4/2022)"
+      },
+      {
+        "mol": "Acetamidine",
+        "calc_harmonic": null,
+        "calc_goodvibes": null,
+        "exp": 12.52,
+        "exp_ref": "Williams/Evans pKa compilation (ACS Org. Div., 4/2022)"
+      }
+    ],
+    "ammonium": [
+      {
+        "mol": "Tris",
+        "calc_harmonic": null,
+        "calc_goodvibes": null,
+        "exp": 8.1,
+        "exp_ref": "Williams/Evans pKa compilation (ACS Org. Div., 4/2022)"
+      }
+    ]
+  }
+}
