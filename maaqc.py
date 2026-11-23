@@ -15311,6 +15311,21 @@ def print_distribution_table(
     print(sep)
 
 
+def _add_extra_micro_cols(df: pd.DataFrame, taut_result: dict) -> pd.DataFrame:
+    """Con macroestado de N microestados, añade a df (boltzmann_5state) la columna
+    f_<mol_name> = f_neutral_macro·f_micro de cada microestado distinto de R y D, y
+    guarda [(columna, etiqueta)] en df.attrs["extra_micro"]. Sin micro no hace nada."""
+    micro = taut_result.get("micro")
+    if not micro or not micro.get("ok"):
+        return df
+    extras = [(f"f_{lbl}", lbl) for lbl in micro["labels"]
+              if lbl not in (taut_result["mol_R"], taut_result["mol_D"])]
+    for col, lbl in extras:
+        df[col] = df["f_neutral_macro"] * taut_result["f_micro"][lbl]
+    df.attrs["extra_micro"] = extras
+    return df
+
+
 def print_distribution_table_5(
     df_dist: pd.DataFrame,
     pKa0: Optional[float],
@@ -15337,6 +15352,9 @@ def print_distribution_table_5(
     if has_cation:  labels.append(f"{'f(A⁺)':>9}")
     labels.append(f"{'f(R)':>9}")
     labels.append(f"{'f(D)':>9}")
+    extras = df_dist.attrs.get("extra_micro", [])
+    for _c, _l in extras:
+        labels.append(f"{'f(' + _l + ')':>9}")
     if has_anion:   labels.append(f"{'f(B⁻)':>9}")
     if has_dianion: labels.append(f"{'f(C²⁻)':>9}")
     labels.append("Dominante")
@@ -15352,6 +15370,9 @@ def print_distribution_table_5(
             vals.append(f"{row.get('f_cation', 0.0):9.4f}")
         vals.append(f"{row.get('f_R', 0.0):9.4f}")
         vals.append(f"{row.get('f_D', 0.0):9.4f}")
+        for _c, _l in extras:
+            fracs[_l] = row.get(_c, 0.0)
+            vals.append(f"{row.get(_c, 0.0):9.4f}")
         if has_anion:
             fracs["B⁻"] = row.get("f_anion", 0.0)
             vals.append(f"{row.get('f_anion', 0.0):9.4f}")
@@ -15363,7 +15384,10 @@ def print_distribution_table_5(
         print(f"  {'  '.join(vals)}  {dominant}{marker}")
 
     print("\n  Nota: f(R) y f(D) son las fracciones DENTRO del macroestado neutro")
-    print("  (equilibrio de tautómeros, independiente del pH); f(R)+f(D) = f(neutro/zwitterión total).")
+    if extras:
+        print("  (N microestados, independiente del pH); Σ f(microestados) = f(macroestado neutro).")
+    else:
+        print("  (equilibrio de tautómeros, independiente del pH); f(R)+f(D) = f(neutro/zwitterión total).")
     if pKa0 is not None and pKa1 is not None:
         pH_PI = (pKa0 + pKa1) / 2
         print(f"\n  pI aproximado ≈ (pKa₀ + pKa₁)/2 = {pH_PI:.2f}")
@@ -15511,6 +15535,8 @@ def plot_distribution_5(
         series.append(("f_cation", "A⁺ catión (q=+1)", "#9C27B0", "-"))
     series.append(("f_R", "R neutro (q=0)",       "#2196F3", "-"))
     series.append(("f_D", "D zwitterión (q=0)",   "#00BCD4", "--"))
+    for _i, (_c, _l) in enumerate(df_dist.attrs.get("extra_micro", [])):
+        series.append((_c, f"{_l} (q=0)", ["#FF9800", "#795548", "#607D8B"][_i % 3], ":"))
     if "f_anion" in df_dist.columns:
         series.append(("f_anion", "B⁻ anión (q=−1)",   "#4CAF50", "-"))
     if "f_dianion" in df_dist.columns:
@@ -15772,6 +15798,12 @@ def export_results(
             "f_D":           taut_result.get("f_D"),
             "G_macro_Eh":    taut_result.get("G_macro_Eh"),
         }])
+        if taut_result.get("f_micro"):
+            # N microestados: K_taut y dG_taut son del PAR R↔D; f_<mol> = fracción en el macroestado de N
+            df_taut = df_taut.rename(columns={"K_taut": "K_taut_par_RD",
+                                              "dG_taut_kcal": "dG_taut_par_RD_kcal"})
+            for _k, _v in taut_result["f_micro"].items():
+                df_taut[f"f_micro_{_k}"] = _v
 
     # ── DataFrame de distribución conformacional ─────────────────────────
     conf_rows = []
@@ -16573,6 +16605,10 @@ def _build_neutral_macrostate(data_R: dict, data_D: dict, neutral: str,
             taut_result["G_macro_Eh"] = micro_res["G_macro_Eh"]
             taut_result["micro"] = micro_res
             taut_result["f_micro"] = micro_res["fractions"]
+            # con N microestados f_R/f_D = fracciones de R y D DENTRO del macroestado de N
+            taut_result["f_R"] = micro_res["fractions"][data_R["mol_name"]]
+            taut_result["f_D"] = micro_res["fractions"].get(data_D["mol_name"], 0.0) \
+                if taut_result["conf_D"] is not None else 0.0
             print("\n  Fracciones en el macroestado de N microestados (con degeneración): "
                   + ", ".join(f"{k}={v*100:.2f}%" for k, v in micro_res["fractions"].items()))
         else:
@@ -16831,12 +16867,13 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
     pH_all = sorted(set(list(pH_range) + pH_highlights))
     pH_all = [p for p in pH_all if args.ph_range[0] <= p <= args.ph_range[1]]
 
-    df_dist = boltzmann_5state(pKa0, pKa1, pKa2, f_R, f_D, pH_all)
+    df_dist = _add_extra_micro_cols(boltzmann_5state(pKa0, pKa1, pKa2, f_R, f_D, pH_all), taut_result)
 
     pH_display = np.arange(args.ph_range[0], args.ph_range[1] + 0.5, 0.5)
     pH_display_list = sorted(set([round(p, 1) for p in pH_display] + pH_highlights))
     pH_display_list = [p for p in pH_display_list if args.ph_range[0] <= p <= args.ph_range[1]]
-    df_display = boltzmann_5state(pKa0, pKa1, pKa2, f_R, f_D, pH_display_list)
+    df_display = _add_extra_micro_cols(
+        boltzmann_5state(pKa0, pKa1, pKa2, f_R, f_D, pH_display_list), taut_result)
     print_distribution_table_5(df_display, pKa0, pKa1, pKa2, ph_highlight=args.ph)
 
     print("\n  ── Fracciones a pH de referencia ──")
@@ -16844,13 +16881,16 @@ def _run_extended(args, gcorr_source: str = "harmonic"):
         (args.ph,     f"pH {args.ph} (agua de mar antártica)"),
         (PH_STANDARD, f"pH {PH_STANDARD} (estándar)"),
     ]:
-        row = boltzmann_5state(pKa0, pKa1, pKa2, f_R, f_D, [pH_ref])
+        row = _add_extra_micro_cols(
+            boltzmann_5state(pKa0, pKa1, pKa2, f_R, f_D, [pH_ref]), taut_result)
         if not row.empty:
             r0 = row.iloc[0]
             parts = []
             if "f_cation" in row: parts.append(f"f(A⁺)={r0['f_cation']*100:.1f}%")
             parts.append(f"f(R)={r0['f_R']*100:.1f}%")
             parts.append(f"f(D)={r0['f_D']*100:.1f}%")
+            for _c, _l in row.attrs.get("extra_micro", []):
+                parts.append(f"f({_l})={r0[_c]*100:.1f}%")
             if "f_anion" in row: parts.append(f"f(B⁻)={r0['f_anion']*100:.1f}%")
             if "f_dianion" in row: parts.append(f"f(C²⁻)={r0['f_dianion']*100:.1f}%")
             print(f"    {label}: {', '.join(parts)}")

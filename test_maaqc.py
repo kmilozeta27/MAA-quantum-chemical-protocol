@@ -791,7 +791,13 @@ def test_macrostate_n_micro_degeneracy(tmp_path):
         extra_micro=[_micro("Dp", G0)], degeneracy={"Dp": 2})
     assert macro["G_total_direct_Eh"] == pytest.approx(G0 - kT * math.log(4.0))
     assert macro["mol_name"] == "R/D/Dp"
-    assert taut["f_R"] == pytest.approx(0.5)      # f_R/f_D siguen siendo los del par R/D
+    # con N microestados, f_R/f_D son las fracciones DENTRO del macroestado de N (g=1,1,2)
+    assert taut["f_R"] == pytest.approx(0.25) and taut["f_D"] == pytest.approx(0.25)
+    assert taut["f_micro"]["Dp"] == pytest.approx(0.5)
+    # sin extras ni degeneración: f_R+f_D = 1 como antes y sin f_micro
+    taut2, _ = m._build_neutral_macrostate(
+        _micro("R", G0), _micro("D", G0), "R", "D", T, verbose=False)
+    assert taut2["f_R"] + taut2["f_D"] == pytest.approx(1.0) and "f_micro" not in taut2
 
 
 def test_mc_calibrated_no_hplus(monkeypatch):
@@ -1061,3 +1067,28 @@ def test_cli_extra_micro_degeneracy_flags(capsys):
     for bad in (["GD"], ["GD=x"], ["GD=0"], ["GD=-1"], ["ZZ=2"]):
         with pytest.raises(SystemExit):
             m._parse_degeneracy(bad, members)
+
+
+def test_speciation_with_extra_micro(capsys):
+    T = m.T_STD
+    G0 = -100.0
+    taut, _ = m._build_neutral_macrostate(
+        _micro("R", G0), _micro("D", G0), "R", "D", T, verbose=False,
+        extra_micro=[_micro("Dp", G0)], degeneracy={"Dp": 2})
+    df = m.boltzmann_5state(3.0, 9.0, 12.0, taut["f_R"], taut["f_D"], [2.0, 6.0, 10.0])
+    assert (df["f_R"] + df["f_D"] < df["f_neutral_macro"] - 1e-9).all()    # falta Dp
+    m._add_extra_micro_cols(df, taut)
+    cols = [c for c in df.columns if c.startswith("f_") and c != "f_neutral_macro"]
+    assert "f_Dp" in cols
+    assert df[cols].sum(axis=1).to_numpy() == pytest.approx(1.0)
+    m.print_distribution_table_5(df, 3.0, 9.0, 12.0)
+    out = capsys.readouterr().out
+    assert "f(Dp)" in out and "Σ f(microestados) = f(macroestado neutro)" in out
+    # sin micro: df idéntico y nota histórica
+    taut0, _ = m._build_neutral_macrostate(_micro("R", G0), _micro("D", G0), "R", "D", T, verbose=False)
+    df0 = m.boltzmann_5state(3.0, 9.0, 12.0, taut0["f_R"], taut0["f_D"], [6.0])
+    cols0 = list(df0.columns)
+    m._add_extra_micro_cols(df0, taut0)
+    assert list(df0.columns) == cols0
+    m.print_distribution_table_5(df0, 3.0, 9.0, 12.0)
+    assert "f(R)+f(D) = f(neutro/zwitterión total)" in capsys.readouterr().out
