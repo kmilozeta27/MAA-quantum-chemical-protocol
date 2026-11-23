@@ -12044,7 +12044,7 @@ def _parse_empirical_correction_spec(spec: Optional[str]) -> dict[str, str]:
     return out
 
 
-DEFAULT_CALIBRATION_FILE = Path("calibration") / "calibration_v3.json"
+DEFAULT_CALIBRATION_FILE = Path("calibration") / "calibration_v4.json"
 
 
 def resolve_calibration_source(calibration_file: Optional[str],
@@ -12056,7 +12056,7 @@ def resolve_calibration_source(calibration_file: Optional[str],
     P0-5: la tabla EMPIRICAL_CALIBRATION embebida es OBSOLETA (constantes
     G(H⁺,aq) antiguas, born/CPCM). Con --empirical-correction se exige un
     calibration.json: el indicado con --calibration-file o, si no hay,
-    calibration/calibration_v3.json (en cwd o junto a maaqc.py). Si no existe
+    calibration/calibration_v4.json (en cwd o junto a maaqc.py). Si no existe
     ninguno → SystemExit con mensaje claro, salvo --allow-builtin-calibration.
     Sin --empirical-correction no se necesita nada (devuelve el archivo
     explícito, si lo hay).
@@ -16110,7 +16110,7 @@ help="Aplica la corrección empírica calibrada (ver "
                         help="Permite --empirical-correction con la tabla "
                              "EMPIRICAL_CALIBRATION embebida (OBSOLETA) cuando no "
                              "hay --calibration-file ni calibration/"
-                             "calibration_v3.json. No recomendado.")
+                             "calibration_v4.json. No recomendado.")
     parser.add_argument("--force-charge-class", action="store_true",
                         help="Aplica el tipo de --empirical-correction aunque la "
                              "clase de carga (q_ácido→q_base) del tramo no "

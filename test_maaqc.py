@@ -473,11 +473,11 @@ def test_empirical_correction_requires_calibration_file(tmp_path):
     # escape explícito
     assert m.resolve_calibration_source(None, "pKa0=carboxyl", allow_builtin=True,
                                         search_roots=[tmp_path]) is None
-    # calibration_v3.json por defecto, si existe
+    # calibration_v4.json por defecto, si existe
     (tmp_path / "calibration").mkdir()
-    (tmp_path / "calibration" / "calibration_v3.json").write_text("{}")
+    (tmp_path / "calibration" / "calibration_v4.json").write_text("{}")
     got = m.resolve_calibration_source(None, "pKa0=carboxyl", search_roots=[tmp_path])
-    assert got == tmp_path / "calibration" / "calibration_v3.json"
+    assert got == tmp_path / "calibration" / "calibration_v4.json"
 
 
 def test_refuses_cross_class_without_force(monkeypatch):
