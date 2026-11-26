@@ -21,52 +21,57 @@ structures.
 Red algae living under intense sunlight (including in Antarctica) produce small molecules
 called MAAs, which absorb ultraviolet radiation and dissipate it as heat, and therefore act as
 natural sunscreens. Recent studies have also proposed them as drug candidates. These studies
-used computer simulations (molecular docking) to test whether MAAs bind human proteins such as
-the ACE2 receptor used by SARS-CoV-2.
+used computer simulations (molecular docking) to predict whether MAAs bind human proteins such
+as the ACE2 receptor used by SARS-CoV-2.
 
-The docking studies took the molecular geometry from a public database drawing. This leaves two
-questions open:
+The docking studies we reviewed took the ligand geometry from a public database record. This
+leaves two questions open:
 
 1. Which shape does the molecule adopt in water? A flexible molecule has many possible 3D
    shapes (conformers), and the database drawing is only one of them.
 2. Where are its protons? MAAs have several acidic and basic groups, and at body pH some of
    them lose or gain a proton, which changes the molecule's electric charge. The charge largely
-   determines how a molecule binds to a protein. Published UV titrations show which
-   protonation state absorbs at physiological pH; this project uses that chemical and
-   experimental evidence to assign the predominant species, checked against tautomers of the
-   same charge, rather than deriving it from a calibrated computation.
+   determines how a molecule binds to a protein. Published UV–pH titrations locate the
+   spectral transitions of these groups; this project uses that experimental evidence, together
+   with the chemistry of the ionizable groups, to assign the predominant species at pH 7. The
+   assignment is checked against tautomers of the same charge; it is not derived from a
+   calibrated pKa computation.
 
-This project implements a reproducible pipeline that builds a Boltzmann-weighted conformational
-ensemble of the assigned species from first principles (quantum mechanics) and computes the
-electronic properties that other researchers need as docking inputs: the UV absorption
-spectrum, natural transition orbitals, frontier orbitals and the electrostatic surface. The
-central, still-pending analysis compares the resulting structures and descriptors against
+This project implements a reproducible quantum-chemical pipeline. For each assigned species it
+builds a Boltzmann-weighted conformational ensemble in implicit water. It then produces two kinds
+of output:
+
+- *docking inputs:* the ensemble geometries and the electrostatic potential surface;
+- *electronic characterisation:* the UV absorption spectrum, natural transition orbitals and
+  frontier orbitals.
+
+The central analysis, not yet run, compares these structures and descriptors against
 structures built the way the published docking studies built theirs. The pipeline covers nine
-MAAs and their biosynthetic precursor 4-deoxygadusol spanning the family's reported absorption
-range; the manuscript focuses on three of them — mycosporine-glycine:valine, shinorine and
-4-deoxygadusol — at three temperatures (274.15 K, the Antarctic surface ocean; 298.15 K;
-310 K, human body). It was designed to run on a single laptop.
+MAAs and their biosynthetic precursor 4-deoxygadusol, spanning the family's reported absorption
+range. The manuscript focuses on three of them (mycosporine-glycine:valine, shinorine and
+4-deoxygadusol) at three temperatures: 274.15 K (approximately the Antarctic surface ocean),
+298.15 K and 310 K (human body). The pipeline was designed to run on a single laptop.
 
 The pipeline also implements a continuum thermodynamic pKa cycle with class-resolved
-calibration. Because computed pKa values from continuum solvent models carry a general
-uncertainty of several units (Ho & Coote, 2010; Ho, 2015), this cycle is not the route used to
-assign the predominant species; it is kept as an exploratory, non-primary analysis (see
-Methodological findings below).
+calibration. Continuum-solvent pKa calculations typically carry errors of two to three units
+(Ho & Coote, 2010; Ho, 2015). This cycle is therefore not used to assign the predominant
+species; it is kept as an exploratory, non-primary analysis (see Methodological findings
+below).
 
 ## Comparison with previous approaches
 
 | Previous work | This protocol |
 |---|---|
 | 2D database record → 3D by a file converter or force field | Systematic conformational search (CREST metadynamics) followed by DFT optimisation |
-| One structure per molecule | A Boltzmann-weighted ensemble of conformers, verified as true minima by vibrational frequencies |
-| Protonation state assumed or taken from the database | Predominant state assigned from the chemistry of the ionizable groups and published UV titrations, checked against same-charge tautomers |
-| Ligand geometry taken directly from the database record | Boltzmann-weighted DFT ensemble, compared against a structure built and minimised the way the docking studies built theirs (planned central analysis) |
-| Single temperature | 274.15 K (Antarctic surface ocean), 298.15 K (standard), 310 K (human body) |
+| One structure per molecule | A Boltzmann-weighted ensemble of conformers, verified as true minima by vibrational frequencies; to be compared against a structure built the way the docking studies built theirs (planned) |
+| Protonation state assumed or taken from the database | Predominant state assigned from the chemistry of the ionizable groups and published UV–pH titrations, checked against same-charge tautomers |
+| Single temperature | 274.15 K (approx. Antarctic surface ocean), 298.15 K (standard), 310 K (human body) |
 
 To our knowledge, no previous computational study of MAAs has applied systematic
 conformational sampling before DFT optimisation, or reported ground-state electronic
-descriptors from protocol-validated, solution-phase geometries in a form the docking community
-could adopt directly.
+descriptors from solution-phase DFT ensembles in a form the docking community could adopt
+directly. Whether these ensembles change docking outcomes is the question of the planned
+comparison and is not yet established.
 
 ## Computational workflow
 
@@ -91,7 +96,7 @@ flowchart TD
 | 2. Ensemble refinement | Pre-screening B97-D3 + ALPB; screening and optimization r²SCAN-3c/CPCM; refinement ωB97X-D3/def2-TZVP/SMD; Boltzmann selection (5 %, min. 3 conformers) from r²SCAN-3c geometries | CENSO 3.0.9 |
 | 3. Geometry optimisation | ωB97X-D3/def2-SVP, CPCM(water), RIJCOSX, TightOpt | ORCA 6.1.1 |
 | 4. Frequency verification | Numerical frequencies; harmonic and quasi-harmonic (Grimme, 100 cm⁻¹) free energies | ORCA, GoodVibes |
-| 5. Single-point energies | ωB97X-D3/def2-TZVPD, CPCM(water) | ORCA |
+| 5. Single-point energies | ωB97X-D3/def2-TZVPD, CPCM(water); SMD(water) and gas-phase single points for the pKa cycle | ORCA |
 | 6. Excited states | Full linear-response TD-DFT (no TDA), 15 roots, natural transition orbitals, CD | ORCA, orca_plot |
 | 7. Surface analysis | Electrostatic potential on the 0.001 a.u. isodensity surface | Multiwfn |
 | Optional: same-charge tautomer check | Relative free energy between tautomers of equal charge and atom count, no proton reference constant | `maaqc.py pka` |
@@ -104,35 +109,36 @@ The full methods (equations, keyword lines, calibration rules and uncertainty mo
 ## Methodological findings to date
 
 The predominant protonation state of each MAA is assigned from the chemistry of its ionizable
-groups and from published UV titrations (see Compound set below), not from the pKa cycle. That
-cycle is kept in the pipeline as an exploratory, non-primary check, because computed pKa values
-from continuum solvent models carry a general uncertainty of two to three units (Ho & Coote,
-2010; Ho, 2015). Two methodological findings from building and testing it are already
-established; the quantitative results on the MAAs themselves (absorption maxima, electronic
-descriptors, comparison with database-derived structures) are still being produced and are
-therefore not quoted here.
+groups and from published UV–pH titrations (see Compound set below), not from the pKa cycle.
+Building and testing that exploratory cycle produced one methodological finding and one
+implementation lesson, both described below. The quantitative results on the MAAs themselves
+(absorption maxima, electronic descriptors, comparison with database-derived structures) are
+still being produced and are therefore not quoted here.
 
 ### A single global pKa correction is inadequate across transition types
 
 The cycle was tested against aspartic acid, glutamic acid, glycine, valine and
-4-aminopyridine, grouped by type of deprotonation. The same cycle at the same level of theory
-reproduces first-carboxyl deprotonations closely, but for an ammonium group flanked by two
-carboxylates (glutamic acid, −1 → −2) it overshoots by several pKa units. A single global
-correction would average these two cases and be wrong for both, so the exploratory cycle
-calibrates per transition class rather than applying one correction across charge classes.
+4-aminopyridine, grouped by type of deprotonation. With the primary protocol (SMD, direct
+cycle, quasi-harmonic corrections), the raw error is +1.0 to +1.5 pKa units for first-carboxyl
+deprotonations (four calibrators). For an ammonium group flanked by two carboxylates (glutamic
+acid, −1 → −2) it is about +6 units. A single global correction would be wrong for both
+classes, so the exploratory cycle calibrates per transition class and refuses to transfer a
+correction across charge classes. The dianion class rests on a single calibrator, so its
+correction has no error estimate (see [docs/METHODS.md](docs/METHODS.md), §6).
 
-### The proton constant in some published implementations shifts every pKa by about +4.2 units
+### Implementation lesson: assembling the proton free energy
 
-Some implementations of the continuum pKa cycle use −264.61 kcal/mol as the total free energy
-of the proton in water. That value is a solvation free energy only: it omits the gas-phase term
-and the standard-state correction. Assembling the constant from its three physical components
-(−270.29 kcal/mol) removes this systematic error. With the corrected constant, two equivalent
-formulations of the cycle become algebraically identical, which the pipeline uses as an
-implementation check.
+The total aqueous free energy of the proton must include the gas-phase free energy and the
+standard-state correction as well as the solvation free energy (−6.28 + 1.89 − 265.9 =
+−270.29 kcal/mol at 298.15 K). An early round of this project used −264.61 kcal/mol, a
+solvation-only value, as the total; this shifted every computed pKa by about +4.2 units. Once
+the proton reference is assembled consistently, the Born cycle and the direct continuum route
+are algebraically identical, so their agreement is reported as an implementation check, not
+as independent validation.
 
 ## Implementation
 
-`maaqc.py` is a single 16,000-line Python program with six subcommands:
+`maaqc.py` is a single Python program (about 16,400 lines) with six subcommands:
 
 ```text
 maaqc.py run        computation stages (CREST → CENSO → OPT → FREQ → SP → TDDFT)
@@ -143,10 +149,7 @@ maaqc.py calibrate  class-resolved calibration against reference compounds
 maaqc.py cubes      HOMO/LUMO and natural-transition-orbital cube extraction
 ```
 
-`pka` and `calibrate` implement a full, class-resolved, calibrated protonation-state cycle. In
-the manuscript this cycle is kept as an exploratory, non-primary analysis (see Methodological
-findings above): the predominant protonation state of each MAA is assigned from chemistry and
-published UV titrations, not computed from this cycle.
+`pka` and `calibrate` implement the exploratory, class-resolved pKa cycle described above.
 
 The following design decisions allow a multi-week computational campaign to run on one machine.
 
@@ -173,11 +176,9 @@ Hardware used for every calculation: a single laptop with 32 GB RAM.
 
 ## Compound set
 
-The pipeline covers nine MAAs and their biosynthetic precursor 4-deoxygadusol, spanning the
-family's reported absorption range. The manuscript focuses on three of
-them — mycosporine-glycine:valine, shinorine and 4-deoxygadusol — whose protonation states,
-conformational ensembles and spectroscopic analysis are most advanced; the remaining compounds
-situate this subset within the family.
+The manuscript focuses on mycosporine-glycine:valine, shinorine and 4-deoxygadusol, whose
+protonation states, conformational ensembles and spectroscopic analysis are most advanced. The
+remaining compounds place this subset within the family.
 
 | Compound | Chromophore | N-substituents | Reported λmax (nm)* |
 |---|---|---|---|
@@ -263,18 +264,22 @@ English.
 ## Limitations
 
 - *Implicit solvent.* A dielectric continuum cannot represent hydrogen bonds to first-shell
-  water. The several-pKa-unit error of the exploratory cycle described above is one measurable
-  consequence.
-- *Vertical, single-reference excited states.* TD-DFT predicts where a molecule absorbs, but
-  not how efficiently it converts that energy into heat.
+  water. The errors of several pKa units in the exploratory cycle described above are
+  consistent with this limitation, although the level of theory may also contribute.
+- *Vertical, single-reference excited states.* TD-DFT gives vertical excitation energies; it
+  does not describe band shapes or how efficiently the molecule converts the absorbed energy
+  into heat.
 - *Partial benchmarking of the functional error.* The protonated MAA chromophore is
   cyanine-like, and TD-DFT is known to overestimate excitation energies systematically for
-  such systems. Wave-function reference calculations are in progress; at the triple-zeta level
-  the remaining calculations are beyond what a laptop can run comfortably, which makes them
-  the main resource bottleneck.
+  such systems. For mycosporine-glycine:valine (monoanion), ωB97X-D3 gives 4.20 eV for S1,
+  against 3.41–3.62 eV from STEOM-DLPNO-CCSD with double-zeta basis sets and 3.70 eV
+  (335 nm) from experiment. The triple-zeta reference calculations failed on the laptop and
+  remain the main resource bottleneck (see [docs/METHODS.md](docs/METHODS.md), §9).
 - *Protonation state is assigned, not calculated.* The predominant species follows from the
   chemistry of the ionizable groups and from published evidence, checked against same-charge
-  tautomers, rather than from a calibrated free-energy cycle.
+  tautomers, rather than from a calibrated free-energy cycle. The tautomer check removes the
+  proton constant, but not the differential continuum-solvation error between a neutral
+  tautomer and a zwitterion, which is not quantified here.
 - *Not yet run.* A direct comparison against structures rebuilt exactly as the published
   docking studies built them. This comparison would provide a quantitative test of the
   central argument of the paper.
@@ -306,6 +311,17 @@ are not co-authors of this work.
 Use of AI tools. Parts of `maaqc.py` were written with the help of Claude Code (Anthropic).
 All scientific choices, calculations and outputs were designed, reviewed and verified by the
 author, who takes full responsibility for them. This follows the MDPI policy on generative AI.
+
+## References
+
+- Ho, J.; Coote, M. L. A universal approach for continuum solvent pKa calculations: are we
+  there yet? *Theor. Chem. Acc.* **2010**, *125*, 3–21.
+  [doi:10.1007/s00214-009-0667-0](https://doi.org/10.1007/s00214-009-0667-0)
+- Ho, J. Are thermodynamic cycles necessary for continuum solvent calculation of pKas and
+  reduction potentials? *Phys. Chem. Chem. Phys.* **2015**.
+  [doi:10.1039/c4cp04538f](https://doi.org/10.1039/c4cp04538f)
+
+Further method references are listed in [docs/METHODS.md](docs/METHODS.md).
 
 ## Citation
 
